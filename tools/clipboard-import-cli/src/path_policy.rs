@@ -2,11 +2,12 @@ use std::{
     ffi::OsString,
     fs, io,
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use cap_fs_ext::DirExt;
 use cap_std::{ambient_authority, fs::Dir};
-use clipboard_store::StoreConfig;
+use clipboard_store::{StorageBoundaryLease, StoreConfig};
 
 use crate::CliFailure;
 
@@ -18,19 +19,38 @@ pub(crate) struct ValidatedImportPaths {
     pub(crate) data_dir: PathBuf,
     pub(crate) database_path: PathBuf,
     pub(crate) blob_root: PathBuf,
+    storage_boundary: Arc<StorageBoundaryLease>,
+}
+
+impl ValidatedImportPaths {
+    pub(crate) fn store_config(&self) -> StoreConfig {
+        StoreConfig::new(&self.database_path)
+            .with_blob_root(&self.blob_root)
+            .with_storage_boundary(Arc::clone(&self.storage_boundary))
+    }
 }
 
 pub(crate) fn prepare_import_paths(
     source: &Path,
     data_dir: &Path,
 ) -> Result<ValidatedImportPaths, CliFailure> {
-    prepare_import_paths_with_component_hook(source, data_dir, |_| {})
+    prepare_import_paths_with_hooks(source, data_dir, |_| {}, |_| {})
 }
 
+#[cfg(test)]
 fn prepare_import_paths_with_component_hook(
     source: &Path,
     data_dir: &Path,
+    before_component_create: impl FnMut(&Path),
+) -> Result<ValidatedImportPaths, CliFailure> {
+    prepare_import_paths_with_hooks(source, data_dir, before_component_create, |_| {})
+}
+
+fn prepare_import_paths_with_hooks(
+    source: &Path,
+    data_dir: &Path,
     mut before_component_create: impl FnMut(&Path),
+    after_lease: impl FnOnce(&ValidatedImportPaths),
 ) -> Result<ValidatedImportPaths, CliFailure> {
     let source = canonical_source(source)?;
     let resolved = resolve_data_candidate(data_dir)?;
@@ -54,15 +74,28 @@ fn prepare_import_paths_with_component_hook(
     let blob_root = data_dir.join(BLOB_DIRECTORY);
     ensure_optional_child(&data_dir, &database_path, ChildKind::File)?;
     ensure_directory_child_no_follow(&data_directory, &data_dir, BLOB_DIRECTORY)?;
-    Ok(ValidatedImportPaths {
+    let config = StoreConfig::new(&database_path).with_blob_root(&blob_root);
+    let storage_boundary = Arc::new(
+        StorageBoundaryLease::create_writer(&config)
+            .map_err(|_| CliFailure::new("unsafe_storage_layout"))?,
+    );
+    let paths = ValidatedImportPaths {
         source,
         data_dir,
         database_path,
         blob_root,
-    })
+        storage_boundary,
+    };
+    after_lease(&paths);
+    verify_created_storage(&paths)?;
+    Ok(paths)
 }
 
 pub(crate) fn verify_created_storage(paths: &ValidatedImportPaths) -> Result<(), CliFailure> {
+    paths
+        .storage_boundary
+        .validate()
+        .map_err(|_| CliFailure::new("unsafe_storage_layout"))?;
     ensure_exact_directory(&paths.data_dir)?;
     ensure_existing_child(&paths.data_dir, &paths.database_path, ChildKind::File)?;
     ensure_existing_child(&paths.data_dir, &paths.blob_root, ChildKind::Directory)
@@ -289,7 +322,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::prepare_import_paths_with_component_hook;
+    use super::{
+        BLOB_DIRECTORY, DATABASE_FILENAME, prepare_import_paths_with_component_hook,
+        prepare_import_paths_with_hooks,
+    };
 
     #[cfg(unix)]
     #[test]
@@ -322,5 +358,38 @@ mod tests {
             b"unchanged"
         );
         assert!(!outside.join("data").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_data_directory_replacement_after_lease_before_store_handoff() {
+        let temporary = tempdir().expect("temporary directory");
+        let source = temporary.path().join("synthetic-source.json");
+        fs::write(&source, b"synthetic").expect("synthetic source");
+        let data_dir = temporary.path().join("leased-data");
+        let retained = temporary.path().join("retained-data");
+
+        let result = prepare_import_paths_with_hooks(
+            &source,
+            &data_dir,
+            |_| {},
+            |_| {
+                fs::rename(&data_dir, &retained).expect("retain leased directory");
+                fs::create_dir(&data_dir).expect("insert replacement directory");
+                fs::write(data_dir.join("outside-marker"), b"unchanged").expect("outside marker");
+            },
+        );
+
+        let error = match result {
+            Ok(_) => panic!("post-lease replacement must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "unsafe_storage_layout");
+        assert_eq!(
+            fs::read(data_dir.join("outside-marker")).expect("outside marker remains readable"),
+            b"unchanged"
+        );
+        assert!(!data_dir.join(DATABASE_FILENAME).exists());
+        assert!(!data_dir.join(BLOB_DIRECTORY).exists());
     }
 }

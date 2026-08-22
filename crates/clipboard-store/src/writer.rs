@@ -19,8 +19,8 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::{
-    CasError, CasStore, StoreConfig, migrations,
-    reader::{open_reader_connection, open_writer_connection},
+    CasError, CasStore, StorageBoundaryLease, StoreConfig, migrations,
+    reader::{open_reader_connection, open_writer_connection, required_boundary},
 };
 
 pub const WRITER_QUEUE_CAPACITY: usize = 256;
@@ -44,6 +44,8 @@ pub enum StoreError {
     IncompatibleSchema,
     #[error("database does not exist")]
     DatabaseMissing,
+    #[error("storage boundary changed")]
+    StorageBoundary,
     #[error("payload storage is unavailable until CAS storage is configured")]
     PayloadStorageUnavailable,
     #[error(transparent)]
@@ -237,17 +239,40 @@ enum WriteCommand {
 }
 
 impl StoreHandle {
-    pub fn open(config: StoreConfig) -> Result<Self, StoreError> {
-        let cas = CasStore::new(config.blob_root().to_path_buf());
+    pub fn open(mut config: StoreConfig) -> Result<Self, StoreError> {
+        let boundary = match config.storage_boundary() {
+            Some(boundary) => {
+                boundary
+                    .validate_for_config(&config, true)
+                    .map_err(|_| StoreError::StorageBoundary)?;
+                Arc::clone(boundary)
+            }
+            None => {
+                let boundary = Arc::new(
+                    StorageBoundaryLease::create_writer(&config)
+                        .map_err(|_| StoreError::StorageBoundary)?,
+                );
+                config.set_storage_boundary(Arc::clone(&boundary));
+                boundary
+            }
+        };
+        let cas = CasStore::with_storage_boundary(
+            config.blob_root().to_path_buf(),
+            Arc::clone(&boundary),
+        );
         let mut connection = open_writer_connection(&config)?;
         migrations().apply(&mut connection)?;
+        boundary
+            .validate()
+            .map_err(|_| StoreError::StorageBoundary)?;
 
         let (tx, mut rx) = mpsc::channel(WRITER_QUEUE_CAPACITY);
+        let writer_boundary = Arc::clone(&boundary);
         thread::Builder::new()
             .name("clipboard-db-writer".to_owned())
             .spawn(move || {
                 while let Some(command) = rx.blocking_recv() {
-                    handle_command(&mut connection, &cas, command);
+                    handle_command(&mut connection, &cas, &writer_boundary, command);
                 }
             })
             .map_err(StoreError::WriterThreadSpawn)?;
@@ -413,7 +438,11 @@ impl StoreHandle {
             return Err(StoreError::InjectedImportStatusFailure);
         }
         let connection = open_reader_connection(&self.config)?;
-        read_import_status(&connection, run_id)
+        let result = read_import_status(&connection, run_id);
+        required_boundary(&self.config)?
+            .validate()
+            .map_err(|_| StoreError::StorageBoundary)?;
+        result
     }
 
     #[doc(hidden)]
@@ -441,33 +470,54 @@ impl StoreHandle {
         operation: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, StoreError> {
         let connection = open_reader_connection(&self.config)?;
-        Ok(operation(&connection)?)
+        let result = operation(&connection);
+        required_boundary(&self.config)?
+            .validate()
+            .map_err(|_| StoreError::StorageBoundary)?;
+        Ok(result?)
     }
 }
 
-fn handle_command(connection: &mut Connection, cas: &CasStore, command: WriteCommand) {
+fn handle_command(
+    connection: &mut Connection,
+    cas: &CasStore,
+    boundary: &StorageBoundaryLease,
+    command: WriteCommand,
+) {
     match command {
         WriteCommand::Ingest { input, reply } => {
-            let _ = reply.send(ingest(connection, cas, &input));
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                ingest(connection, cas, &input)
+            }));
         }
         WriteCommand::SetPinned {
             event_id,
             pinned,
             reply,
         } => {
-            let _ = reply.send(set_pinned(connection, event_id, pinned));
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                set_pinned(connection, event_id, pinned)
+            }));
         }
         WriteCommand::DeleteEvent { event_id, reply } => {
-            let _ = reply.send(delete_event(connection, event_id));
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                delete_event(connection, event_id)
+            }));
         }
         WriteCommand::BeginImport { input, reply } => {
-            let _ = reply.send(begin_import(connection, &input));
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                begin_import(connection, &input)
+            }));
         }
         WriteCommand::InjectBeginImportFailure { reply } => {
-            let _ = reply.send(Err(StoreError::InjectedImportPersistenceFailure));
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                Err(StoreError::InjectedImportPersistenceFailure)
+            }));
         }
         WriteCommand::ResumeImport { input, reply } => {
-            let _ = reply.send(resume_import(connection, &input));
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                resume_import(connection, &input)
+            }));
         }
         WriteCommand::ImportBatch {
             run_id,
@@ -475,20 +525,18 @@ fn handle_command(connection: &mut Connection, cas: &CasStore, command: WriteCom
             candidates,
             reply,
         } => {
-            let _ = reply.send(import_batch(
-                connection,
-                cas,
-                run_id,
-                generation,
-                &candidates,
-            ));
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                import_batch(connection, cas, run_id, generation, &candidates)
+            }));
         }
         WriteCommand::FinishImport {
             run_id,
             generation,
             reply,
         } => {
-            let _ = reply.send(finish_import(connection, run_id, generation));
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                finish_import(connection, run_id, generation)
+            }));
         }
         WriteCommand::FailImport {
             run_id,
@@ -496,9 +544,25 @@ fn handle_command(connection: &mut Connection, cas: &CasStore, command: WriteCom
             error_code,
             reply,
         } => {
-            let _ = reply.send(fail_import(connection, run_id, generation, &error_code));
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                fail_import(connection, run_id, generation, &error_code)
+            }));
         }
     }
+}
+
+fn with_storage_boundary<T>(
+    boundary: &StorageBoundaryLease,
+    operation: impl FnOnce() -> Result<T, StoreError>,
+) -> Result<T, StoreError> {
+    boundary
+        .validate()
+        .map_err(|_| StoreError::StorageBoundary)?;
+    let result = operation();
+    boundary
+        .validate()
+        .map_err(|_| StoreError::StorageBoundary)?;
+    result
 }
 
 fn ingest(

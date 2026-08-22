@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 
+mod boundary;
 mod cas;
 mod config;
 mod migrations;
 mod reader;
 mod writer;
 
+pub use boundary::{StorageBoundaryError, StorageBoundaryLease};
 pub use cas::{CasBlob, CasError, CasStore};
 pub use config::StoreConfig;
 pub use migrations::migrations;

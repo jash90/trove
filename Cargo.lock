@@ -315,6 +315,8 @@ name = "clipboard-store"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "cap-fs-ext",
+ "cap-std",
  "clipboard-core",
  "rusqlite",
  "tempfile",

@@ -3,9 +3,12 @@ use clipboard_core::{
 };
 use clipboard_store::{
     BeginImportRun, ImportSourceKind, MAX_SEARCH_DERIVATION_BYTES,
-    MAX_SEARCH_DERIVATIONS_PER_CONTENT, MAX_SEARCH_DOCUMENT_BYTES, ReadOnlyStore, StoreConfig,
-    StoreError, StoreHandle, StoreImportCandidate, WRITER_QUEUE_CAPACITY, migrations,
+    MAX_SEARCH_DERIVATIONS_PER_CONTENT, MAX_SEARCH_DOCUMENT_BYTES, ReadOnlyStore,
+    StorageBoundaryLease, StoreConfig, StoreError, StoreHandle, StoreImportCandidate,
+    WRITER_QUEUE_CAPACITY, migrations,
 };
+
+use std::{fs, sync::Arc};
 
 fn text_capture(value: &str, captured_at_ms: i64) -> CaptureInput {
     CaptureInput {
@@ -1148,4 +1151,91 @@ async fn sql_enforces_search_row_count_and_utf8_byte_budgets() {
 #[test]
 fn writer_queue_capacity_is_bounded_to_256_commands() {
     assert_eq!(WRITER_QUEUE_CAPACITY, 256);
+}
+
+fn leased_store_config(data_dir: &std::path::Path) -> (StoreConfig, Arc<StorageBoundaryLease>) {
+    fs::create_dir(data_dir).unwrap();
+    let config =
+        StoreConfig::new(data_dir.join("clipboard.db")).with_blob_root(data_dir.join("blobs"));
+    let lease = Arc::new(StorageBoundaryLease::create_writer(&config).unwrap());
+    (config.with_storage_boundary(Arc::clone(&lease)), lease)
+}
+
+#[cfg(unix)]
+fn replace_leased_data_directory(data_dir: &std::path::Path, retained: &std::path::Path) {
+    fs::rename(data_dir, retained).unwrap();
+    fs::create_dir(data_dir).unwrap();
+    fs::write(data_dir.join("outside-marker"), b"unchanged").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn leased_boundary_rejects_whole_data_directory_replacement_before_store_open() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let data_dir = sandbox.path().join("leased-data");
+    let retained = sandbox.path().join("retained-data");
+    let (config, _lease) = leased_store_config(&data_dir);
+    replace_leased_data_directory(&data_dir, &retained);
+
+    let error = match StoreHandle::open(config) {
+        Ok(_) => panic!("replacement unexpectedly opened"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, StoreError::StorageBoundary));
+    assert_eq!(error.to_string(), "storage boundary changed");
+    assert_eq!(
+        fs::read(data_dir.join("outside-marker")).unwrap(),
+        b"unchanged"
+    );
+    assert!(!data_dir.join("clipboard.db").exists());
+    assert!(!data_dir.join("blobs").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn leased_boundary_rejects_ancestor_substitution_even_when_data_identity_is_unchanged() {
+    use std::os::unix::fs::symlink;
+
+    let sandbox = tempfile::tempdir().unwrap();
+    let ancestor = sandbox.path().join("ancestor");
+    let retained_ancestor = sandbox.path().join("retained-ancestor");
+    fs::create_dir(&ancestor).unwrap();
+    let data_dir = ancestor.join("leased-data");
+    let (config, _lease) = leased_store_config(&data_dir);
+    fs::rename(&ancestor, &retained_ancestor).unwrap();
+    symlink(&retained_ancestor, &ancestor).unwrap();
+
+    let error = match StoreHandle::open(config) {
+        Ok(_) => panic!("ancestor substitution unexpectedly opened"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, StoreError::StorageBoundary));
+    assert_eq!(error.to_string(), "storage boundary changed");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn writer_retains_lease_and_rejects_replacement_before_ingest_or_cas_work() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let data_dir = sandbox.path().join("leased-data");
+    let retained = sandbox.path().join("retained-data");
+    let (config, lease) = leased_store_config(&data_dir);
+    let store = StoreHandle::open(config).unwrap();
+    drop(lease);
+    replace_leased_data_directory(&data_dir, &retained);
+    let mut capture = text_capture("synthetic image bytes", 1_000);
+    capture.kind = ContentKind::Image;
+    capture.primary_mime = "image/png".to_owned();
+
+    let error = store.ingest(capture).await.unwrap_err();
+
+    assert!(matches!(error, StoreError::StorageBoundary));
+    assert_eq!(
+        fs::read(data_dir.join("outside-marker")).unwrap(),
+        b"unchanged"
+    );
+    assert!(!data_dir.join("clipboard.db").exists());
+    assert!(!data_dir.join("blobs").exists());
 }

@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 clipboard-core = { path = "../clipboard-core" }
 blake3.workspace = true
+cap-fs-ext.workspace = true
+cap-std.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

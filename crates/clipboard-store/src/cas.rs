@@ -1,14 +1,20 @@
 use std::{
     collections::BTreeSet,
+    ffi::{OsStr, OsString},
     fmt,
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
+use cap_std::fs::{Dir as CapDir, File as CapFile, OpenOptions as CapOpenOptions};
 use clipboard_core::ContentHash;
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::StorageBoundaryLease;
 
 #[derive(Debug, Error)]
 pub enum CasError {
@@ -43,6 +49,7 @@ impl fmt::Debug for CasBlob {
 #[derive(Clone)]
 pub struct CasStore {
     root: PathBuf,
+    storage_boundary: Option<Arc<StorageBoundaryLease>>,
     #[cfg(test)]
     test_failures: Vec<TestFailure>,
 }
@@ -57,6 +64,19 @@ impl CasStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
+            storage_boundary: None,
+            #[cfg(test)]
+            test_failures: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_storage_boundary(
+        root: impl Into<PathBuf>,
+        storage_boundary: Arc<StorageBoundaryLease>,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            storage_boundary: Some(storage_boundary),
             #[cfg(test)]
             test_failures: Vec::new(),
         }
@@ -67,6 +87,16 @@ impl CasStore {
     }
 
     pub fn put(&self, bytes: &[u8]) -> Result<CasBlob, CasError> {
+        self.with_valid_boundary(|| {
+            if self.storage_boundary.is_some() {
+                self.put_leased(bytes)
+            } else {
+                self.put_inner(bytes)
+            }
+        })
+    }
+
+    fn put_inner(&self, bytes: &[u8]) -> Result<CasBlob, CasError> {
         let hash = *blake3::hash(bytes).as_bytes();
         let hex_hash = blake3::Hash::from(hash).to_hex().to_string();
         let relpath = format!("{}/{hex_hash}", &hex_hash[..2]);
@@ -127,6 +157,16 @@ impl CasStore {
     }
 
     pub fn read(&self, relpath: &str) -> Result<Vec<u8>, CasError> {
+        self.with_valid_boundary(|| {
+            if self.storage_boundary.is_some() {
+                self.read_leased(relpath)
+            } else {
+                self.read_inner(relpath)
+            }
+        })
+    }
+
+    fn read_inner(&self, relpath: &str) -> Result<Vec<u8>, CasError> {
         let (shard_name, blob_name) = split_relpath(relpath)?;
         let root = self.existing_root()?;
         let shard = self.validate_existing_directory(&root, &root.join(shard_name))?;
@@ -141,6 +181,16 @@ impl CasStore {
     }
 
     pub fn remove_orphans(&self, live_relpaths: &BTreeSet<String>) -> Result<(), CasError> {
+        self.with_valid_boundary(|| {
+            if self.storage_boundary.is_some() {
+                self.remove_orphans_leased(live_relpaths)
+            } else {
+                self.remove_orphans_inner(live_relpaths)
+            }
+        })
+    }
+
+    fn remove_orphans_inner(&self, live_relpaths: &BTreeSet<String>) -> Result<(), CasError> {
         if matches!(fs::symlink_metadata(&self.root), Err(error) if error.kind() == io::ErrorKind::NotFound)
         {
             return Ok(());
@@ -174,6 +224,164 @@ impl CasStore {
                 self.read_existing_blob(&root, &path, &relpath)?;
                 if !live_relpaths.contains(&relpath) {
                     fs::remove_file(path).map_err(CasError::Io)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn with_valid_boundary<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, CasError>,
+    ) -> Result<T, CasError> {
+        self.validate_storage_boundary()?;
+        let result = operation();
+        self.validate_storage_boundary()?;
+        result
+    }
+
+    fn validate_storage_boundary(&self) -> Result<(), CasError> {
+        if let Some(boundary) = &self.storage_boundary {
+            boundary
+                .validate_for_cas(&self.root)
+                .map_err(|_| CasError::FilesystemBoundary)?;
+        }
+        Ok(())
+    }
+
+    fn leased_root(&self) -> Result<CapDir, CasError> {
+        self.storage_boundary
+            .as_ref()
+            .ok_or(CasError::FilesystemBoundary)?
+            .clone_blob_directory()
+            .map_err(|_| CasError::FilesystemBoundary)
+    }
+
+    fn put_leased(&self, bytes: &[u8]) -> Result<CasBlob, CasError> {
+        let hash = *blake3::hash(bytes).as_bytes();
+        let hex_hash = blake3::Hash::from(hash).to_hex().to_string();
+        let shard_name = &hex_hash[..2];
+        let relpath = format!("{shard_name}/{hex_hash}");
+        let root = self.leased_root()?;
+        let shard = ensure_cap_directory(&root, shard_name)?;
+        let temporary_directory = ensure_cap_directory(&root, ".tmp")?;
+
+        if read_cap_blob(&shard, OsStr::new(&hex_hash), &relpath)?.is_some() {
+            return Ok(CasBlob {
+                hash,
+                relpath,
+                byte_size: bytes.len() as u64,
+            });
+        }
+
+        let temporary_name = OsString::from(Uuid::now_v7().simple().to_string());
+        let mut options = CapOpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        let mut temporary = temporary_directory
+            .open_with(&temporary_name, &options)
+            .map_err(CasError::Io)?;
+        let temporary_identity =
+            CapFileIdentity::from_metadata(&temporary.metadata().map_err(CasError::Io)?)?;
+        let mut guard = CapTempBlob::new(
+            temporary_directory.try_clone().map_err(CasError::Io)?,
+            temporary_name.clone(),
+            temporary_identity,
+        );
+
+        let write_result = (|| -> Result<(), CasError> {
+            self.write_all(&mut temporary, bytes)
+                .map_err(CasError::Io)?;
+            self.sync_cap_file(&temporary).map_err(CasError::Io)?;
+            validate_named_cap_file(&temporary_directory, &temporary_name, temporary_identity)?;
+            drop(temporary);
+            self.rename_cap(
+                &temporary_directory,
+                &temporary_name,
+                &shard,
+                OsStr::new(&hex_hash),
+            )
+            .map_err(CasError::Io)
+        })();
+        match write_result {
+            Ok(()) => {
+                guard.disarm();
+                let stored = read_cap_blob(&shard, OsStr::new(&hex_hash), &relpath)?
+                    .ok_or_else(|| CasError::Io(io::Error::other("CAS blob is not present")))?;
+                if stored.len() != bytes.len() {
+                    return Err(CasError::CorruptBlob);
+                }
+                Ok(CasBlob {
+                    hash,
+                    relpath,
+                    byte_size: bytes.len() as u64,
+                })
+            }
+            Err(CasError::Io(source)) if source.kind() == io::ErrorKind::AlreadyExists => {
+                let result = read_cap_blob(&shard, OsStr::new(&hex_hash), &relpath)?
+                    .ok_or(CasError::Io(source))
+                    .map(|_| CasBlob {
+                        hash,
+                        relpath,
+                        byte_size: bytes.len() as u64,
+                    });
+                guard.cleanup()?;
+                result
+            }
+            Err(error) => {
+                guard.cleanup()?;
+                Err(error)
+            }
+        }
+    }
+
+    fn read_leased(&self, relpath: &str) -> Result<Vec<u8>, CasError> {
+        let (shard_name, blob_name) = split_relpath(relpath)?;
+        let root = self.leased_root()?;
+        let shard = open_cap_directory(&root, shard_name)?;
+        read_cap_blob(&shard, OsStr::new(blob_name), relpath)?.ok_or_else(|| {
+            CasError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                "CAS blob is not present",
+            ))
+        })
+    }
+
+    fn remove_orphans_leased(&self, live_relpaths: &BTreeSet<String>) -> Result<(), CasError> {
+        let root = self.leased_root()?;
+        let live_relpaths = live_relpaths
+            .iter()
+            .filter(|relpath| is_valid_relpath(relpath))
+            .collect::<BTreeSet<_>>();
+        for entry in root.entries().map_err(CasError::Io)? {
+            let entry = entry.map_err(CasError::Io)?;
+            let name = match entry.file_name().into_string() {
+                Ok(name) => name,
+                Err(_) => continue,
+            };
+            if name == ".tmp" {
+                open_cap_directory(&root, &name)?;
+                continue;
+            }
+            if !is_lower_hex(&name, 2) {
+                continue;
+            }
+            let shard = open_cap_directory(&root, &name)?;
+            for blob_entry in shard.entries().map_err(CasError::Io)? {
+                let blob_entry = blob_entry.map_err(CasError::Io)?;
+                let blob_name = match blob_entry.file_name().into_string() {
+                    Ok(name) => name,
+                    Err(_) => continue,
+                };
+                let relpath = format!("{name}/{blob_name}");
+                if !is_valid_relpath(&relpath) {
+                    continue;
+                }
+                read_cap_blob(&shard, OsStr::new(&blob_name), &relpath)?;
+                if !live_relpaths.contains(&relpath) {
+                    shard.remove_file(&blob_name).map_err(CasError::Io)?;
                 }
             }
         }
@@ -274,7 +482,7 @@ impl CasStore {
         result
     }
 
-    fn write_all(&self, file: &mut File, bytes: &[u8]) -> io::Result<()> {
+    fn write_all(&self, file: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
         #[cfg(test)]
         if self.should_fail(TestFailure::Write) {
             return Err(io::Error::other("deterministic test write failure"));
@@ -288,6 +496,28 @@ impl CasStore {
             return Err(io::Error::other("deterministic test sync failure"));
         }
         file.sync_all()
+    }
+
+    fn sync_cap_file(&self, file: &CapFile) -> io::Result<()> {
+        #[cfg(test)]
+        if self.should_fail(TestFailure::Sync) {
+            return Err(io::Error::other("deterministic test sync failure"));
+        }
+        file.sync_all()
+    }
+
+    fn rename_cap(
+        &self,
+        temporary_directory: &CapDir,
+        temporary_name: &OsStr,
+        shard: &CapDir,
+        blob_name: &OsStr,
+    ) -> io::Result<()> {
+        #[cfg(test)]
+        if self.should_fail(TestFailure::Rename) {
+            return Err(io::Error::other("deterministic test rename failure"));
+        }
+        temporary_directory.rename(temporary_name, shard, blob_name)
     }
 
     fn rename(&self, temporary_path: &Path, final_path: &Path, _bytes: &[u8]) -> io::Result<()> {
@@ -309,6 +539,133 @@ impl CasStore {
     #[cfg(test)]
     fn should_fail(&self, failure: TestFailure) -> bool {
         self.test_failures.contains(&failure)
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct CapFileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl CapFileIdentity {
+    fn from_metadata(metadata: &cap_std::fs::Metadata) -> Result<Self, CasError> {
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || MetadataExt::nlink(metadata) != 1
+        {
+            return Err(CasError::FilesystemBoundary);
+        }
+        Ok(Self {
+            device: MetadataExt::dev(metadata),
+            inode: MetadataExt::ino(metadata),
+        })
+    }
+}
+
+fn ensure_cap_directory(parent: &CapDir, name: &str) -> Result<CapDir, CasError> {
+    match parent.create_dir(name) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(CasError::Io(error)),
+    }
+    open_cap_directory(parent, name)
+}
+
+fn open_cap_directory(parent: &CapDir, name: &str) -> Result<CapDir, CasError> {
+    let directory = parent
+        .open_dir_nofollow(name)
+        .map_err(|_| CasError::FilesystemBoundary)?;
+    let metadata = directory.dir_metadata().map_err(CasError::Io)?;
+    if !metadata.is_dir() || MetadataExt::nlink(&metadata) == 0 {
+        return Err(CasError::FilesystemBoundary);
+    }
+    Ok(directory)
+}
+
+fn validate_named_cap_file(
+    directory: &CapDir,
+    name: &OsStr,
+    expected: CapFileIdentity,
+) -> Result<(), CasError> {
+    let metadata = directory.symlink_metadata(name).map_err(CasError::Io)?;
+    let identity = CapFileIdentity::from_metadata(&metadata)?;
+    if identity != expected {
+        return Err(CasError::FilesystemBoundary);
+    }
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = directory
+        .open_with(name, &options)
+        .map_err(|_| CasError::FilesystemBoundary)?;
+    let handle_identity = CapFileIdentity::from_metadata(&file.metadata().map_err(CasError::Io)?)?;
+    if handle_identity != expected {
+        return Err(CasError::FilesystemBoundary);
+    }
+    Ok(())
+}
+
+fn read_cap_blob(
+    directory: &CapDir,
+    name: &OsStr,
+    relpath: &str,
+) -> Result<Option<Vec<u8>>, CasError> {
+    let metadata = match directory.symlink_metadata(name) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(CasError::Io(error)),
+    };
+    let identity = CapFileIdentity::from_metadata(&metadata)?;
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file = directory
+        .open_with(name, &options)
+        .map_err(|_| CasError::FilesystemBoundary)?;
+    let handle_identity = CapFileIdentity::from_metadata(&file.metadata().map_err(CasError::Io)?)?;
+    if handle_identity != identity {
+        return Err(CasError::FilesystemBoundary);
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(CasError::Io)?;
+    validate_named_cap_file(directory, name, identity)?;
+    if blake3::hash(&bytes).to_hex().as_str() != &relpath[3..] {
+        return Err(CasError::CorruptBlob);
+    }
+    Ok(Some(bytes))
+}
+
+struct CapTempBlob {
+    directory: CapDir,
+    name: OsString,
+    identity: CapFileIdentity,
+    active: bool,
+}
+
+impl CapTempBlob {
+    fn new(directory: CapDir, name: OsString, identity: CapFileIdentity) -> Self {
+        Self {
+            directory,
+            name,
+            identity,
+            active: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.active = false;
+    }
+
+    fn cleanup(&mut self) -> Result<(), CasError> {
+        if !self.active {
+            return Ok(());
+        }
+        validate_named_cap_file(&self.directory, &self.name, self.identity)
+            .map_err(as_cleanup_error)?;
+        self.directory
+            .remove_file(&self.name)
+            .map_err(CasError::CleanupFailed)?;
+        self.active = false;
+        Ok(())
     }
 }
 
@@ -415,6 +772,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let cas = CasStore {
             root: directory.path().join("blobs"),
+            storage_boundary: None,
             test_failures: vec![TestFailure::Write],
         };
 
@@ -428,6 +786,7 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let cas = CasStore {
                 root: directory.path().join("blobs"),
+                storage_boundary: None,
                 test_failures: vec![failure],
             };
 
@@ -441,6 +800,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let cas = CasStore {
             root: directory.path().join("blobs"),
+            storage_boundary: None,
             test_failures: vec![TestFailure::Write, TestFailure::Cleanup],
         };
 
@@ -455,6 +815,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let cas = CasStore {
             root: directory.path().join("blobs"),
+            storage_boundary: None,
             test_failures: vec![TestFailure::DestinationAppears],
         };
 

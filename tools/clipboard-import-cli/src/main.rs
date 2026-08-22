@@ -10,7 +10,7 @@ use clipboard_core::ContentKind;
 use clipboard_import::{
     ImportError, ImportParseReport, ImportService, ImportSource, detect_export, parse_export_report,
 };
-use clipboard_store::{StoreConfig, StoreError, StoreHandle};
+use clipboard_store::{StoreError, StoreHandle};
 use serde::Serialize;
 
 use path_policy::prepare_import_paths;
@@ -189,8 +189,7 @@ async fn import(
     data_dir: &std::path::Path,
 ) -> Result<ImportOutput, CliFailure> {
     let paths = prepare_import_paths(source, data_dir)?;
-    let config = StoreConfig::new(&paths.database_path).with_blob_root(&paths.blob_root);
-    let store = StoreHandle::open(config).map_err(store_failure)?;
+    let store = StoreHandle::open(paths.store_config()).map_err(store_failure)?;
     path_policy::verify_created_storage(&paths)?;
     let service = ImportService::new(store);
     let summary = service
@@ -274,6 +273,7 @@ pub(crate) fn store_failure(error: StoreError) -> CliFailure {
         StoreError::IncompatibleSchema | StoreError::UnsupportedSchemaVersion(_) => {
             CliFailure::new("incompatible_database")
         }
+        StoreError::StorageBoundary => CliFailure::new("unsafe_storage_layout"),
         _ => CliFailure::new("storage_unavailable"),
     }
 }
