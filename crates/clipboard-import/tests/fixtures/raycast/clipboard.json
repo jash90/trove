@@ -1,0 +1,20 @@
+[
+  {
+    "createdAt": "2026-01-02T03:04:05Z",
+    "modifiedAt": "2026-01-02T03:04:05Z",
+    "category": "text",
+    "copyCount": 3,
+    "applicationPath": "/Applications/Synthetic.app",
+    "text": "fixture text",
+    "textContent": "fixture text"
+  },
+  {
+    "createdAt": "2026-01-02T03:05:05Z",
+    "modifiedAt": "2026-01-02T03:05:05Z",
+    "category": "image",
+    "copyCount": 1,
+    "applicationPath": "/Applications/Synthetic.app",
+    "text": "",
+    "imageHash": "synthetic-image-hash"
+  }
+]

@@ -1,0 +1,3 @@
+copied_at,type,source_app,bundle_id,pinned,file_url,text,ocr_text,has_image
+2026-01-02T03:04:05Z,text,Synthetic App,com.example.synthetic,false,,"first line
+second line",,false
