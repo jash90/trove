@@ -30,6 +30,46 @@ pub const PREPARED_SESSION_CAPACITY: usize = 32;
 pub const PREPARED_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const PREPARED_SESSION_OVERHEAD_BYTES: usize = 1024;
 
+/// Hard admission limits shared by analyzed sessions, resume preparations, CLI imports, and
+/// active workers. Production reserves one full per-source allowance before every parse so the
+/// number and aggregate memory envelope remain finite even while parsing.
+#[derive(Clone, Copy)]
+pub struct ImportAdmissionLimits {
+    max_sources: usize,
+    max_source_bytes: usize,
+    total_bytes: usize,
+}
+
+impl ImportAdmissionLimits {
+    #[doc(hidden)]
+    pub const fn new(max_sources: usize, max_source_bytes: usize, total_bytes: usize) -> Self {
+        assert!(max_sources > 0, "source admission count must be positive");
+        assert!(
+            max_source_bytes > 0,
+            "source admission size must be positive"
+        );
+        assert!(
+            total_bytes >= max_source_bytes,
+            "aggregate admission size must fit one source"
+        );
+        Self {
+            max_sources,
+            max_source_bytes,
+            total_bytes,
+        }
+    }
+}
+
+impl Default for ImportAdmissionLimits {
+    fn default() -> Self {
+        Self::new(
+            PREPARED_SESSION_CAPACITY,
+            MAX_PREPARED_SOURCE_BYTES,
+            MAX_PREPARED_CACHE_BYTES,
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportRunHandle {
@@ -87,6 +127,7 @@ pub struct ImportWorkerPolicy {
     persistence_started: Option<Arc<tokio::sync::Notify>>,
     persistence_gate: Option<Arc<tokio::sync::Notify>>,
     fail_next_persistence: Arc<AtomicBool>,
+    invalid_lease_offset_once: Arc<AtomicBool>,
 }
 
 impl ImportWorkerPolicy {
@@ -98,6 +139,7 @@ impl ImportWorkerPolicy {
             persistence_started: None,
             persistence_gate: None,
             fail_next_persistence: Arc::new(AtomicBool::new(false)),
+            invalid_lease_offset_once: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -111,6 +153,7 @@ impl ImportWorkerPolicy {
             persistence_started: None,
             persistence_gate: None,
             fail_next_persistence: Arc::new(AtomicBool::new(false)),
+            invalid_lease_offset_once: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -126,6 +169,7 @@ impl ImportWorkerPolicy {
             persistence_started: None,
             persistence_gate: None,
             fail_next_persistence: Arc::new(AtomicBool::new(false)),
+            invalid_lease_offset_once: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -141,6 +185,7 @@ impl ImportWorkerPolicy {
             persistence_started: Some(persistence_started),
             persistence_gate: Some(persistence_gate),
             fail_next_persistence: Arc::new(AtomicBool::new(false)),
+            invalid_lease_offset_once: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -148,6 +193,14 @@ impl ImportWorkerPolicy {
     pub fn fail_next_persistence() -> Self {
         Self {
             fail_next_persistence: Arc::new(AtomicBool::new(true)),
+            ..Self::unbounded()
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn invalid_lease_offset_once() -> Self {
+        Self {
+            invalid_lease_offset_once: Arc::new(AtomicBool::new(true)),
             ..Self::unbounded()
         }
     }
@@ -164,6 +217,7 @@ pub struct ImportService {
     store: StoreHandle,
     worker_policy: Arc<ImportWorkerPolicy>,
     prepared_sessions: Arc<Mutex<PreparedSessions>>,
+    admission_budget: AdmissionBudget,
     analysis_gate: Arc<Mutex<()>>,
 }
 
@@ -174,10 +228,20 @@ impl ImportService {
 
     #[doc(hidden)]
     pub fn with_worker_policy(store: StoreHandle, worker_policy: ImportWorkerPolicy) -> Self {
+        Self::with_worker_policy_and_limits(store, worker_policy, ImportAdmissionLimits::default())
+    }
+
+    #[doc(hidden)]
+    pub fn with_worker_policy_and_limits(
+        store: StoreHandle,
+        worker_policy: ImportWorkerPolicy,
+        admission_limits: ImportAdmissionLimits,
+    ) -> Self {
         Self {
             store,
             worker_policy: Arc::new(worker_policy),
             prepared_sessions: Arc::new(Mutex::new(PreparedSessions::default())),
+            admission_budget: AdmissionBudget::new(admission_limits),
             analysis_gate: Arc::new(Mutex::new(())),
         }
     }
@@ -188,15 +252,15 @@ impl ImportService {
 
     pub fn analyze(&self, path: impl AsRef<Path>) -> Result<ImportAnalysis, ImportError> {
         let source = self.prepare(path.as_ref())?;
-        let total = source.total_records;
-        let candidate_records = source.candidate_records();
-        let failed = source.initial_failed_records();
+        let total = source.source.total_records;
+        let candidate_records = source.source.candidate_records();
+        let failed = source.source.initial_failed_records();
         let analysis_id = Uuid::now_v7();
         let analysis_id = self
             .prepared_sessions
             .lock()
             .map_err(|_| ImportError::service("analysis_unavailable"))?
-            .insert(analysis_id, source, Instant::now())?;
+            .insert(analysis_id, source, Instant::now());
         Ok(ImportAnalysis {
             analysis_id,
             total,
@@ -260,22 +324,22 @@ impl ImportService {
             .store
             .resume_import(ResumeImportRun {
                 run_id,
-                source_kind: source.source_kind,
-                source_fingerprint: source.source_fingerprint,
-                total_records: source.total_records,
-                candidate_records: source.candidate_records(),
+                source_kind: source.source.source_kind,
+                source_fingerprint: source.source.source_fingerprint,
+                total_records: source.source.total_records,
+                candidate_records: source.source.candidate_records(),
             })
             .await
             .map_err(map_store_error)?;
         let offset = usize::try_from(lease.next_candidate_offset)
             .map_err(|_| ImportError::service("invalid_run_state"))?;
-        if offset > source.candidates.len() {
+        if offset > source.source.candidates.len() {
             return Err(ImportError::service("invalid_run_state"));
         }
         let worker = self.clone();
         tokio::spawn(async move {
             let _ = worker
-                .run_worker(run_id, lease.generation, source.candidates, offset)
+                .run_worker(run_id, lease.generation, source, offset)
                 .await;
         });
         Ok(ImportRunHandle { run_id })
@@ -286,9 +350,9 @@ impl ImportService {
         path: impl AsRef<Path>,
     ) -> Result<ImportSummary, ImportError> {
         let source = self.prepare(path.as_ref())?;
-        let status = self.persist_run(Uuid::now_v7(), &source).await?;
+        let status = self.persist_run(Uuid::now_v7(), &source.source).await?;
         match self
-            .run_worker(status.run_id, status.generation, source.candidates, 0)
+            .run_worker(status.run_id, status.generation, source, 0)
             .await?
         {
             WorkerCompletion::Completed => self
@@ -318,18 +382,44 @@ impl ImportService {
             .map_err(map_store_error)
     }
 
-    fn prepare(&self, path: &Path) -> Result<PreparedSource, ImportError> {
+    fn prepare(&self, path: &Path) -> Result<PreparedSourceEnvelope, ImportError> {
         let _analysis_permit = self
             .analysis_gate
             .lock()
             .map_err(|_| ImportError::service("analysis_unavailable"))?;
-        prepare_source(path)
+        let mut reservation = self.reserve_preparation()?;
+        let source = prepare_source(path)?;
+        reservation.resize(source.retained_bytes())?;
+        Ok(PreparedSourceEnvelope {
+            source,
+            _reservation: reservation,
+        })
+    }
+
+    fn reserve_preparation(&self) -> Result<AdmissionReservation, ImportError> {
+        self.prepared_sessions
+            .lock()
+            .map_err(|_| ImportError::service("analysis_unavailable"))?
+            .evict_expired(Instant::now());
+        loop {
+            if let Some(reservation) = self.admission_budget.try_reserve()? {
+                return Ok(reservation);
+            }
+            let evicted = self
+                .prepared_sessions
+                .lock()
+                .map_err(|_| ImportError::service("analysis_unavailable"))?
+                .evict_oldest_available();
+            if !evicted {
+                return Err(ImportError::service("analysis_capacity_full"));
+            }
+        }
     }
 
     async fn persist_and_start(
         &self,
         analysis_id: Uuid,
-        source: PreparedSource,
+        source: PreparedSourceEnvelope,
         completion: Arc<PersistenceCompletion>,
     ) {
         if let Some(started) = &self.worker_policy.persistence_started {
@@ -348,37 +438,53 @@ impl ImportService {
                 .await
                 .map_err(map_store_error)
         } else {
-            self.persist_run(analysis_id, &source).await
+            self.persist_run(analysis_id, &source.source).await
         };
         match persisted {
-            Ok(lease) => {
-                if let Ok(mut sessions) = self.prepared_sessions.lock() {
-                    sessions.finish_persisting(analysis_id);
+            Ok(mut lease) => {
+                if self
+                    .worker_policy
+                    .invalid_lease_offset_once
+                    .swap(false, Ordering::AcqRel)
+                {
+                    lease.next_candidate_offset = u64::MAX;
                 }
                 let handle = ImportRunHandle {
                     run_id: analysis_id,
                 };
-                let should_start = match self.status(analysis_id) {
-                    Ok(status) => status.state == ImportRunState::Running,
-                    Err(error) => {
-                        completion.finish(Err(import_error_reason(&error)));
-                        return;
-                    }
-                };
-                if should_start {
+                if lease.state == StoreImportRunState::Running {
                     let offset = match usize::try_from(lease.next_candidate_offset) {
-                        Ok(offset) if offset <= source.candidates.len() => offset,
+                        Ok(offset) if offset <= source.source.candidates.len() => offset,
                         _ => {
+                            if let Ok(mut sessions) = self.prepared_sessions.lock() {
+                                sessions.restore(analysis_id, source, Instant::now());
+                            }
                             completion.finish(Err("invalid_run_state"));
                             return;
                         }
                     };
+                    let marked_started = self
+                        .prepared_sessions
+                        .lock()
+                        .map(|mut sessions| sessions.mark_started(analysis_id));
+                    if !matches!(marked_started, Ok(true)) {
+                        if let Ok(mut sessions) = self.prepared_sessions.lock() {
+                            sessions.restore(analysis_id, source, Instant::now());
+                        }
+                        completion.finish(Err("analysis_unavailable"));
+                        return;
+                    }
                     let worker = self.clone();
                     tokio::spawn(async move {
                         let _ = worker
-                            .run_worker(analysis_id, lease.generation, source.candidates, offset)
+                            .run_worker(analysis_id, lease.generation, source, offset)
                             .await;
                     });
+                    if let Ok(mut sessions) = self.prepared_sessions.lock() {
+                        sessions.finish_started(analysis_id);
+                    }
+                } else if let Ok(mut sessions) = self.prepared_sessions.lock() {
+                    sessions.finish_persisting(analysis_id);
                 }
                 completion.finish(Ok(handle));
             }
@@ -396,15 +502,20 @@ impl ImportService {
         &self,
         run_id: Uuid,
         generation: u64,
-        candidates: Vec<ImportCandidate>,
+        source: PreparedSourceEnvelope,
         offset: usize,
     ) -> Result<WorkerCompletion, ImportError> {
+        let PreparedSourceEnvelope {
+            source,
+            _reservation,
+        } = source;
         let _completion_signal =
             WorkerCompletionSignal(self.worker_policy.completion_signal.clone());
         if let Some(start_gate) = &self.worker_policy.start_gate {
             start_gate.notified().await;
         }
-        let mut remaining = candidates
+        let mut remaining = source
+            .candidates
             .into_iter()
             .skip(offset)
             .enumerate()
@@ -467,47 +578,127 @@ impl ImportService {
     }
 }
 
-#[derive(Default)]
-struct PreparedSessions {
-    sessions: BTreeMap<Uuid, PreparedSession>,
-    insertion_order: VecDeque<Uuid>,
-    retained_bytes: usize,
-    limits: PreparedSessionLimits,
+#[derive(Clone)]
+struct AdmissionBudget {
+    ledger: Arc<Mutex<AdmissionLedger>>,
+    limits: ImportAdmissionLimits,
 }
 
-impl PreparedSessions {
-    fn insert(
-        &mut self,
-        analysis_id: Uuid,
-        source: PreparedSource,
-        now: Instant,
-    ) -> Result<Uuid, ImportError> {
-        self.evict_expired(now);
-        let retained_bytes = source.retained_bytes();
+impl AdmissionBudget {
+    fn new(limits: ImportAdmissionLimits) -> Self {
+        Self {
+            ledger: Arc::new(Mutex::new(AdmissionLedger::default())),
+            limits,
+        }
+    }
+
+    fn try_reserve(&self) -> Result<Option<AdmissionReservation>, ImportError> {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| ImportError::service("analysis_unavailable"))?;
+        let Some(retained_bytes) = ledger
+            .retained_bytes
+            .checked_add(self.limits.max_source_bytes)
+        else {
+            return Ok(None);
+        };
+        if ledger.source_count >= self.limits.max_sources
+            || retained_bytes > self.limits.total_bytes
+        {
+            return Ok(None);
+        }
+        ledger.source_count += 1;
+        ledger.retained_bytes = retained_bytes;
+        Ok(Some(AdmissionReservation {
+            ledger: self.ledger.clone(),
+            limits: self.limits,
+            retained_bytes: self.limits.max_source_bytes,
+        }))
+    }
+}
+
+#[derive(Default)]
+struct AdmissionLedger {
+    source_count: usize,
+    retained_bytes: usize,
+}
+
+struct AdmissionReservation {
+    ledger: Arc<Mutex<AdmissionLedger>>,
+    limits: ImportAdmissionLimits,
+    retained_bytes: usize,
+}
+
+impl AdmissionReservation {
+    fn resize(&mut self, retained_bytes: usize) -> Result<(), ImportError> {
         if retained_bytes > self.limits.max_source_bytes {
             return Err(ImportError::service("analysis_too_large"));
         }
-        while self.sessions.len() >= self.limits.count
-            || self
-                .retained_bytes
-                .checked_add(retained_bytes)
-                .is_none_or(|total| total > self.limits.total_bytes)
-        {
-            if !self.evict_oldest_available() {
-                return Err(ImportError::service("analysis_cache_full"));
-            }
+        let mut ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| ImportError::service("analysis_unavailable"))?;
+        let without_reservation = ledger
+            .retained_bytes
+            .checked_sub(self.retained_bytes)
+            .ok_or_else(|| ImportError::service("analysis_unavailable"))?;
+        let resized_total = without_reservation
+            .checked_add(retained_bytes)
+            .ok_or_else(|| ImportError::service("analysis_capacity_full"))?;
+        if resized_total > self.limits.total_bytes {
+            return Err(ImportError::service("analysis_capacity_full"));
         }
-        self.retained_bytes += retained_bytes;
+        ledger.retained_bytes = resized_total;
+        self.retained_bytes = retained_bytes;
+        Ok(())
+    }
+}
+
+impl Drop for AdmissionReservation {
+    fn drop(&mut self) {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ledger.source_count = ledger.source_count.saturating_sub(1);
+        ledger.retained_bytes = ledger.retained_bytes.saturating_sub(self.retained_bytes);
+    }
+}
+
+struct PreparedSourceEnvelope {
+    source: PreparedSource,
+    _reservation: AdmissionReservation,
+}
+
+struct PreparedSessions {
+    sessions: BTreeMap<Uuid, PreparedSession>,
+    insertion_order: VecDeque<Uuid>,
+    ttl: Duration,
+}
+
+impl Default for PreparedSessions {
+    fn default() -> Self {
+        Self {
+            sessions: BTreeMap::new(),
+            insertion_order: VecDeque::new(),
+            ttl: PREPARED_SESSION_TTL,
+        }
+    }
+}
+
+impl PreparedSessions {
+    fn insert(&mut self, analysis_id: Uuid, source: PreparedSourceEnvelope, now: Instant) -> Uuid {
+        self.evict_expired(now);
         self.sessions.insert(
             analysis_id,
             PreparedSession {
                 created_at: now,
-                retained_bytes,
                 state: PreparedSessionState::Available(source),
             },
         );
         self.insertion_order.push_back(analysis_id);
-        Ok(analysis_id)
+        analysis_id
     }
 
     fn begin(&mut self, analysis_id: Uuid, now: Instant) -> BeginPreparedSession {
@@ -524,7 +715,6 @@ impl PreparedSessions {
                     analysis_id,
                     PreparedSession {
                         created_at: session.created_at,
-                        retained_bytes: session.retained_bytes,
                         state: PreparedSessionState::Persisting(completion.clone()),
                     },
                 );
@@ -535,8 +725,17 @@ impl PreparedSessions {
                     analysis_id,
                     PreparedSession {
                         created_at: session.created_at,
-                        retained_bytes: session.retained_bytes,
                         state: PreparedSessionState::Persisting(completion.clone()),
+                    },
+                );
+                BeginPreparedSession::Wait(completion)
+            }
+            PreparedSessionState::Started(completion) => {
+                self.sessions.insert(
+                    analysis_id,
+                    PreparedSession {
+                        created_at: session.created_at,
+                        state: PreparedSessionState::Started(completion.clone()),
                     },
                 );
                 BeginPreparedSession::Wait(completion)
@@ -544,19 +743,30 @@ impl PreparedSessions {
         }
     }
 
-    fn restore(&mut self, analysis_id: Uuid, source: PreparedSource, now: Instant) {
-        let retained_bytes = if let Some(session) = self.sessions.remove(&analysis_id) {
-            session.retained_bytes
-        } else {
-            let retained_bytes = source.retained_bytes();
-            self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
-            retained_bytes
+    fn mark_started(&mut self, analysis_id: Uuid) -> bool {
+        let Some(session) = self.sessions.remove(&analysis_id) else {
+            return false;
+        };
+        let PreparedSessionState::Persisting(completion) = session.state else {
+            self.sessions.insert(analysis_id, session);
+            return false;
         };
         self.sessions.insert(
             analysis_id,
             PreparedSession {
+                created_at: session.created_at,
+                state: PreparedSessionState::Started(completion),
+            },
+        );
+        true
+    }
+
+    fn restore(&mut self, analysis_id: Uuid, source: PreparedSourceEnvelope, now: Instant) {
+        self.sessions.remove(&analysis_id);
+        self.sessions.insert(
+            analysis_id,
+            PreparedSession {
                 created_at: now,
-                retained_bytes,
                 state: PreparedSessionState::Available(source),
             },
         );
@@ -566,11 +776,13 @@ impl PreparedSessions {
     }
 
     fn finish_persisting(&mut self, analysis_id: Uuid) {
-        if let Some(session) = self.sessions.remove(&analysis_id) {
-            self.retained_bytes = self.retained_bytes.saturating_sub(session.retained_bytes);
-        }
+        self.sessions.remove(&analysis_id);
         self.insertion_order
             .retain(|candidate| *candidate != analysis_id);
+    }
+
+    fn finish_started(&mut self, analysis_id: Uuid) {
+        self.finish_persisting(analysis_id);
     }
 
     fn discard(&mut self, analysis_id: Uuid, now: Instant) -> Result<(), ImportError> {
@@ -587,6 +799,9 @@ impl PreparedSessions {
             Some(PreparedSessionState::Persisting(_)) => {
                 Err(ImportError::service("analysis_in_progress"))
             }
+            Some(PreparedSessionState::Started(_)) => {
+                Err(ImportError::service("analysis_in_progress"))
+            }
             None => Err(ImportError::service("analysis_not_found")),
         }
     }
@@ -599,7 +814,7 @@ impl PreparedSessions {
             .filter(|analysis_id| {
                 self.sessions.get(analysis_id).is_some_and(|session| {
                     matches!(session.state, PreparedSessionState::Available(_))
-                        && now.saturating_duration_since(session.created_at) >= self.limits.ttl
+                        && now.saturating_duration_since(session.created_at) >= self.ttl
                 })
             })
             .collect::<Vec<_>>();
@@ -623,39 +838,20 @@ impl PreparedSessions {
     }
 }
 
-#[derive(Clone, Copy)]
-struct PreparedSessionLimits {
-    count: usize,
-    max_source_bytes: usize,
-    total_bytes: usize,
-    ttl: Duration,
-}
-
-impl Default for PreparedSessionLimits {
-    fn default() -> Self {
-        Self {
-            count: PREPARED_SESSION_CAPACITY,
-            max_source_bytes: MAX_PREPARED_SOURCE_BYTES,
-            total_bytes: MAX_PREPARED_CACHE_BYTES,
-            ttl: PREPARED_SESSION_TTL,
-        }
-    }
-}
-
 struct PreparedSession {
     created_at: Instant,
-    retained_bytes: usize,
     state: PreparedSessionState,
 }
 
 enum PreparedSessionState {
-    Available(PreparedSource),
+    Available(PreparedSourceEnvelope),
     Persisting(Arc<PersistenceCompletion>),
+    Started(Arc<PersistenceCompletion>),
 }
 
 enum BeginPreparedSession {
     Start {
-        source: PreparedSource,
+        source: PreparedSourceEnvelope,
         completion: Arc<PersistenceCompletion>,
     },
     Wait(Arc<PersistenceCompletion>),
@@ -998,19 +1194,24 @@ mod tests {
     #[test]
     fn prepared_session_cache_evicts_the_oldest_unconsumed_analysis() {
         let mut sessions = PreparedSessions::default();
+        let budget = AdmissionBudget::new(ImportAdmissionLimits::new(
+            PREPARED_SESSION_CAPACITY,
+            4 * 1024,
+            PREPARED_SESSION_CAPACITY * 4 * 1024,
+        ));
         let now = Instant::now();
         let mut first = None;
         let mut newest = None;
         for index in 0..=PREPARED_SESSION_CAPACITY {
             let fingerprint_byte = u8::try_from(index).unwrap();
             let analysis_id = Uuid::now_v7();
-            sessions
-                .insert(
-                    analysis_id,
-                    empty_source(fingerprint_byte),
-                    now + Duration::from_millis(index as u64),
-                )
-                .unwrap();
+            let source = empty_source(fingerprint_byte);
+            let envelope = admitted_source(&mut sessions, &budget, source);
+            sessions.insert(
+                analysis_id,
+                envelope,
+                now + Duration::from_millis(index as u64),
+            );
             first.get_or_insert(analysis_id);
             newest = Some(analysis_id);
         }
@@ -1023,42 +1224,43 @@ mod tests {
     #[test]
     fn prepared_session_cache_expires_available_entries_at_the_fixed_ttl() {
         let mut sessions = PreparedSessions::default();
+        let budget = AdmissionBudget::new(ImportAdmissionLimits::new(1, 4 * 1024, 4 * 1024));
         let now = Instant::now();
         let analysis_id = Uuid::now_v7();
-        sessions.insert(analysis_id, empty_source(1), now).unwrap();
+        let source = admitted_source(&mut sessions, &budget, empty_source(1));
+        sessions.insert(analysis_id, source, now);
 
         assert!(matches!(
             sessions.begin(analysis_id, now + PREPARED_SESSION_TTL),
             BeginPreparedSession::Missing
         ));
-        assert_eq!(sessions.retained_bytes, 0);
+        let ledger = budget.ledger.lock().unwrap();
+        assert_eq!(ledger.source_count, 0);
+        assert_eq!(ledger.retained_bytes, 0);
     }
 
     #[test]
     fn prepared_session_cache_evicts_by_retained_byte_budget() {
         let source = empty_source(1);
         let retained_bytes = source.retained_bytes();
-        let mut sessions = PreparedSessions {
-            limits: PreparedSessionLimits {
-                count: 8,
-                max_source_bytes: retained_bytes,
-                total_bytes: retained_bytes.saturating_mul(2).saturating_sub(1),
-                ttl: Duration::from_secs(60),
-            },
-            ..PreparedSessions::default()
-        };
+        let budget = AdmissionBudget::new(ImportAdmissionLimits::new(
+            8,
+            retained_bytes,
+            retained_bytes.saturating_mul(2).saturating_sub(1),
+        ));
+        let mut sessions = PreparedSessions::default();
         let now = Instant::now();
         let first = Uuid::now_v7();
         let second = Uuid::now_v7();
-        sessions.insert(first, source, now).unwrap();
+        let first_source = admitted_source(&mut sessions, &budget, source);
+        sessions.insert(first, first_source, now);
 
-        sessions
-            .insert(second, empty_source(2), now + Duration::from_millis(1))
-            .unwrap();
+        let second_source = admitted_source(&mut sessions, &budget, empty_source(2));
+        sessions.insert(second, second_source, now + Duration::from_millis(1));
 
         assert!(!sessions.sessions.contains_key(&first));
         assert!(sessions.sessions.contains_key(&second));
-        assert_eq!(sessions.retained_bytes, retained_bytes);
+        assert_eq!(budget.ledger.lock().unwrap().source_count, 1);
     }
 
     #[test]
@@ -1066,19 +1268,13 @@ mod tests {
         let source = source_with_payload(4_096);
         let retained_bytes = source.retained_bytes();
         assert!(retained_bytes >= 4_096);
-        let mut sessions = PreparedSessions {
-            limits: PreparedSessionLimits {
-                count: 8,
-                max_source_bytes: retained_bytes - 1,
-                total_bytes: retained_bytes.saturating_mul(2),
-                ttl: Duration::from_secs(60),
-            },
-            ..PreparedSessions::default()
-        };
-
-        let error = sessions
-            .insert(Uuid::now_v7(), source, Instant::now())
-            .unwrap_err();
+        let budget = AdmissionBudget::new(ImportAdmissionLimits::new(
+            8,
+            retained_bytes - 1,
+            retained_bytes.saturating_mul(2),
+        ));
+        let mut reservation = budget.try_reserve().unwrap().unwrap();
+        let error = reservation.resize(source.retained_bytes()).unwrap_err();
 
         assert!(matches!(
             error,
@@ -1086,6 +1282,24 @@ mod tests {
                 reason: "analysis_too_large"
             }
         ));
+    }
+
+    fn admitted_source(
+        sessions: &mut PreparedSessions,
+        budget: &AdmissionBudget,
+        source: PreparedSource,
+    ) -> PreparedSourceEnvelope {
+        let mut reservation = loop {
+            if let Some(reservation) = budget.try_reserve().unwrap() {
+                break reservation;
+            }
+            assert!(sessions.evict_oldest_available());
+        };
+        reservation.resize(source.retained_bytes()).unwrap();
+        PreparedSourceEnvelope {
+            source,
+            _reservation: reservation,
+        }
     }
 
     fn empty_source(fingerprint_byte: u8) -> PreparedSource {

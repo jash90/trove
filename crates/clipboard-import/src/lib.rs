@@ -11,15 +11,18 @@ use clipboard_core::{CaptureInput, ContentKind, canonical_bytes};
 use serde_json::Value;
 use thiserror::Error;
 
-pub use detect::{DetectedExport, detect_export};
+pub use detect::{DetectedExport, MAX_MANIFEST_DISCOVERY_ENTRIES, detect_export};
 pub use raycast::{parse_raycast, parse_raycast_report};
 pub use service::{
-    IMPORT_BATCH_SIZE, ImportAnalysis, ImportProgress, ImportRunHandle, ImportRunState,
-    ImportService, ImportSummary, ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES,
+    IMPORT_BATCH_SIZE, ImportAdmissionLimits, ImportAnalysis, ImportProgress, ImportRunHandle,
+    ImportRunState, ImportService, ImportSummary, ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES,
     MAX_IMPORT_MANIFEST_BYTES, MAX_PREPARED_CACHE_BYTES, MAX_PREPARED_SOURCE_BYTES,
     PREPARED_SESSION_CAPACITY, PREPARED_SESSION_TTL,
 };
-pub use supercmd::{parse_supercmd, parse_supercmd_report};
+pub use supercmd::{
+    MAX_AUXILIARY_TRAVERSAL_DEPTH, MAX_AUXILIARY_TRAVERSAL_ENTRIES, parse_supercmd,
+    parse_supercmd_report,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImportSource {

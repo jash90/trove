@@ -7,6 +7,10 @@ use serde_json::Value;
 
 use crate::{ImportError, ImportSource, bounded_manifest_bytes};
 
+/// Maximum number of top-level directory entries inspected while discovering an unnamed export
+/// manifest. Named `clipboard.json` / `clipboard.csv` files bypass discovery entirely.
+pub const MAX_MANIFEST_DISCOVERY_ENTRIES: usize = 4_096;
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct DetectedExport {
     pub source: ImportSource,
@@ -32,6 +36,13 @@ pub fn detect_export(path: impl AsRef<Path>) -> Result<DetectedExport, ImportErr
 }
 
 fn detect_directory(directory: &Path) -> Result<DetectedExport, ImportError> {
+    detect_directory_with_limit(directory, MAX_MANIFEST_DISCOVERY_ENTRIES)
+}
+
+fn detect_directory_with_limit(
+    directory: &Path,
+    max_examined_entries: usize,
+) -> Result<DetectedExport, ImportError> {
     let json = directory.join("clipboard.json");
     let csv = directory.join("clipboard.csv");
     if json.is_file() {
@@ -50,25 +61,49 @@ fn detect_directory(directory: &Path) -> Result<DetectedExport, ImportError> {
         return detect_file(&csv);
     }
 
-    let manifests = fs::read_dir(directory)
+    let entries = fs::read_dir(directory)
         .map_err(|_| ImportError::export("detection", "unreadable_export"))?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|candidate| candidate.is_file())
-        .filter(|candidate| {
-            matches!(
-                candidate
-                    .extension()
-                    .and_then(|extension| extension.to_str()),
-                Some("json" | "csv")
-            )
-        })
-        .collect::<Vec<_>>();
-    match manifests.as_slice() {
-        [] => Err(ImportError::export("detection", "manifest_not_found")),
-        [manifest] => detect_file(manifest),
-        _ => Err(ImportError::export("detection", "ambiguous_manifest")),
+        .map(|entry| {
+            entry.ok().map(|entry| {
+                let is_file = entry.file_type().ok().is_some_and(|kind| kind.is_file());
+                (entry.path(), is_file)
+            })
+        });
+    match select_unnamed_manifest(entries, max_examined_entries) {
+        Ok(Some(manifest)) => detect_file(&manifest),
+        Ok(None) => Err(ImportError::export("detection", "manifest_not_found")),
+        Err(reason) => Err(ImportError::export("detection", reason)),
     }
+}
+
+fn select_unnamed_manifest(
+    entries: impl IntoIterator<Item = Option<(PathBuf, bool)>>,
+    max_examined_entries: usize,
+) -> Result<Option<PathBuf>, &'static str> {
+    let mut examined_entries = 0_usize;
+    let mut manifest = None;
+    for entry in entries {
+        examined_entries = examined_entries.checked_add(1).ok_or("export_too_large")?;
+        if examined_entries > max_examined_entries {
+            return Err("export_too_large");
+        }
+        let Some((candidate, true)) = entry else {
+            continue;
+        };
+        if !matches!(
+            candidate
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("json" | "csv")
+        ) {
+            continue;
+        }
+        if manifest.is_some() {
+            return Err("ambiguous_manifest");
+        }
+        manifest = Some(candidate);
+    }
+    Ok(manifest)
 }
 
 fn detect_file(path: &Path) -> Result<DetectedExport, ImportError> {
@@ -133,6 +168,8 @@ fn detect_json_source(value: &Value) -> Result<ImportSource, ImportError> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     #[test]
@@ -149,5 +186,40 @@ mod tests {
         assert!(!rendered.contains("export-name.json"));
         assert!(!rendered.contains(&format!("{fingerprint:?}")));
         assert!(rendered.contains("SuperCmd"));
+    }
+
+    #[test]
+    fn unnamed_manifest_selection_stops_immediately_after_two_matches() {
+        let examined = Cell::new(0_usize);
+        let entries = [
+            (PathBuf::from("first.json"), true),
+            (PathBuf::from("second.csv"), true),
+            (PathBuf::from("must-not-be-examined.json"), true),
+        ]
+        .into_iter()
+        .map(|entry| {
+            examined.set(examined.get() + 1);
+            Some(entry)
+        });
+
+        let result = select_unnamed_manifest(entries, 32);
+
+        assert_eq!(result.unwrap_err(), "ambiguous_manifest");
+        assert_eq!(examined.get(), 2);
+    }
+
+    #[test]
+    fn unnamed_manifest_discovery_has_a_path_free_entry_budget_error() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("synthetic.txt"), b"synthetic").unwrap();
+
+        let error = detect_directory_with_limit(directory.path(), 0).unwrap_err();
+
+        assert_eq!(error.to_string(), "detection export: export_too_large");
+        assert!(
+            !error
+                .to_string()
+                .contains(directory.path().to_string_lossy().as_ref())
+        );
     }
 }

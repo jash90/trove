@@ -4,8 +4,8 @@ use clipboard_core::{
     CaptureInput, ContentFlags, ContentKind, EventFlags, RepresentationInput, SourceConfidence,
 };
 use clipboard_import::{
-    IMPORT_BATCH_SIZE, ImportError, ImportRunHandle, ImportRunState, ImportService,
-    ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES, MAX_IMPORT_MANIFEST_BYTES,
+    IMPORT_BATCH_SIZE, ImportAdmissionLimits, ImportError, ImportRunHandle, ImportRunState,
+    ImportService, ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES, MAX_IMPORT_MANIFEST_BYTES,
 };
 use clipboard_store::{StoreConfig, StoreHandle};
 use serde_json::{Value, json};
@@ -304,6 +304,79 @@ async fn persistence_failure_restores_the_exact_analysis_for_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_handoff_uses_the_writer_lease_without_a_post_commit_status_read() {
+    let export = tempfile::tempdir().unwrap();
+    let database = tempfile::tempdir().unwrap();
+    write_raycast_export(&export, &[raycast_record(0)]);
+    let store = open_store(&database);
+    let service = ImportService::new(store.clone());
+    let analysis = service.analyze(export.path()).unwrap();
+
+    store.set_import_status_available_for_test(false);
+    let handoff = service.begin(analysis.analysis_id).await;
+    store.set_import_status_available_for_test(true);
+
+    let handle = handoff.unwrap();
+    wait_for_terminal(&service, handle.run_id).await;
+    assert_eq!(store.stats().unwrap().event_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_post_commit_offset_restores_the_exact_analysis_for_retry() {
+    let export = tempfile::tempdir().unwrap();
+    let database = tempfile::tempdir().unwrap();
+    write_raycast_export(&export, &[raycast_record(0)]);
+    let store = open_store(&database);
+    let service = ImportService::with_worker_policy(
+        store.clone(),
+        ImportWorkerPolicy::invalid_lease_offset_once(),
+    );
+    let analysis = service.analyze(export.path()).unwrap();
+
+    let error = service.begin(analysis.analysis_id).await.unwrap_err();
+    assert!(matches!(
+        error,
+        ImportError::Service {
+            reason: "invalid_run_state"
+        }
+    ));
+    let persisted = service.status(analysis.analysis_id).unwrap();
+    assert_eq!(persisted.state, ImportRunState::Running);
+    assert_eq!(persisted.processed, 0);
+
+    let recovered = service.begin(analysis.analysis_id).await.unwrap();
+    wait_for_terminal(&service, recovered.run_id).await;
+    assert_eq!(store.stats().unwrap().event_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_existing_run_returns_its_known_handle_without_starting_a_worker() {
+    let export = tempfile::tempdir().unwrap();
+    let database = tempfile::tempdir().unwrap();
+    write_raycast_export(&export, &[raycast_record(0)]);
+    let store = open_store(&database);
+    let service = ImportService::with_worker_policy(
+        store.clone(),
+        ImportWorkerPolicy::invalid_lease_offset_once(),
+    );
+    let analysis = service.analyze(export.path()).unwrap();
+    service.begin(analysis.analysis_id).await.unwrap_err();
+    store
+        .fail_import(analysis.analysis_id, 1, "synthetic_terminal")
+        .await
+        .unwrap();
+
+    let recovered = service.begin(analysis.analysis_id).await.unwrap();
+    tokio::task::yield_now().await;
+
+    assert_eq!(recovered.run_id, analysis.analysis_id);
+    let terminal = service.status(recovered.run_id).unwrap();
+    assert_eq!(terminal.state, ImportRunState::Failed);
+    assert_eq!(terminal.error_code.as_deref(), Some("synthetic_terminal"));
+    assert_eq!(store.stats().unwrap().event_count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_begin_and_lost_response_retries_share_one_persisted_run() {
     let export = tempfile::tempdir().unwrap();
     let database = tempfile::tempdir().unwrap();
@@ -346,6 +419,102 @@ async fn concurrent_begin_and_lost_response_retries_share_one_persisted_run() {
         })
         .unwrap();
     assert_eq!(run_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_worker_reservation_blocks_every_preparation_entry_point_until_release() {
+    let first_export = tempfile::tempdir().unwrap();
+    let second_export = tempfile::tempdir().unwrap();
+    let database = tempfile::tempdir().unwrap();
+    write_raycast_export(&first_export, &[raycast_record(0)]);
+    write_raycast_export(&second_export, &[raycast_record(1)]);
+    let store = open_store(&database);
+    let start_gate = Arc::new(Notify::new());
+    let worker_finished = Arc::new(Notify::new());
+    let service = ImportService::with_worker_policy_and_limits(
+        store,
+        ImportWorkerPolicy::wait_before_work(start_gate.clone(), worker_finished.clone()),
+        ImportAdmissionLimits::new(1, 64 * 1024, 64 * 1024),
+    );
+    let first = service.analyze(first_export.path()).unwrap();
+    let handle = service.begin(first.analysis_id).await.unwrap();
+
+    let analyze_error = service.analyze(second_export.path()).unwrap_err();
+    assert!(matches!(
+        analyze_error,
+        ImportError::Service {
+            reason: "analysis_capacity_full"
+        }
+    ));
+    let resume_error = service
+        .resume(uuid::Uuid::now_v7(), second_export.path())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        resume_error,
+        ImportError::Service {
+            reason: "analysis_capacity_full"
+        }
+    ));
+    let cli_error = service
+        .run_to_completion(second_export.path())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        cli_error,
+        ImportError::Service {
+            reason: "analysis_capacity_full"
+        }
+    ));
+
+    start_gate.notify_one();
+    worker_finished.notified().await;
+    wait_for_terminal(&service, handle.run_id).await;
+    let admitted = service.analyze(second_export.path()).unwrap();
+    service.discard_analysis(admitted.analysis_id).unwrap();
+}
+
+#[tokio::test]
+async fn oversized_sources_are_rejected_for_resume_and_cli_without_persisting_runs() {
+    let export = tempfile::tempdir().unwrap();
+    let database = tempfile::tempdir().unwrap();
+    let mut oversized = raycast_record(0);
+    oversized["text"] = json!("x".repeat(16 * 1024));
+    write_raycast_export(&export, &[oversized]);
+    let store = open_store(&database);
+    let service = ImportService::with_worker_policy_and_limits(
+        store.clone(),
+        ImportWorkerPolicy::unbounded(),
+        ImportAdmissionLimits::new(2, 4 * 1024, 8 * 1024),
+    );
+
+    for error in [
+        service
+            .resume(uuid::Uuid::now_v7(), export.path())
+            .await
+            .unwrap_err(),
+        service.run_to_completion(export.path()).await.unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            ImportError::Service {
+                reason: "analysis_too_large"
+            }
+        ));
+        assert!(
+            !error
+                .to_string()
+                .contains(export.path().to_string_lossy().as_ref())
+        );
+    }
+    let run_count = store
+        .with_reader(|connection| {
+            connection.query_row("SELECT count(*) FROM import_run", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(run_count, 0);
 }
 
 #[test]

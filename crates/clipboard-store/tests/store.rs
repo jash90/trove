@@ -726,6 +726,7 @@ async fn preallocated_import_run_id_is_exactly_idempotent_and_conflicts_fail_clo
 
     assert_eq!(first, retry);
     assert_eq!(first.run_id, run_id);
+    assert_eq!(first.state, clipboard_store::StoreImportRunState::Running);
     assert!(matches!(source_conflict, StoreError::ImportRunConflict));
     assert!(matches!(failure_conflict, StoreError::ImportRunConflict));
     let run_count = store
@@ -736,6 +737,33 @@ async fn preallocated_import_run_id_is_exactly_idempotent_and_conflicts_fail_clo
         })
         .unwrap();
     assert_eq!(run_count, 1);
+
+    store
+        .import_batch(
+            first.run_id,
+            first.generation,
+            vec![StoreImportCandidate {
+                candidate_offset: 0,
+                record_fingerprint: [19; 32],
+                capture: text_capture("synthetic terminal lease", 1_000),
+                search_text: Some("synthetic terminal lease".to_owned()),
+                source_app_original: None,
+            }],
+        )
+        .await
+        .unwrap();
+    store
+        .finish_import(first.run_id, first.generation)
+        .await
+        .unwrap();
+    let terminal_retry = store
+        .begin_import(input([17; 32], "invalid_record"))
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal_retry.state,
+        clipboard_store::StoreImportRunState::Completed
+    );
 }
 
 #[tokio::test]

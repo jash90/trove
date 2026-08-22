@@ -1,6 +1,11 @@
 use std::{
     collections::BTreeMap,
-    io, thread,
+    io,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -69,6 +74,9 @@ pub enum StoreError {
     #[doc(hidden)]
     #[error("injected import persistence failure")]
     InjectedImportPersistenceFailure,
+    #[doc(hidden)]
+    #[error("injected import status failure")]
+    InjectedImportStatusFailure,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -164,6 +172,7 @@ pub struct StoreImportRunStatus {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ImportWorkerLease {
     pub run_id: Uuid,
+    pub state: StoreImportRunState,
     pub generation: u64,
     pub next_candidate_offset: u64,
 }
@@ -177,6 +186,7 @@ pub struct ImportBatchOutcome {
 pub struct StoreHandle {
     config: StoreConfig,
     tx: mpsc::Sender<WriteCommand>,
+    import_status_available: Arc<AtomicBool>,
 }
 
 enum WriteCommand {
@@ -239,7 +249,11 @@ impl StoreHandle {
             })
             .map_err(StoreError::WriterThreadSpawn)?;
 
-        Ok(Self { config, tx })
+        Ok(Self {
+            config,
+            tx,
+            import_status_available: Arc::new(AtomicBool::new(true)),
+        })
     }
 
     pub fn config(&self) -> &StoreConfig {
@@ -392,8 +406,17 @@ impl StoreHandle {
     }
 
     pub fn import_status(&self, run_id: Uuid) -> Result<StoreImportRunStatus, StoreError> {
+        if !self.import_status_available.load(Ordering::Acquire) {
+            return Err(StoreError::InjectedImportStatusFailure);
+        }
         let connection = open_reader_connection(&self.config)?;
         read_import_status(&connection, run_id)
+    }
+
+    #[doc(hidden)]
+    pub fn set_import_status_available_for_test(&self, available: bool) {
+        self.import_status_available
+            .store(available, Ordering::Release);
     }
 
     pub fn stats(&self) -> Result<StoreStats, StoreError> {
@@ -501,7 +524,7 @@ fn begin_import(
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let persisted = transaction.query_row(
         "SELECT source_kind, source_fingerprint, total_records, candidate_records,
-                initial_failure_fingerprint, worker_generation, next_candidate_offset
+                initial_failure_fingerprint, worker_generation, next_candidate_offset, status
          FROM import_run WHERE external_id = ?1",
         [input.run_id.as_bytes().as_slice()],
         |row| {
@@ -513,6 +536,7 @@ fn begin_import(
                 row.get::<_, Vec<u8>>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
             ))
         },
     );
@@ -528,6 +552,7 @@ fn begin_import(
             }
             return Ok(ImportWorkerLease {
                 run_id: input.run_id,
+                state: parse_import_run_state(&persisted.7)?,
                 generation: rust_count(persisted.5)?,
                 next_candidate_offset: rust_count(persisted.6)?,
             });
@@ -569,6 +594,7 @@ fn begin_import(
     transaction.commit()?;
     Ok(ImportWorkerLease {
         run_id: input.run_id,
+        state: StoreImportRunState::Running,
         generation: 1,
         next_candidate_offset: 0,
     })
@@ -643,6 +669,7 @@ fn resume_import(
     transaction.commit()?;
     Ok(ImportWorkerLease {
         run_id: input.run_id,
+        state: StoreImportRunState::Running,
         generation: rust_count(generation)?,
         next_candidate_offset: rust_count(persisted.7)?,
     })
@@ -1371,12 +1398,7 @@ fn read_import_status(
             },
         )
         .map_err(map_run_query_error)?;
-    let state = match values.0.as_str() {
-        "running" => StoreImportRunState::Running,
-        "completed" => StoreImportRunState::Completed,
-        "failed" => StoreImportRunState::Failed,
-        _ => return Err(StoreError::ImportInvariant),
-    };
+    let state = parse_import_run_state(&values.0)?;
     Ok(StoreImportRunStatus {
         run_id,
         state,
@@ -1389,6 +1411,15 @@ fn read_import_status(
         failed_records: rust_count(values.7)?,
         error_code: values.8,
     })
+}
+
+fn parse_import_run_state(value: &str) -> Result<StoreImportRunState, StoreError> {
+    match value {
+        "running" => Ok(StoreImportRunState::Running),
+        "completed" => Ok(StoreImportRunState::Completed),
+        "failed" => Ok(StoreImportRunState::Failed),
+        _ => Err(StoreError::ImportInvariant),
+    }
 }
 
 fn validate_begin_import(input: &BeginImportRun) -> Result<(), StoreError> {

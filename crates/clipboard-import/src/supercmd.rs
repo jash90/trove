@@ -21,6 +21,26 @@ use crate::{
     canonical_fingerprint, json_records, record_failure,
 };
 
+/// The auxiliary image search is intentionally finite even for adversarial directory trees.
+pub const MAX_AUXILIARY_TRAVERSAL_DEPTH: usize = 64;
+/// Entry allowance is comfortably above normal exports while bounding directory I/O per record.
+pub const MAX_AUXILIARY_TRAVERSAL_ENTRIES: usize = 32_768;
+
+#[derive(Clone, Copy)]
+struct TraversalLimits {
+    max_depth: usize,
+    max_entries: usize,
+}
+
+impl Default for TraversalLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: MAX_AUXILIARY_TRAVERSAL_DEPTH,
+            max_entries: MAX_AUXILIARY_TRAVERSAL_ENTRIES,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct SuperCmdRecord {
     #[serde(alias = "copiedAt")]
@@ -56,6 +76,14 @@ pub fn parse_supercmd_report(
     export_root: impl AsRef<Path>,
     path: impl AsRef<Path>,
 ) -> Result<ImportParseReport, ImportError> {
+    parse_supercmd_report_with_limits(export_root, path, TraversalLimits::default())
+}
+
+fn parse_supercmd_report_with_limits(
+    export_root: impl AsRef<Path>,
+    path: impl AsRef<Path>,
+    traversal_limits: TraversalLimits,
+) -> Result<ImportParseReport, ImportError> {
     let root = open_export_root(export_root.as_ref())?;
     let records = json_records(path.as_ref(), ImportSource::SuperCmd)?;
     let mut auxiliary_bytes_remaining = auxiliary_budget(path.as_ref())?;
@@ -64,7 +92,13 @@ pub fn parse_supercmd_report(
         let result = serde_json::from_value(value)
             .map_err(|_| record_failure(ImportSource::SuperCmd, index + 1, "invalid_record"))
             .and_then(|record| {
-                map_record(&root, record, index + 1, &mut auxiliary_bytes_remaining)
+                map_record(
+                    &root,
+                    record,
+                    index + 1,
+                    &mut auxiliary_bytes_remaining,
+                    traversal_limits,
+                )
             });
         report.push(result);
     }
@@ -86,7 +120,13 @@ pub(crate) fn parse_supercmd_csv_report(path: &Path) -> Result<ImportParseReport
         let result = result
             .map_err(|_| record_failure(ImportSource::SuperCmd, index + 1, "invalid_record"))
             .and_then(|record| {
-                map_record(&root, record, index + 1, &mut auxiliary_bytes_remaining)
+                map_record(
+                    &root,
+                    record,
+                    index + 1,
+                    &mut auxiliary_bytes_remaining,
+                    TraversalLimits::default(),
+                )
             });
         report.push(result);
     }
@@ -104,6 +144,7 @@ fn map_record(
     record: SuperCmdRecord,
     index: usize,
     auxiliary_bytes_remaining: &mut usize,
+    traversal_limits: TraversalLimits,
 ) -> Result<ImportCandidate, ImportRecordFailure> {
     let captured_at_ms = DateTime::parse_from_rfc3339(&record.copied_at)
         .map(|timestamp| timestamp.with_timezone(&Utc).timestamp_millis())
@@ -125,6 +166,7 @@ fn map_record(
                 record.file_url.as_deref(),
                 record.image_hash.as_deref(),
                 auxiliary_bytes_remaining,
+                traversal_limits,
             )
         })
         .flatten();
@@ -237,6 +279,7 @@ fn resolve_payload(
     file_url: Option<&str>,
     image_hash: Option<&str>,
     auxiliary_bytes_remaining: &mut usize,
+    traversal_limits: TraversalLimits,
 ) -> Option<Vec<u8>> {
     if file_url.is_some_and(|value| !is_safe_relative_reference(value)) {
         return None;
@@ -248,18 +291,12 @@ fn resolve_payload(
     if names.is_empty() {
         return None;
     }
-    let mut matches = Vec::new();
-    for directory in ["images", "images-external"] {
-        if let Ok(directory) = root.open_dir_nofollow(directory) {
-            collect_matching_entries(&directory, &names, &mut matches);
-        }
-    }
-    if matches.len() != 1 {
+    let AuxiliaryLookup::Unique(entry) = find_auxiliary(root, &names, traversal_limits) else {
         return None;
-    }
+    };
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
-    let mut file = matches.pop()?.open_with(&options).ok()?;
+    let mut file = entry.open_with(&options).ok()?;
     let byte_size = usize::try_from(file.metadata().ok()?.len()).ok()?;
     if byte_size > MAX_IMPORT_AUXILIARY_BYTES || byte_size > *auxiliary_bytes_remaining {
         return None;
@@ -293,33 +330,64 @@ fn is_safe_relative_reference(value: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn collect_matching_entries(directory: &Dir, names: &BTreeSet<&str>, matches: &mut Vec<DirEntry>) {
-    let Ok(entries) = directory.read_dir(".") else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else {
+enum AuxiliaryLookup {
+    Unique(DirEntry),
+    Missing,
+    Ambiguous,
+    BudgetExceeded,
+}
+
+fn find_auxiliary(root: &Dir, names: &BTreeSet<&str>, limits: TraversalLimits) -> AuxiliaryLookup {
+    let mut directories = ["images", "images-external"]
+        .into_iter()
+        .filter_map(|directory| root.open_dir_nofollow(directory).ok())
+        .map(|directory| (directory, 0_usize))
+        .collect::<Vec<_>>();
+    let mut examined_entries = 0_usize;
+    let mut matched = None;
+    while let Some((directory, depth)) = directories.pop() {
+        let Ok(entries) = directory.read_dir(".") else {
             continue;
         };
-        let file_name = entry.file_name();
-        let path = Path::new(&file_name);
-        if file_type.is_dir() {
-            if let Ok(child) = directory.open_dir_nofollow(path) {
-                collect_matching_entries(&child, names, matches);
+        for entry in entries {
+            examined_entries = match examined_entries.checked_add(1) {
+                Some(count) if count <= limits.max_entries => count,
+                _ => return AuxiliaryLookup::BudgetExceeded,
+            };
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let file_name = entry.file_name();
+            let path = Path::new(&file_name);
+            if file_type.is_dir() {
+                if depth >= limits.max_depth {
+                    return AuxiliaryLookup::BudgetExceeded;
+                }
+                if let Ok(child) = directory.open_dir_nofollow(path) {
+                    directories.push((child, depth + 1));
+                }
+                continue;
             }
-            continue;
-        }
-        if !file_type.is_file() && !file_type.is_symlink() {
-            continue;
-        }
-        let filename = path.file_name().and_then(|name| name.to_str());
-        let stem = path.file_stem().and_then(|name| name.to_str());
-        if filename.is_some_and(|name| names.contains(name))
-            || stem.is_some_and(|name| names.contains(name))
-        {
-            matches.push(entry);
+            if !file_type.is_file() && !file_type.is_symlink() {
+                continue;
+            }
+            let filename = path.file_name().and_then(|name| name.to_str());
+            let stem = path.file_stem().and_then(|name| name.to_str());
+            if !filename.is_some_and(|name| names.contains(name))
+                && !stem.is_some_and(|name| names.contains(name))
+            {
+                continue;
+            }
+            if matched.is_some() {
+                return AuxiliaryLookup::Ambiguous;
+            }
+            matched = Some(entry);
         }
     }
+    matched.map_or(AuxiliaryLookup::Missing, AuxiliaryLookup::Unique)
 }
 
 fn basename(value: &str) -> Option<&str> {
@@ -364,4 +432,93 @@ fn hex_string(bytes: [u8; 32]) -> String {
         encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn auxiliary_lookup_stops_after_the_second_ambiguous_match() {
+        let export = tempfile::tempdir().unwrap();
+        fs::create_dir(export.path().join("images")).unwrap();
+        fs::write(export.path().join("images/shared.png"), b"first").unwrap();
+        fs::write(export.path().join("images/shared.jpg"), b"second").unwrap();
+        let root = open_export_root(export.path()).unwrap();
+        let names = BTreeSet::from(["shared"]);
+
+        let result = find_auxiliary(
+            &root,
+            &names,
+            TraversalLimits {
+                max_depth: 4,
+                max_entries: 2,
+            },
+        );
+
+        assert!(matches!(result, AuxiliaryLookup::Ambiguous));
+    }
+
+    #[test]
+    fn iterative_auxiliary_lookup_bounds_deep_trees_without_losing_record_accounting() {
+        let export = tempfile::tempdir().unwrap();
+        let mut directory = export.path().join("images");
+        fs::create_dir(&directory).unwrap();
+        for _ in 0..128 {
+            directory = directory.join("d");
+            fs::create_dir(&directory).unwrap();
+        }
+        fs::write(directory.join("target.png"), b"synthetic image").unwrap();
+        let manifest = export.path().join("clipboard.json");
+        fs::write(
+            &manifest,
+            br#"[{"copied_at":"2026-08-22T12:00:00Z","type":"image","file_url":"target.png","has_image":true}]"#,
+        )
+        .unwrap();
+
+        let report = parse_supercmd_report_with_limits(
+            export.path(),
+            &manifest,
+            TraversalLimits {
+                max_depth: 8,
+                max_entries: 1_024,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.total, 1);
+        assert_eq!(report.candidates.len(), 1);
+        assert!(report.failures.is_empty());
+        assert!(report.candidates[0].missing_payload);
+    }
+
+    #[test]
+    fn auxiliary_entry_budget_exhaustion_is_a_countable_missing_payload() {
+        let export = tempfile::tempdir().unwrap();
+        fs::create_dir(export.path().join("images")).unwrap();
+        fs::write(export.path().join("images/target.png"), b"synthetic image").unwrap();
+        let manifest = export.path().join("clipboard.json");
+        fs::write(
+            &manifest,
+            br#"[{"copied_at":"2026-08-22T12:00:00Z","type":"image","file_url":"target.png","has_image":true}]"#,
+        )
+        .unwrap();
+
+        let report = parse_supercmd_report_with_limits(
+            export.path(),
+            &manifest,
+            TraversalLimits {
+                max_depth: 8,
+                max_entries: 0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.total, 1);
+        assert_eq!(report.candidates.len(), 1);
+        assert!(report.failures.is_empty());
+        assert!(report.candidates[0].missing_payload);
+    }
 }
