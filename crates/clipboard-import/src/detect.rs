@@ -5,7 +5,7 @@ use std::{
 
 use serde_json::Value;
 
-use crate::{ImportError, ImportSource};
+use crate::{ImportError, ImportSource, bounded_manifest_bytes};
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct DetectedExport {
@@ -72,8 +72,7 @@ fn detect_directory(directory: &Path) -> Result<DetectedExport, ImportError> {
 }
 
 fn detect_file(path: &Path) -> Result<DetectedExport, ImportError> {
-    let bytes =
-        fs::read(path).map_err(|_| ImportError::export("detection", "unreadable_export"))?;
+    let bytes = bounded_manifest_bytes(path, "detection")?;
     let source = match path.extension().and_then(|extension| extension.to_str()) {
         Some("csv") => detect_csv_source(&bytes)?,
         Some("json") => {

@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    fmt,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -23,18 +24,33 @@ pub enum CasError {
     CleanupFailed(#[source] io::Error),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct CasBlob {
     pub hash: ContentHash,
     pub relpath: String,
     pub byte_size: u64,
 }
 
-#[derive(Clone, Debug)]
+impl fmt::Debug for CasBlob {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CasBlob")
+            .field("byte_size", &self.byte_size)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
 pub struct CasStore {
     root: PathBuf,
     #[cfg(test)]
     test_failures: Vec<TestFailure>,
+}
+
+impl fmt::Debug for CasStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("CasStore").finish_non_exhaustive()
+    }
 }
 
 impl CasStore {

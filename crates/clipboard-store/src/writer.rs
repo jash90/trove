@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io, thread,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -19,6 +20,9 @@ use crate::{
 
 pub const WRITER_QUEUE_CAPACITY: usize = 256;
 pub const IMPORT_BATCH_SIZE: usize = 250;
+pub const MAX_SEARCH_DERIVATIONS_PER_CONTENT: usize = 16;
+pub const MAX_SEARCH_DERIVATION_BYTES: usize = 64 * 1024;
+pub const MAX_SEARCH_DOCUMENT_BYTES: usize = 512 * 1024;
 const MAX_INLINE_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_INLINE_ZSTD_PAYLOAD_BYTES: usize = 256 * 1024;
 
@@ -50,6 +54,8 @@ pub enum StoreError {
     ImportRunNotFound,
     #[error("import source does not match the persisted run")]
     ImportSourceMismatch,
+    #[error("import run identity conflicts with persisted input")]
+    ImportRunConflict,
     #[error("import run is not resumable")]
     ImportRunNotResumable,
     #[error("import checkpoint is inconsistent")]
@@ -60,6 +66,9 @@ pub enum StoreError {
     ImportInvariant,
     #[error("import batch exceeds the configured bound")]
     ImportBatchTooLarge,
+    #[doc(hidden)]
+    #[error("injected import persistence failure")]
+    InjectedImportPersistenceFailure,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,6 +116,7 @@ pub struct ImportFailureCount {
 }
 
 pub struct BeginImportRun {
+    pub run_id: Uuid,
     pub source_kind: ImportSourceKind,
     pub source_fingerprint: [u8; 32],
     pub total_records: u64,
@@ -185,6 +195,9 @@ enum WriteCommand {
     },
     BeginImport {
         input: BeginImportRun,
+        reply: oneshot::Sender<Result<ImportWorkerLease, StoreError>>,
+    },
+    InjectBeginImportFailure {
         reply: oneshot::Sender<Result<ImportWorkerLease, StoreError>>,
     },
     ResumeImport {
@@ -278,6 +291,18 @@ impl StoreHandle {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(WriteCommand::BeginImport { input, reply })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    #[doc(hidden)]
+    pub async fn inject_begin_import_failure(&self) -> Result<ImportWorkerLease, StoreError> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::InjectBeginImportFailure { reply })
             .await
             .map_err(|_| StoreError::WriterClosed)?;
         response
@@ -412,6 +437,9 @@ fn handle_command(connection: &mut Connection, cas: &CasStore, command: WriteCom
         WriteCommand::BeginImport { input, reply } => {
             let _ = reply.send(begin_import(connection, &input));
         }
+        WriteCommand::InjectBeginImportFailure { reply } => {
+            let _ = reply.send(Err(StoreError::InjectedImportPersistenceFailure));
+        }
         WriteCommand::ResumeImport { input, reply } => {
             let _ = reply.send(resume_import(connection, &input));
         }
@@ -464,23 +492,60 @@ fn begin_import(
     input: &BeginImportRun,
 ) -> Result<ImportWorkerLease, StoreError> {
     validate_begin_import(input)?;
-    let run_id = Uuid::now_v7();
     let initial_failed = input
         .initial_failures
         .iter()
         .try_fold(0_u64, |sum, failure| sum.checked_add(failure.count))
         .ok_or(StoreError::InvalidImportInput)?;
+    let initial_failure_fingerprint = initial_failure_fingerprint(&input.initial_failures)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let persisted = transaction.query_row(
+        "SELECT source_kind, source_fingerprint, total_records, candidate_records,
+                initial_failure_fingerprint, worker_generation, next_candidate_offset
+         FROM import_run WHERE external_id = ?1",
+        [input.run_id.as_bytes().as_slice()],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        },
+    );
+    match persisted {
+        Ok(persisted) => {
+            if persisted.0 != input.source_kind.as_str()
+                || persisted.1.as_slice() != input.source_fingerprint
+                || persisted.2 != sql_count(input.total_records)?
+                || persisted.3 != sql_count(input.candidate_records)?
+                || persisted.4.as_slice() != initial_failure_fingerprint
+            {
+                return Err(StoreError::ImportRunConflict);
+            }
+            return Ok(ImportWorkerLease {
+                run_id: input.run_id,
+                generation: rust_count(persisted.5)?,
+                next_candidate_offset: rust_count(persisted.6)?,
+            });
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => {}
+        Err(error) => return Err(StoreError::Database(error)),
+    }
     transaction.execute(
         "INSERT INTO import_run
-           (external_id, source_kind, source_fingerprint, status, worker_generation, total_records,
-            candidate_records, next_candidate_offset, imported_records,
+           (external_id, source_kind, source_fingerprint, initial_failure_fingerprint, status,
+            worker_generation, total_records, candidate_records, next_candidate_offset, imported_records,
             already_present_records, skipped_records, failed_records, started_at_ms)
-         VALUES (?1, ?2, ?3, 'running', 1, ?4, ?5, 0, 0, 0, 0, ?6, ?7)",
+         VALUES (?1, ?2, ?3, ?4, 'running', 1, ?5, ?6, 0, 0, 0, 0, ?7, ?8)",
         params![
-            run_id.as_bytes().as_slice(),
+            input.run_id.as_bytes().as_slice(),
             input.source_kind.as_str(),
             input.source_fingerprint.as_slice(),
+            initial_failure_fingerprint.as_slice(),
             sql_count(input.total_records)?,
             sql_count(input.candidate_records)?,
             sql_count(initial_failed)?,
@@ -503,10 +568,29 @@ fn begin_import(
     }
     transaction.commit()?;
     Ok(ImportWorkerLease {
-        run_id,
+        run_id: input.run_id,
         generation: 1,
         next_candidate_offset: 0,
     })
+}
+
+fn initial_failure_fingerprint(failures: &[ImportFailureCount]) -> Result<[u8; 32], StoreError> {
+    let mut canonical = BTreeMap::<&str, u64>::new();
+    for failure in failures {
+        let count = canonical.entry(&failure.reason_code).or_default();
+        *count = count
+            .checked_add(failure.count)
+            .ok_or(StoreError::InvalidImportInput)?;
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"clipboard-store.import-initial-failures-v1");
+    hasher.update(&(canonical.len() as u64).to_be_bytes());
+    for (reason, count) in canonical {
+        hasher.update(&(reason.len() as u64).to_be_bytes());
+        hasher.update(reason.as_bytes());
+        hasher.update(&count.to_be_bytes());
+    }
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn resume_import(
@@ -883,29 +967,7 @@ fn write_ingest(
             [content_id],
         )?;
     } else if let Some(normalized_text) = normalized_text {
-        let derivation_hash = search_derivation_hash(&normalized_text);
-        transaction.execute(
-            "INSERT INTO search_derivation(content_id, derivation_hash, normalized_text)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(content_id, derivation_hash) DO NOTHING",
-            params![content_id, derivation_hash.as_slice(), normalized_text],
-        )?;
-        let merged_text = {
-            let mut statement = transaction.prepare(
-                "SELECT normalized_text FROM search_derivation
-                 WHERE content_id = ?1 ORDER BY derivation_hash",
-            )?;
-            statement
-                .query_map([content_id], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-                .join("\n")
-        };
-        transaction.execute(
-            "INSERT INTO search_doc(content_id, normalized_text) VALUES (?1, ?2)
-             ON CONFLICT(content_id) DO UPDATE
-             SET normalized_text = excluded.normalized_text",
-            params![content_id, merged_text],
-        )?;
+        retain_search_derivation(transaction, content_id, normalized_text)?;
     }
 
     transaction.execute(
@@ -938,6 +1000,114 @@ fn search_derivation_hash(normalized_text: &str) -> [u8; 32] {
     hasher.update(&(normalized_text.len() as u64).to_be_bytes());
     hasher.update(normalized_text.as_bytes());
     *hasher.finalize().as_bytes()
+}
+
+fn retain_search_derivation(
+    transaction: &Transaction<'_>,
+    content_id: i64,
+    normalized_text: String,
+) -> Result<(), StoreError> {
+    let normalized_text = truncate_utf8(normalized_text, MAX_SEARCH_DERIVATION_BYTES);
+    let derivation_hash = search_derivation_hash(&normalized_text);
+    let already_retained = transaction.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM search_derivation
+           WHERE content_id = ?1 AND derivation_hash = ?2
+         )",
+        params![content_id, derivation_hash.as_slice()],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if already_retained {
+        return Ok(());
+    }
+
+    let mut retained = {
+        let mut statement = transaction.prepare(
+            "SELECT derivation_hash, normalized_text FROM search_derivation
+             WHERE content_id = ?1 ORDER BY derivation_hash
+             LIMIT ?2",
+        )?;
+        statement
+            .query_map(
+                params![content_id, MAX_SEARCH_DERIVATIONS_PER_CONTENT as i64],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let new_hash = derivation_hash.to_vec();
+    let removed_hash = if retained.len() == MAX_SEARCH_DERIVATIONS_PER_CONTENT {
+        let Some((largest_hash, _)) = retained.last() else {
+            return Err(StoreError::ImportInvariant);
+        };
+        if new_hash >= *largest_hash {
+            return Ok(());
+        }
+        Some(retained.pop().ok_or(StoreError::ImportInvariant)?.0)
+    } else {
+        None
+    };
+    retained.push((new_hash.clone(), normalized_text.clone()));
+    retained.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
+    if let Some(removed_hash) = removed_hash {
+        transaction.execute(
+            "DELETE FROM search_derivation
+             WHERE content_id = ?1 AND derivation_hash = ?2",
+            params![content_id, removed_hash],
+        )?;
+    }
+    transaction.execute(
+        "INSERT INTO search_derivation(content_id, derivation_hash, normalized_text)
+         VALUES (?1, ?2, ?3)",
+        params![content_id, derivation_hash.as_slice(), normalized_text],
+    )?;
+    let merged_text = merge_search_derivations(&retained);
+    transaction.execute(
+        "INSERT INTO search_doc(content_id, normalized_text) VALUES (?1, ?2)
+         ON CONFLICT(content_id) DO UPDATE
+         SET normalized_text = excluded.normalized_text
+         WHERE search_doc.normalized_text != excluded.normalized_text",
+        params![content_id, merged_text],
+    )?;
+    Ok(())
+}
+
+fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut boundary = max_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    value
+}
+
+fn merge_search_derivations(retained: &[(Vec<u8>, String)]) -> String {
+    let mut merged = String::with_capacity(
+        MAX_SEARCH_DOCUMENT_BYTES.min(
+            retained
+                .iter()
+                .map(|(_, value)| value.len().saturating_add(1))
+                .sum(),
+        ),
+    );
+    for (_, value) in retained {
+        if !merged.is_empty() && merged.len() < MAX_SEARCH_DOCUMENT_BYTES {
+            merged.push('\n');
+        }
+        let remaining = MAX_SEARCH_DOCUMENT_BYTES.saturating_sub(merged.len());
+        if remaining == 0 {
+            break;
+        }
+        let mut boundary = value.len().min(remaining);
+        while !value.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        merged.push_str(&value[..boundary]);
+    }
+    merged
 }
 
 struct StoredRepresentation<'a> {
@@ -1033,14 +1203,41 @@ fn normalized_text(
         return None;
     }
     if let Some(search_override) = search_override {
-        return search_override.map(normalize_search_text);
+        return search_override.map(normalize_search_text_bounded);
     }
     if !input.kind.is_textual() {
         return None;
     }
     primary_payload
-        .and_then(|payload| std::str::from_utf8(payload).ok())
-        .map(normalize_search_text)
+        .and_then(bounded_utf8_payload)
+        .map(normalize_search_text_bounded)
+}
+
+fn normalize_search_text_bounded(value: &str) -> String {
+    let boundary = utf8_boundary_at_or_before(value, MAX_SEARCH_DERIVATION_BYTES);
+    truncate_utf8(
+        normalize_search_text(&value[..boundary]),
+        MAX_SEARCH_DERIVATION_BYTES,
+    )
+}
+
+fn bounded_utf8_payload(payload: &[u8]) -> Option<&str> {
+    let boundary = payload.len().min(MAX_SEARCH_DERIVATION_BYTES);
+    match std::str::from_utf8(&payload[..boundary]) {
+        Ok(value) => Some(value),
+        Err(error) if error.error_len().is_none() => {
+            std::str::from_utf8(&payload[..error.valid_up_to()]).ok()
+        }
+        Err(_) => None,
+    }
+}
+
+fn utf8_boundary_at_or_before(value: &str, max_bytes: usize) -> usize {
+    let mut boundary = value.len().min(max_bytes);
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
 }
 
 fn missing_content_hash(kind: ContentKind, primary_mime: &str, missing_ref: &str) -> ContentHash {
@@ -1195,7 +1392,10 @@ fn read_import_status(
 }
 
 fn validate_begin_import(input: &BeginImportRun) -> Result<(), StoreError> {
-    if input.candidate_records > input.total_records {
+    if input.run_id.get_version_num() != 7
+        || input.run_id.get_variant() != uuid::Variant::RFC4122
+        || input.candidate_records > input.total_records
+    {
         return Err(StoreError::InvalidImportInput);
     }
     let initial_failed = input

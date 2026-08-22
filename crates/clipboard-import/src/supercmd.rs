@@ -17,7 +17,8 @@ use serde::Deserialize;
 
 use crate::{
     FramedHasher, ImportCandidate, ImportError, ImportParseReport, ImportRecordFailure,
-    ImportSource, canonical_fingerprint, json_records, record_failure,
+    ImportSource, MAX_IMPORT_AUXILIARY_BYTES, MAX_PREPARED_SOURCE_BYTES, bounded_manifest_bytes,
+    canonical_fingerprint, json_records, record_failure,
 };
 
 #[derive(Deserialize)]
@@ -57,11 +58,14 @@ pub fn parse_supercmd_report(
 ) -> Result<ImportParseReport, ImportError> {
     let root = open_export_root(export_root.as_ref())?;
     let records = json_records(path.as_ref(), ImportSource::SuperCmd)?;
+    let mut auxiliary_bytes_remaining = auxiliary_budget(path.as_ref())?;
     let mut report = ImportParseReport::new(records.len());
     for (index, value) in records.into_iter().enumerate() {
         let result = serde_json::from_value(value)
             .map_err(|_| record_failure(ImportSource::SuperCmd, index + 1, "invalid_record"))
-            .and_then(|record| map_record(&root, record, index + 1));
+            .and_then(|record| {
+                map_record(&root, record, index + 1, &mut auxiliary_bytes_remaining)
+            });
         report.push(result);
     }
     Ok(report)
@@ -70,17 +74,20 @@ pub fn parse_supercmd_report(
 pub(crate) fn parse_supercmd_csv_report(path: &Path) -> Result<ImportParseReport, ImportError> {
     let root_path = path.parent().unwrap_or_else(|| Path::new("."));
     let root = open_export_root(root_path)?;
+    let bytes = bounded_manifest_bytes(path, ImportSource::SuperCmd.as_str())?;
+    let mut auxiliary_bytes_remaining = MAX_PREPARED_SOURCE_BYTES.saturating_sub(bytes.len());
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(false)
-        .from_path(path)
-        .map_err(|_| ImportError::export(ImportSource::SuperCmd.as_str(), "unreadable_export"))?;
+        .from_reader(bytes.as_slice());
     let mut report = ImportParseReport::new(0);
     for (index, result) in reader.deserialize().enumerate() {
         report.total += 1;
         let result = result
             .map_err(|_| record_failure(ImportSource::SuperCmd, index + 1, "invalid_record"))
-            .and_then(|record| map_record(&root, record, index + 1));
+            .and_then(|record| {
+                map_record(&root, record, index + 1, &mut auxiliary_bytes_remaining)
+            });
         report.push(result);
     }
     Ok(report)
@@ -96,6 +103,7 @@ fn map_record(
     root: &Dir,
     record: SuperCmdRecord,
     index: usize,
+    auxiliary_bytes_remaining: &mut usize,
 ) -> Result<ImportCandidate, ImportRecordFailure> {
     let captured_at_ms = DateTime::parse_from_rfc3339(&record.copied_at)
         .map(|timestamp| timestamp.with_timezone(&Utc).timestamp_millis())
@@ -116,6 +124,7 @@ fn map_record(
                 root,
                 record.file_url.as_deref(),
                 record.image_hash.as_deref(),
+                auxiliary_bytes_remaining,
             )
         })
         .flatten();
@@ -227,6 +236,7 @@ fn resolve_payload(
     root: &Dir,
     file_url: Option<&str>,
     image_hash: Option<&str>,
+    auxiliary_bytes_remaining: &mut usize,
 ) -> Option<Vec<u8>> {
     if file_url.is_some_and(|value| !is_safe_relative_reference(value)) {
         return None;
@@ -250,9 +260,30 @@ fn resolve_payload(
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
     let mut file = matches.pop()?.open_with(&options).ok()?;
+    let byte_size = usize::try_from(file.metadata().ok()?.len()).ok()?;
+    if byte_size > MAX_IMPORT_AUXILIARY_BYTES || byte_size > *auxiliary_bytes_remaining {
+        return None;
+    }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
+    (&mut file)
+        .take((MAX_IMPORT_AUXILIARY_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_IMPORT_AUXILIARY_BYTES {
+        return None;
+    }
+    *auxiliary_bytes_remaining = auxiliary_bytes_remaining.checked_sub(bytes.len())?;
     Some(bytes)
+}
+
+fn auxiliary_budget(path: &Path) -> Result<usize, ImportError> {
+    let manifest_bytes = usize::try_from(
+        std::fs::metadata(path)
+            .map_err(|_| ImportError::export(ImportSource::SuperCmd.as_str(), "unreadable_export"))?
+            .len(),
+    )
+    .map_err(|_| ImportError::service("analysis_too_large"))?;
+    Ok(MAX_PREPARED_SOURCE_BYTES.saturating_sub(manifest_bytes))
 }
 
 fn is_safe_relative_reference(value: &str) -> bool {

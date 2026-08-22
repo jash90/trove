@@ -6,7 +6,7 @@ use std::{
 };
 
 use clipboard_core::ContentKind;
-use clipboard_store::{CasError, CasStore, StoreError, classify_payload};
+use clipboard_store::{CasBlob, CasError, CasStore, StoreConfig, StoreError, classify_payload};
 
 fn test_cas() -> (tempfile::TempDir, CasStore) {
     let directory = tempfile::tempdir().unwrap();
@@ -56,6 +56,27 @@ fn transparent_store_errors_preserve_path_free_cas_display_text() {
     let error = StoreError::from(CasError::InvalidRelativePath);
 
     assert_eq!(error.to_string(), "invalid CAS relative path");
+}
+
+#[test]
+fn cas_and_store_debug_output_omits_paths_hashes_and_blob_names() {
+    let sentinel_hash = [173_u8; 32];
+    let blob = CasBlob {
+        hash: sentinel_hash,
+        relpath: "sentinel-shard/sentinel-blob-name".to_owned(),
+        byte_size: 42,
+    };
+    let cas = CasStore::new("/private/sentinel-cas-root");
+    let config = StoreConfig::new("/private/sentinel-history.sqlite")
+        .with_blob_root("/private/sentinel-config-blobs");
+
+    let rendered = format!("{blob:?} {cas:?} {config:?}");
+
+    assert!(!rendered.contains("sentinel"));
+    assert!(!rendered.contains("private"));
+    assert!(!rendered.contains(&format!("{sentinel_hash:?}")));
+    assert!(!rendered.contains("history.sqlite"));
+    assert!(rendered.contains("byte_size: 42"));
 }
 
 #[test]

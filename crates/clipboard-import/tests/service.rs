@@ -5,7 +5,7 @@ use clipboard_core::{
 };
 use clipboard_import::{
     IMPORT_BATCH_SIZE, ImportError, ImportRunHandle, ImportRunState, ImportService,
-    ImportWorkerPolicy,
+    ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES, MAX_IMPORT_MANIFEST_BYTES,
 };
 use clipboard_store::{StoreConfig, StoreHandle};
 use serde_json::{Value, json};
@@ -207,6 +207,7 @@ async fn begin_consumes_the_exact_prepared_snapshot_once_without_reparsing() {
     let analysis = service.analyze(export.path()).unwrap();
     fs::write(&image_path, b"changed after analysis").unwrap();
     let handle = service.begin(analysis.analysis_id).await.unwrap();
+    assert_eq!(handle.run_id, analysis.analysis_id);
     wait_for_terminal(&service, handle.run_id).await;
 
     let stored_relpath = store
@@ -220,14 +221,8 @@ async fn begin_consumes_the_exact_prepared_snapshot_once_without_reparsing() {
         .unwrap();
     let stored_payload = fs::read(store.config().blob_root().join(stored_relpath)).unwrap();
     assert_eq!(stored_payload, b"analyzed image bytes");
-    let consumed = service.begin(analysis.analysis_id).await.unwrap_err();
-    assert!(matches!(
-        consumed,
-        ImportError::Service {
-            reason: "analysis_not_found"
-        }
-    ));
-    assert!(!consumed.to_string().contains("synthetic.png"));
+    let recovered = service.begin(analysis.analysis_id).await.unwrap();
+    assert_eq!(recovered, handle);
 
     let unknown = service.begin(uuid::Uuid::now_v7()).await.unwrap_err();
     assert!(matches!(
@@ -236,6 +231,222 @@ async fn begin_consumes_the_exact_prepared_snapshot_once_without_reparsing() {
             reason: "analysis_not_found"
         }
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborted_begin_caller_cannot_cancel_durable_handoff_or_worker_startup() {
+    let export = tempfile::tempdir().unwrap();
+    let database = tempfile::tempdir().unwrap();
+    write_raycast_export(&export, &[raycast_record(0)]);
+    let store = open_store(&database);
+    let persistence_started = Arc::new(Notify::new());
+    let persistence_gate = Arc::new(Notify::new());
+    let service = ImportService::with_worker_policy(
+        store.clone(),
+        ImportWorkerPolicy::wait_before_persistence(
+            persistence_started.clone(),
+            persistence_gate.clone(),
+        ),
+    );
+    let analysis = service.analyze(export.path()).unwrap();
+
+    let caller_service = service.clone();
+    let caller = tokio::spawn(async move { caller_service.begin(analysis.analysis_id).await });
+    persistence_started.notified().await;
+    caller.abort();
+    let _ = caller.await;
+    persistence_gate.notify_one();
+
+    wait_for_terminal(&service, analysis.analysis_id).await;
+    let recovered = service.begin(analysis.analysis_id).await.unwrap();
+    assert_eq!(recovered.run_id, analysis.analysis_id);
+    assert_eq!(store.stats().unwrap().event_count, 1);
+    let run_count = store
+        .with_reader(|connection| {
+            connection.query_row("SELECT count(*) FROM import_run", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(run_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistence_failure_restores_the_exact_analysis_for_retry() {
+    let export = tempfile::tempdir().unwrap();
+    let database = tempfile::tempdir().unwrap();
+    write_raycast_export(&export, &[raycast_record(0)]);
+    let store = open_store(&database);
+    let service = ImportService::with_worker_policy(
+        store.clone(),
+        ImportWorkerPolicy::fail_next_persistence(),
+    );
+    let analysis = service.analyze(export.path()).unwrap();
+
+    let error = service.begin(analysis.analysis_id).await.unwrap_err();
+    assert!(matches!(
+        error,
+        ImportError::Service {
+            reason: "store_failure"
+        }
+    ));
+    assert!(matches!(
+        service.status(analysis.analysis_id),
+        Err(ImportError::Service {
+            reason: "run_not_found"
+        })
+    ));
+
+    let recovered = service.begin(analysis.analysis_id).await.unwrap();
+    assert_eq!(recovered.run_id, analysis.analysis_id);
+    wait_for_terminal(&service, recovered.run_id).await;
+    assert_eq!(store.stats().unwrap().event_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_begin_and_lost_response_retries_share_one_persisted_run() {
+    let export = tempfile::tempdir().unwrap();
+    let database = tempfile::tempdir().unwrap();
+    write_raycast_export(&export, &[raycast_record(0)]);
+    let store = open_store(&database);
+    let persistence_started = Arc::new(Notify::new());
+    let persistence_gate = Arc::new(Notify::new());
+    let service = ImportService::with_worker_policy(
+        store.clone(),
+        ImportWorkerPolicy::wait_before_persistence(
+            persistence_started.clone(),
+            persistence_gate.clone(),
+        ),
+    );
+    let analysis = service.analyze(export.path()).unwrap();
+
+    let first_service = service.clone();
+    let first = tokio::spawn(async move { first_service.begin(analysis.analysis_id).await });
+    persistence_started.notified().await;
+    let second_service = service.clone();
+    let second = tokio::spawn(async move { second_service.begin(analysis.analysis_id).await });
+    tokio::task::yield_now().await;
+    persistence_gate.notify_one();
+
+    let first_handle = first.await.unwrap().unwrap();
+    let second_handle = second.await.unwrap().unwrap();
+    assert_eq!(first_handle, second_handle);
+    assert_eq!(first_handle.run_id, analysis.analysis_id);
+    wait_for_terminal(&service, analysis.analysis_id).await;
+    assert_eq!(
+        service.begin(analysis.analysis_id).await.unwrap(),
+        first_handle
+    );
+    assert_eq!(store.stats().unwrap().event_count, 1);
+    let run_count = store
+        .with_reader(|connection| {
+            connection.query_row("SELECT count(*) FROM import_run", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(run_count, 1);
+}
+
+#[test]
+fn oversized_manifest_is_rejected_before_reading_with_a_path_free_error() {
+    let export = tempfile::tempdir().unwrap();
+    let manifest = export.path().join("clipboard.json");
+    let file = fs::File::create(&manifest).unwrap();
+    file.set_len((MAX_IMPORT_MANIFEST_BYTES as u64) + 1)
+        .unwrap();
+    let database = tempfile::tempdir().unwrap();
+    let service = ImportService::new(open_store(&database));
+
+    let error = service.analyze(export.path()).unwrap_err();
+
+    assert!(matches!(
+        error,
+        ImportError::Service {
+            reason: "analysis_too_large"
+        }
+    ));
+    let rendered = error.to_string();
+    assert!(!rendered.contains("clipboard.json"));
+    assert!(!rendered.contains(export.path().to_string_lossy().as_ref()));
+}
+
+#[tokio::test]
+async fn oversized_auxiliary_payload_becomes_a_missing_representation_without_aborting_analysis() {
+    let export = tempfile::tempdir().unwrap();
+    fs::create_dir(export.path().join("images")).unwrap();
+    let auxiliary = fs::File::create(export.path().join("images/large.png")).unwrap();
+    auxiliary
+        .set_len((MAX_IMPORT_AUXILIARY_BYTES as u64) + 1)
+        .unwrap();
+    write_supercmd_export(
+        &export,
+        &[json!({
+            "copied_at": "2026-08-22T12:00:00Z",
+            "type": "image",
+            "source_app": "Synthetic Viewer",
+            "bundle_id": "com.example.synthetic-viewer",
+            "file_url": "large.png",
+            "text": "",
+            "ocr_text": "bounded auxiliary",
+            "has_image": true,
+        })],
+    );
+    let database = tempfile::tempdir().unwrap();
+    let store = open_store(&database);
+    let service = ImportService::new(store.clone());
+
+    let analysis = service.analyze(export.path()).unwrap();
+    assert_eq!(
+        (analysis.total, analysis.candidate_records, analysis.failed),
+        (1, 1, 0)
+    );
+    let handle = service.begin(analysis.analysis_id).await.unwrap();
+    wait_for_terminal(&service, handle.run_id).await;
+
+    let (storage_kind, byte_size) = store
+        .with_reader(|connection| {
+            connection.query_row(
+                "SELECT storage_kind, original_byte_size FROM content_representation",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!((storage_kind.as_str(), byte_size), ("missing", 0));
+}
+
+#[tokio::test]
+async fn discarded_analysis_cannot_start_and_does_not_disclose_its_token_or_path() {
+    let export = tempfile::tempdir().unwrap();
+    let database = tempfile::tempdir().unwrap();
+    write_raycast_export(&export, &[raycast_record(0)]);
+    let service = ImportService::new(open_store(&database));
+    let analysis = service.analyze(export.path()).unwrap();
+
+    service.discard_analysis(analysis.analysis_id).unwrap();
+    let discard_error = service.discard_analysis(analysis.analysis_id).unwrap_err();
+    let error = service.begin(analysis.analysis_id).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        ImportError::Service {
+            reason: "analysis_not_found"
+        }
+    ));
+    let rendered = error.to_string();
+    assert!(!rendered.contains(&analysis.analysis_id.to_string()));
+    assert!(!rendered.contains(export.path().to_string_lossy().as_ref()));
+    assert!(
+        !discard_error
+            .to_string()
+            .contains(&analysis.analysis_id.to_string())
+    );
+    assert!(
+        !discard_error
+            .to_string()
+            .contains(export.path().to_string_lossy().as_ref())
+    );
 }
 
 #[tokio::test]

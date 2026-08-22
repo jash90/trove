@@ -1,9 +1,20 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct StoreConfig {
     database_path: PathBuf,
     blob_root: PathBuf,
+}
+
+impl fmt::Debug for StoreConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StoreConfig")
+            .finish_non_exhaustive()
+    }
 }
 
 impl StoreConfig {

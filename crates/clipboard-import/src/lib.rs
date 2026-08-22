@@ -5,7 +5,7 @@ mod raycast;
 mod service;
 mod supercmd;
 
-use std::{collections::HashMap, fmt, fs, path::Path};
+use std::{collections::HashMap, fmt, fs, io::Read, path::Path};
 
 use clipboard_core::{CaptureInput, ContentKind, canonical_bytes};
 use serde_json::Value;
@@ -15,7 +15,9 @@ pub use detect::{DetectedExport, detect_export};
 pub use raycast::{parse_raycast, parse_raycast_report};
 pub use service::{
     IMPORT_BATCH_SIZE, ImportAnalysis, ImportProgress, ImportRunHandle, ImportRunState,
-    ImportService, ImportSummary, ImportWorkerPolicy,
+    ImportService, ImportSummary, ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES,
+    MAX_IMPORT_MANIFEST_BYTES, MAX_PREPARED_CACHE_BYTES, MAX_PREPARED_SOURCE_BYTES,
+    PREPARED_SESSION_CAPACITY, PREPARED_SESSION_TTL,
 };
 pub use supercmd::{parse_supercmd, parse_supercmd_report};
 
@@ -191,14 +193,38 @@ pub(crate) fn record_failure(
 }
 
 pub(crate) fn json_records(path: &Path, source: ImportSource) -> Result<Vec<Value>, ImportError> {
-    let bytes =
-        fs::read(path).map_err(|_| ImportError::export(source.as_str(), "unreadable_export"))?;
+    let bytes = bounded_manifest_bytes(path, source.as_str())?;
     let document: Value = serde_json::from_slice(&bytes)
         .map_err(|_| ImportError::export(source.as_str(), "invalid_document"))?;
     document
         .as_array()
         .cloned()
         .ok_or_else(|| ImportError::export(source.as_str(), "invalid_document"))
+}
+
+pub(crate) fn bounded_manifest_bytes(
+    path: &Path,
+    source_kind: &'static str,
+) -> Result<Vec<u8>, ImportError> {
+    let metadata =
+        fs::metadata(path).map_err(|_| ImportError::export(source_kind, "unreadable_export"))?;
+    if metadata.len() > MAX_IMPORT_MANIFEST_BYTES as u64 {
+        return Err(ImportError::service("analysis_too_large"));
+    }
+    let file =
+        fs::File::open(path).map_err(|_| ImportError::export(source_kind, "unreadable_export"))?;
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(MAX_IMPORT_MANIFEST_BYTES)
+            .min(MAX_IMPORT_MANIFEST_BYTES),
+    );
+    file.take((MAX_IMPORT_MANIFEST_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ImportError::export(source_kind, "unreadable_export"))?;
+    if bytes.len() > MAX_IMPORT_MANIFEST_BYTES {
+        return Err(ImportError::service("analysis_too_large"));
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn canonical_fingerprint<'a>(

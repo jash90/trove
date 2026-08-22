@@ -1,15 +1,13 @@
 CREATE TABLE schema_identity (
   identity TEXT PRIMARY KEY CHECK(identity = 'clipboard-store'),
-  revision INTEGER NOT NULL CHECK(revision = 3)
+  revision INTEGER NOT NULL CHECK(revision = 2)
 );
 
-INSERT INTO schema_identity(identity, revision) VALUES ('clipboard-store', 3);
+INSERT INTO schema_identity(identity, revision) VALUES ('clipboard-store', 2);
 
 CREATE TABLE content (
   content_id INTEGER PRIMARY KEY,
-  content_hash BLOB NOT NULL UNIQUE CHECK(
-    typeof(content_hash) = 'blob' AND length(content_hash) = 32
-  ),
+  content_hash BLOB NOT NULL UNIQUE CHECK(length(content_hash) = 32),
   kind TEXT NOT NULL,
   primary_mime TEXT NOT NULL,
   byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
@@ -47,12 +45,7 @@ CREATE TABLE content_representation (
 
 CREATE TABLE history_event (
   event_id INTEGER PRIMARY KEY,
-  global_id BLOB NOT NULL UNIQUE CHECK(
-    typeof(global_id) = 'blob'
-      AND length(global_id) = 16
-      AND substr(hex(global_id), 13, 1) = '7'
-      AND substr(hex(global_id), 17, 1) IN ('8', '9', 'A', 'B')
-  ),
+  global_id BLOB NOT NULL UNIQUE CHECK(length(global_id) = 16),
   content_id INTEGER NOT NULL REFERENCES content(content_id),
   captured_at_ms INTEGER NOT NULL,
   source_app_id TEXT,
@@ -69,36 +62,15 @@ CREATE TABLE history_event (
 
 CREATE TABLE search_doc (
   content_id INTEGER PRIMARY KEY REFERENCES content(content_id) ON DELETE CASCADE,
-  normalized_text TEXT NOT NULL CHECK(
-    typeof(normalized_text) = 'text'
-      AND length(CAST(normalized_text AS BLOB)) <= 524288
-  )
+  normalized_text TEXT NOT NULL
 );
 
 CREATE TABLE search_derivation (
   content_id INTEGER NOT NULL REFERENCES content(content_id) ON DELETE CASCADE,
-  derivation_hash BLOB NOT NULL CHECK(
-    typeof(derivation_hash) = 'blob' AND length(derivation_hash) = 32
-  ),
-  normalized_text TEXT NOT NULL CHECK(
-    typeof(normalized_text) = 'text'
-      AND length(CAST(normalized_text AS BLOB)) <= 65536
-  ),
+  derivation_hash BLOB NOT NULL CHECK(length(derivation_hash) = 32),
+  normalized_text TEXT NOT NULL,
   PRIMARY KEY(content_id, derivation_hash)
 );
-
-CREATE TRIGGER search_derivation_before_insert
-BEFORE INSERT ON search_derivation
-WHEN NOT EXISTS (
-  SELECT 1 FROM search_derivation
-  WHERE content_id = new.content_id AND derivation_hash = new.derivation_hash
-)
-AND (
-  SELECT count(*) FROM search_derivation WHERE content_id = new.content_id
-) >= 16
-BEGIN
-  SELECT RAISE(ABORT, 'search derivation limit exceeded');
-END;
 
 CREATE VIRTUAL TABLE search_fts USING fts5(
   normalized_text,
@@ -136,20 +108,9 @@ CREATE TABLE artifact (
 
 CREATE TABLE import_run (
   import_run_id INTEGER PRIMARY KEY,
-  external_id BLOB NOT NULL UNIQUE CHECK(
-    typeof(external_id) = 'blob'
-      AND length(external_id) = 16
-      AND substr(hex(external_id), 13, 1) = '7'
-      AND substr(hex(external_id), 17, 1) IN ('8', '9', 'A', 'B')
-  ),
+  external_id BLOB NOT NULL UNIQUE CHECK(length(external_id) = 16),
   source_kind TEXT NOT NULL CHECK(source_kind IN ('raycast', 'supercmd')),
-  source_fingerprint BLOB NOT NULL CHECK(
-    typeof(source_fingerprint) = 'blob' AND length(source_fingerprint) = 32
-  ),
-  initial_failure_fingerprint BLOB NOT NULL CHECK(
-    typeof(initial_failure_fingerprint) = 'blob'
-      AND length(initial_failure_fingerprint) = 32
-  ),
+  source_fingerprint BLOB NOT NULL CHECK(length(source_fingerprint) = 32),
   status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
   worker_generation INTEGER NOT NULL DEFAULT 1 CHECK(worker_generation > 0),
   total_records INTEGER NOT NULL DEFAULT 0 CHECK(total_records >= 0),
@@ -186,9 +147,7 @@ CREATE TABLE import_record (
   import_record_id INTEGER PRIMARY KEY,
   import_run_id INTEGER NOT NULL REFERENCES import_run(import_run_id) ON DELETE RESTRICT,
   source_kind TEXT NOT NULL CHECK(source_kind IN ('raycast', 'supercmd')),
-  record_fingerprint BLOB NOT NULL CHECK(
-    typeof(record_fingerprint) = 'blob' AND length(record_fingerprint) = 32
-  ),
+  record_fingerprint BLOB NOT NULL CHECK(length(record_fingerprint) = 32),
   event_id INTEGER REFERENCES history_event(event_id) ON DELETE SET NULL,
   created_at_ms INTEGER NOT NULL,
   UNIQUE(source_kind, record_fingerprint)
