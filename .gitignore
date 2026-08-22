@@ -1,0 +1,22 @@
+# Private source data
+/clipboard history/
+
+# Local application data
+*.db
+*.db-shm
+*.db-wal
+/blobs/
+/data/
+
+# JavaScript / Tauri build artifacts
+node_modules/
+dist/
+target/
+.turbo/
+
+# Local tooling
+.DS_Store
+.env
+.env.*
+!.env.example
+
