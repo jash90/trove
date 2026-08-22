@@ -4,7 +4,7 @@ mod detect;
 mod raycast;
 mod supercmd;
 
-use std::{fmt, fs, path::Path};
+use std::{collections::HashMap, fmt, fs, path::Path};
 
 use clipboard_core::{CaptureInput, ContentKind, canonical_bytes};
 use serde_json::Value;
@@ -65,6 +65,7 @@ pub struct ImportParseReport {
     pub total: usize,
     pub candidates: Vec<ImportCandidate>,
     pub failures: Vec<ImportRecordFailure>,
+    encounter_ordinals: HashMap<[u8; 32], u64>,
 }
 
 impl ImportParseReport {
@@ -73,12 +74,20 @@ impl ImportParseReport {
             total,
             candidates: Vec::new(),
             failures: Vec::new(),
+            encounter_ordinals: HashMap::new(),
         }
     }
 
     pub(crate) fn push(&mut self, result: Result<ImportCandidate, ImportRecordFailure>) {
         match result {
-            Ok(candidate) => self.candidates.push(candidate),
+            Ok(mut candidate) => {
+                let base_fingerprint = candidate.record_fingerprint;
+                let ordinal = self.encounter_ordinals.entry(base_fingerprint).or_insert(0);
+                candidate.record_fingerprint =
+                    duplicate_event_fingerprint(base_fingerprint, *ordinal);
+                *ordinal += 1;
+                self.candidates.push(candidate);
+            }
             Err(failure) => self.failures.push(failure),
         }
     }
@@ -89,6 +98,14 @@ impl ImportParseReport {
             None => Ok(self.candidates),
         }
     }
+}
+
+fn duplicate_event_fingerprint(base_fingerprint: [u8; 32], ordinal: u64) -> [u8; 32] {
+    let mut hasher = FramedHasher::new();
+    hasher.add_optional(Some(b"clipboard-import.record-fingerprint.duplicate-v1"));
+    hasher.add_optional(Some(&base_fingerprint));
+    hasher.add_optional(Some(&ordinal.to_be_bytes()));
+    hasher.finish()
 }
 
 #[derive(Debug, Error)]

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -357,14 +358,171 @@ fn fingerprints_distinguish_embedded_nul_field_boundaries() {
 
 #[test]
 fn fingerprints_use_canonical_timestamps_not_their_source_spelling() {
+    let first = TempDir::new().unwrap();
+    let second = TempDir::new().unwrap();
+    let first_path = write_export(first.path(), "[{
+      \"createdAt\":\"2026-01-02T03:04:05Z\",\"modifiedAt\":\"2026-01-02T03:04:05Z\",\"category\":\"text\",\"text\":\"same\"
+    }]");
+    let second_path = write_export(second.path(), "[{
+      \"createdAt\":\"2026-01-02T03:04:05+00:00\",\"modifiedAt\":\"2026-01-02T03:04:05+00:00\",\"category\":\"text\",\"text\":\"same\"
+    }]");
+
+    let first = parse_raycast(first_path).unwrap();
+    let second = parse_raycast(second_path).unwrap();
+    assert_eq!(first[0].record_fingerprint, second[0].record_fingerprint);
+}
+
+#[test]
+fn raycast_duplicate_events_have_stable_distinct_fingerprints() {
     let root = TempDir::new().unwrap();
     let path = write_export(root.path(), "[
-      {\"createdAt\":\"2026-01-02T03:04:05Z\",\"modifiedAt\":\"2026-01-02T03:04:05Z\",\"category\":\"text\",\"text\":\"same\"},
-      {\"createdAt\":\"2026-01-02T03:04:05+00:00\",\"modifiedAt\":\"2026-01-02T03:04:05+00:00\",\"category\":\"text\",\"text\":\"same\"}
+      {\"createdAt\":\"2026-01-02T03:04:05Z\",\"modifiedAt\":\"2026-01-02T03:04:05Z\",\"category\":\"text\",\"copyCount\":1,\"text\":\"duplicate\"},
+      {\"createdAt\":\"2026-01-02T03:04:05Z\",\"modifiedAt\":\"2026-01-02T03:04:05Z\",\"category\":\"text\",\"copyCount\":1,\"text\":\"duplicate\"}
     ]");
 
-    let records = parse_raycast(path).unwrap();
-    assert_eq!(records[0].record_fingerprint, records[1].record_fingerprint);
+    let first = parse_raycast_report(&path).unwrap();
+    let second = parse_raycast_report(path).unwrap();
+    assert_eq!(first.candidates.len(), 2);
+    assert_ne!(
+        first.candidates[0].record_fingerprint,
+        first.candidates[1].record_fingerprint
+    );
+    assert_eq!(
+        candidate_fingerprints(&first),
+        candidate_fingerprints(&second)
+    );
+}
+
+#[test]
+fn raycast_duplicate_fingerprints_ignore_unrelated_row_reordering() {
+    let first_root = TempDir::new().unwrap();
+    let second_root = TempDir::new().unwrap();
+    let first_path = write_export(first_root.path(), "[
+      {\"createdAt\":\"2026-01-02T03:04:05Z\",\"modifiedAt\":\"2026-01-02T03:04:05Z\",\"category\":\"text\",\"text\":\"duplicate\"},
+      {\"createdAt\":\"2026-01-02T03:04:05Z\",\"modifiedAt\":\"2026-01-02T03:04:05Z\",\"category\":\"text\",\"text\":\"duplicate\"},
+      {\"createdAt\":\"2026-01-02T03:06:05Z\",\"modifiedAt\":\"2026-01-02T03:06:05Z\",\"category\":\"text\",\"text\":\"other\"}
+    ]");
+    let second_path = write_export(second_root.path(), "[
+      {\"createdAt\":\"2026-01-02T03:06:05Z\",\"modifiedAt\":\"2026-01-02T03:06:05Z\",\"category\":\"text\",\"text\":\"other\"},
+      {\"createdAt\":\"2026-01-02T03:04:05Z\",\"modifiedAt\":\"2026-01-02T03:04:05Z\",\"category\":\"text\",\"text\":\"duplicate\"},
+      {\"createdAt\":\"2026-01-02T03:04:05Z\",\"modifiedAt\":\"2026-01-02T03:04:05Z\",\"category\":\"text\",\"text\":\"duplicate\"}
+    ]");
+
+    let first = parse_raycast_report(first_path).unwrap();
+    let second = parse_raycast_report(second_path).unwrap();
+    assert_eq!(fingerprints_for_text(&first, "duplicate").len(), 2);
+    assert_eq!(
+        fingerprints_for_text(&first, "duplicate"),
+        fingerprints_for_text(&second, "duplicate")
+    );
+}
+
+#[test]
+fn supercmd_duplicate_events_have_stable_distinct_fingerprints() {
+    let root = TempDir::new().unwrap();
+    let path = write_export(
+        root.path(),
+        "[
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"text\",\"text\":\"duplicate\"},
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"text\",\"text\":\"duplicate\"}
+    ]",
+    );
+
+    let first = parse_supercmd_report(root.path(), &path).unwrap();
+    let second = parse_supercmd_report(root.path(), path).unwrap();
+    assert_eq!(first.candidates.len(), 2);
+    assert_ne!(
+        first.candidates[0].record_fingerprint,
+        first.candidates[1].record_fingerprint
+    );
+    assert_eq!(
+        candidate_fingerprints(&first),
+        candidate_fingerprints(&second)
+    );
+}
+
+#[test]
+fn supercmd_duplicate_fingerprints_ignore_unrelated_row_reordering() {
+    let first_root = TempDir::new().unwrap();
+    let second_root = TempDir::new().unwrap();
+    let first_path = write_export(
+        first_root.path(),
+        "[
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"text\",\"text\":\"duplicate\"},
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"text\",\"text\":\"duplicate\"},
+      {\"copied_at\":\"2026-01-02T03:06:05Z\",\"type\":\"text\",\"text\":\"other\"}
+    ]",
+    );
+    let second_path = write_export(
+        second_root.path(),
+        "[
+      {\"copied_at\":\"2026-01-02T03:06:05Z\",\"type\":\"text\",\"text\":\"other\"},
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"text\",\"text\":\"duplicate\"},
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"text\",\"text\":\"duplicate\"}
+    ]",
+    );
+
+    let first = parse_supercmd_report(first_root.path(), first_path).unwrap();
+    let second = parse_supercmd_report(second_root.path(), second_path).unwrap();
+    assert_eq!(fingerprints_for_text(&first, "duplicate").len(), 2);
+    assert_eq!(
+        fingerprints_for_text(&first, "duplicate"),
+        fingerprints_for_text(&second, "duplicate")
+    );
+}
+
+#[test]
+fn supercmd_csv_duplicate_events_have_stable_distinct_fingerprints() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("clipboard.csv");
+    fs::write(&path, "copied_at,type,source_app,bundle_id,pinned,file_url,text,ocr_text,has_image\n2026-01-02T03:04:05Z,text,,,false,,duplicate,,false\n2026-01-02T03:04:05Z,text,,,false,,duplicate,,false\n").unwrap();
+
+    let first = parse_export_report(&path).unwrap();
+    let second = parse_export_report(path).unwrap();
+    assert_eq!(first.candidates.len(), 2);
+    assert_ne!(
+        first.candidates[0].record_fingerprint,
+        first.candidates[1].record_fingerprint
+    );
+    assert_eq!(
+        candidate_fingerprints(&first),
+        candidate_fingerprints(&second)
+    );
+}
+
+#[test]
+fn supercmd_csv_reports_an_unequal_column_row_and_keeps_later_rows() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("clipboard.csv");
+    fs::write(&path, "copied_at,type,source_app,bundle_id,pinned,file_url,text,ocr_text,has_image\n2026-01-02T03:04:05Z,text,,,false,,first,,false\n2026-01-02T03:05:05Z,text,,,false,,bad,false\n2026-01-02T03:06:05Z,text,,,false,,later,,false\n").unwrap();
+
+    let report = parse_export_report(path).unwrap();
+    assert_eq!(report.total, 3);
+    assert_eq!(report.candidates.len(), 2);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].record, 2);
+    assert_eq!(report.failures[0].reason, "invalid_record");
+    assert_eq!(report.candidates[1].primary_text.as_deref(), Some("later"));
+}
+
+fn candidate_fingerprints(report: &clipboard_import::ImportParseReport) -> Vec<[u8; 32]> {
+    report
+        .candidates
+        .iter()
+        .map(|candidate| candidate.record_fingerprint)
+        .collect()
+}
+
+fn fingerprints_for_text(
+    report: &clipboard_import::ImportParseReport,
+    text: &str,
+) -> BTreeSet<[u8; 32]> {
+    report
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.primary_text.as_deref() == Some(text))
+        .map(|candidate| candidate.record_fingerprint)
+        .collect()
 }
 
 #[test]
