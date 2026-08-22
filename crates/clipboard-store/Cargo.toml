@@ -3,3 +3,13 @@ name = "clipboard-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+clipboard-core = { path = "../clipboard-core" }
+rusqlite.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
