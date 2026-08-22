@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clipboard_core::{ContentFlags, ContentKind};
 use clipboard_store::{StoreError, StoreHandle};
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -21,6 +21,56 @@ use query::fts_match_expression;
 pub const MAX_RANKED_CANDIDATES: usize = 200;
 pub const MAX_SEARCH_RESULTS: u32 = 100;
 pub const DEFAULT_SEARCH_RESULTS: u32 = 50;
+
+const RANKED_SEARCH_SQL: &str = "WITH matched_candidates AS MATERIALIZED (
+       SELECT he.event_id, he.global_id, c.kind, he.captured_at_ms, he.source_app_name,
+              he.pinned, c.preview_text, c.byte_size, c.flags, c.content_id,
+              bm25(search_fts) AS lexical_score
+       FROM search_fts
+       JOIN content c ON c.content_id = search_fts.rowid
+       JOIN history_event he ON he.content_id = c.content_id
+       WHERE search_fts MATCH ?1
+         AND (?2 IS NULL OR c.kind = ?2)
+         AND (?3 IS NULL
+              OR he.source_app_id COLLATE NOCASE = ?3 COLLATE NOCASE
+              OR he.source_app_name COLLATE NOCASE = ?3 COLLATE NOCASE)
+         AND (?4 IS NULL OR he.pinned = ?4)
+       ORDER BY lexical_score, he.captured_at_ms DESC, he.event_id DESC
+       LIMIT (?5 + 1)
+     ),
+     bounded_candidates AS MATERIALIZED (
+       SELECT *
+       FROM matched_candidates
+       ORDER BY lexical_score, captured_at_ms DESC, event_id DESC
+       LIMIT ?5
+     ),
+     candidate_content AS MATERIALIZED (
+       SELECT DISTINCT content_id FROM bounded_candidates
+     ),
+     candidate_usage AS MATERIALIZED (
+       SELECT usage.content_id,
+              SUM(usage.occurrence_count) AS occurrence_count,
+              SUM(usage.paste_count) AS paste_count
+       FROM history_event usage
+       JOIN candidate_content candidate ON candidate.content_id = usage.content_id
+       GROUP BY usage.content_id
+     ),
+     truncation AS (
+       SELECT count(*) > ?5 AS ranked_truncated FROM matched_candidates
+     )
+     SELECT candidate.event_id, candidate.global_id, candidate.kind,
+            candidate.captured_at_ms, candidate.source_app_name, candidate.pinned,
+            candidate.preview_text, candidate.byte_size, candidate.flags,
+            EXISTS(
+              SELECT 1 FROM artifact a
+              WHERE a.content_id = candidate.content_id AND a.artifact_kind = 'thumbnail'
+            ),
+            candidate.lexical_score, usage.occurrence_count, usage.paste_count,
+            truncation.ranked_truncated
+     FROM bounded_candidates candidate
+     JOIN candidate_usage usage ON usage.content_id = candidate.content_id
+     CROSS JOIN truncation
+     ORDER BY candidate.lexical_score, candidate.captured_at_ms DESC, candidate.event_id DESC";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -215,48 +265,16 @@ fn ranked_search(
     let candidate_limit =
         i64::try_from(MAX_RANKED_CANDIDATES).map_err(|_| SearchError::InvalidStoreData)?;
     let (raw_candidates, ranked_truncated) = store.with_reader(|connection| {
-        let mut statement = connection.prepare(
-            "SELECT he.event_id, he.global_id, c.kind, he.captured_at_ms, he.source_app_name,
-                    he.pinned, c.preview_text, c.byte_size, c.flags,
-                    EXISTS(
-                      SELECT 1 FROM artifact a
-                      WHERE a.content_id = c.content_id AND a.artifact_kind = 'thumbnail'
-                    ),
-                    bm25(search_fts),
-                    (SELECT COALESCE(SUM(usage.occurrence_count), 0)
-                     FROM history_event usage WHERE usage.content_id = c.content_id),
-                    (SELECT COALESCE(SUM(usage.paste_count), 0)
-                     FROM history_event usage WHERE usage.content_id = c.content_id)
-             FROM search_fts
-             JOIN content c ON c.content_id = search_fts.rowid
-             JOIN history_event he ON he.content_id = c.content_id
-             WHERE search_fts MATCH ?1
-               AND (?2 IS NULL OR c.kind = ?2)
-               AND (?3 IS NULL
-                    OR he.source_app_id COLLATE NOCASE = ?3 COLLATE NOCASE
-                    OR he.source_app_name COLLATE NOCASE = ?3 COLLATE NOCASE)
-               AND (?4 IS NULL OR he.pinned = ?4)
-             ORDER BY bm25(search_fts), he.captured_at_ms DESC, he.event_id DESC
-             LIMIT ?5",
-        )?;
-        let candidates = statement
+        let mut statement = connection.prepare(RANKED_SEARCH_SQL)?;
+        let rows = statement
             .query_map(
                 params![match_expression, kind, app, pinned, candidate_limit],
-                raw_ranked_item,
+                |row| Ok((raw_ranked_item(row)?, row.get::<_, bool>(13)?)),
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        let truncated = if candidates.len() == MAX_RANKED_CANDIDATES {
-            ranked_has_extra_candidate(
-                connection,
-                match_expression,
-                kind,
-                app,
-                pinned,
-                candidate_limit,
-            )?
-        } else {
-            false
-        };
+        let truncated = rows.first().is_some_and(|(_, truncated)| *truncated);
+        let candidates: Vec<RawRankedItem> =
+            rows.into_iter().map(|(candidate, _)| candidate).collect();
         Ok((candidates, truncated))
     })?;
 
@@ -281,33 +299,6 @@ fn ranked_search(
         next_cursor: None,
         ranked_truncated,
     })
-}
-
-fn ranked_has_extra_candidate(
-    connection: &Connection,
-    match_expression: &str,
-    kind: Option<&str>,
-    app: Option<&str>,
-    pinned: Option<i64>,
-    candidate_limit: i64,
-) -> rusqlite::Result<bool> {
-    connection.query_row(
-        "SELECT EXISTS(
-           SELECT 1
-           FROM search_fts
-           JOIN content c ON c.content_id = search_fts.rowid
-           JOIN history_event he ON he.content_id = c.content_id
-           WHERE search_fts MATCH ?1
-             AND (?2 IS NULL OR c.kind = ?2)
-             AND (?3 IS NULL
-                  OR he.source_app_id COLLATE NOCASE = ?3 COLLATE NOCASE
-                  OR he.source_app_name COLLATE NOCASE = ?3 COLLATE NOCASE)
-             AND (?4 IS NULL OR he.pinned = ?4)
-           LIMIT 1 OFFSET ?5
-         )",
-        params![match_expression, kind, app, pinned, candidate_limit],
-        |row| row.get(0),
-    )
 }
 
 struct RawHistoryItem {
@@ -427,4 +418,58 @@ fn current_time_ms() -> i64 {
         .unwrap_or_default()
         .as_millis();
     i64::try_from(millis).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod sql_plan_tests {
+    use clipboard_store::{StoreConfig, StoreHandle};
+    use rusqlite::params;
+
+    use super::{MAX_RANKED_CANDIDATES, RANKED_SEARCH_SQL};
+
+    #[test]
+    fn ranked_sql_materializes_one_bounded_snapshot_and_one_usage_aggregation() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = StoreHandle::open(StoreConfig::new(directory.path().join("search.sqlite")))
+            .expect("synthetic store");
+        let details = store
+            .with_reader(|connection| {
+                let mut statement =
+                    connection.prepare(&format!("EXPLAIN QUERY PLAN {RANKED_SEARCH_SQL}"))?;
+                statement
+                    .query_map(
+                        params![
+                            "\"synthetic\"",
+                            Option::<&str>::None,
+                            Option::<&str>::None,
+                            Option::<i64>::None,
+                            i64::try_from(MAX_RANKED_CANDIDATES).unwrap()
+                        ],
+                        |row| row.get::<_, String>(3),
+                    )?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .expect("ranked query plan");
+
+        assert_eq!(
+            details
+                .iter()
+                .filter(|detail| detail.contains("CORRELATED SCALAR SUBQUERY"))
+                .count(),
+            1,
+            "only the thumbnail existence probe may remain correlated"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("MATERIALIZE bounded_candidates")),
+            "bounded candidates must be materialized"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("MATERIALIZE candidate_usage")),
+            "usage must be grouped once for the bounded content set"
+        );
+    }
 }

@@ -1,17 +1,20 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use clipboard_core::ContentFlags;
-use clipboard_store::ReadOnlyStore;
-use rusqlite::Connection;
+use clipboard_store::{CasStore, ReadOnlyStore};
+use rusqlite::{Connection, backup::Backup};
 use serde::Serialize;
 
-use crate::{CliFailure, KindCount, path_policy::verified_read_only_config, store_failure};
+use crate::{
+    CliFailure, KindCount,
+    path_policy::{exact_blob_root_is_valid, verified_read_only_config},
+    store_failure,
+};
 
 const REAL_EXPECTED_RECORDS: u64 = 6_503;
 const REAL_RAYCAST_RECORDS: u64 = 5_509;
 const REAL_SUPERCMD_RECORDS: u64 = 994;
 const REAL_SUPERCMD_IMAGES: u64 = 15;
-const FTS_SMOKE_TOKEN: &str = "clipboardverificationsmokeconstant";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +29,9 @@ pub(crate) struct VerifyOutput {
     counts_by_kind: Vec<KindCount>,
     sources: Vec<SourceSummary>,
     integrity_status: &'static str,
+    run_status: &'static str,
+    logical_status: &'static str,
+    blob_status: &'static str,
     fts_status: &'static str,
 }
 
@@ -50,10 +56,18 @@ struct SourceSummary {
 
 pub(crate) fn verify(data_dir: &Path, expect_records: u64) -> Result<VerifyOutput, CliFailure> {
     let config = verified_read_only_config(data_dir)?;
+    let blob_root = config.blob_root().to_path_buf();
+    let canonical_data_dir = config
+        .database_path()
+        .parent()
+        .ok_or_else(|| CliFailure::new("unsafe_storage_layout"))?
+        .to_path_buf();
     let store = ReadOnlyStore::open_existing(config).map_err(store_failure)?;
-    let snapshot = store
+    let mut snapshot = store
         .with_reader(read_verification_snapshot)
         .map_err(store_failure)?;
+    snapshot.blob_ok = exact_blob_root_is_valid(&canonical_data_dir, &blob_root)
+        && blob_references_are_coherent(&blob_root, &snapshot.blob_references);
     verification_output(snapshot, expect_records)
 }
 
@@ -66,7 +80,17 @@ struct VerificationSnapshot {
     sources: Vec<RawSourceSummary>,
     image_counts: BTreeMap<String, (i64, i64)>,
     integrity_ok: bool,
+    run_status_ok: bool,
+    logical_ok: bool,
+    blob_ok: bool,
+    blob_references: Vec<BlobReference>,
     fts_ok: bool,
+}
+
+struct BlobReference {
+    relpath: String,
+    stored_byte_size: i64,
+    original_byte_size: Option<i64>,
 }
 
 struct RawKindCount {
@@ -82,9 +106,23 @@ struct RawSourceSummary {
     already_present: i64,
     skipped: i64,
     failed: i64,
+    materialized_records: i64,
+    declared_imported_records: i64,
 }
 
 fn read_verification_snapshot(connection: &Connection) -> rusqlite::Result<VerificationSnapshot> {
+    connection.execute_batch("BEGIN DEFERRED")?;
+    let snapshot = read_verification_snapshot_inner(connection);
+    let rollback = connection.execute_batch("ROLLBACK");
+    match (snapshot, rollback) {
+        (Ok(snapshot), Ok(())) => Ok(snapshot),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn read_verification_snapshot_inner(
+    connection: &Connection,
+) -> rusqlite::Result<VerificationSnapshot> {
     let physical_content_count =
         connection.query_row("SELECT count(*) FROM content", [], |row| row.get(0))?;
     let event_count =
@@ -100,9 +138,16 @@ fn read_verification_snapshot(connection: &Connection) -> rusqlite::Result<Verif
         [missing_mask],
         |row| row.get(0),
     )?;
+    let run_status_ok = connection.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM import_run WHERE status != 'completed')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
     let kinds = read_kind_counts(connection, missing_mask)?;
     let sources = read_latest_sources(connection)?;
     let image_counts = read_source_image_counts(connection, missing_mask)?;
+    let logical_ok = logical_relations_are_coherent(connection, event_count)?;
+    let blob_references = read_blob_references(connection)?;
     let integrity_ok = connection
         .query_row("PRAGMA integrity_check(1)", [], |row| {
             row.get::<_, String>(0)
@@ -118,7 +163,50 @@ fn read_verification_snapshot(connection: &Connection) -> rusqlite::Result<Verif
         sources,
         image_counts,
         integrity_ok,
+        run_status_ok,
+        logical_ok,
+        blob_ok: false,
+        blob_references,
         fts_ok,
+    })
+}
+
+fn read_blob_references(connection: &Connection) -> rusqlite::Result<Vec<BlobReference>> {
+    let mut statement = connection.prepare(
+        "SELECT blob_relpath, stored_byte_size, original_byte_size
+         FROM content_representation
+         WHERE storage_kind = 'cas'
+         UNION ALL
+         SELECT blob_relpath, byte_size, NULL
+         FROM artifact",
+    )?;
+    statement
+        .query_map([], |row| {
+            Ok(BlobReference {
+                relpath: row.get(0)?,
+                stored_byte_size: row.get(1)?,
+                original_byte_size: row.get(2)?,
+            })
+        })?
+        .collect()
+}
+
+fn blob_references_are_coherent(blob_root: &Path, references: &[BlobReference]) -> bool {
+    let cas = CasStore::new(blob_root);
+    references.iter().all(|reference| {
+        let Ok(bytes) = cas.read(&reference.relpath) else {
+            return false;
+        };
+        let Ok(actual_size) = u64::try_from(bytes.len()) else {
+            return false;
+        };
+        let Ok(stored_byte_size) = u64::try_from(reference.stored_byte_size) else {
+            return false;
+        };
+        let original_matches = reference.original_byte_size.is_none_or(|size| {
+            u64::try_from(size).is_ok_and(|original_byte_size| original_byte_size == actual_size)
+        });
+        stored_byte_size == actual_size && original_matches
     })
 }
 
@@ -147,8 +235,8 @@ fn read_kind_counts(
 
 fn read_latest_sources(connection: &Connection) -> rusqlite::Result<Vec<RawSourceSummary>> {
     let mut statement = connection.prepare(
-        "WITH completed AS (
-           SELECT source_kind, source_fingerprint, total_records, imported_records,
+        "WITH completed AS MATERIALIZED (
+           SELECT import_run_id, source_kind, source_fingerprint, total_records, imported_records,
                   already_present_records, skipped_records, failed_records,
                   ROW_NUMBER() OVER (
                     PARTITION BY source_kind, source_fingerprint
@@ -158,8 +246,23 @@ fn read_latest_sources(connection: &Connection) -> rusqlite::Result<Vec<RawSourc
            WHERE status = 'completed'
          )
          SELECT source_kind, total_records, imported_records, already_present_records,
-                skipped_records, failed_records
-         FROM completed
+                skipped_records, failed_records,
+                (
+                  SELECT count(*)
+                  FROM import_record ir
+                  JOIN import_run owner ON owner.import_run_id = ir.import_run_id
+                  WHERE owner.status = 'completed'
+                    AND owner.source_kind = selected.source_kind
+                    AND owner.source_fingerprint = selected.source_fingerprint
+                ),
+                (
+                  SELECT COALESCE(sum(owner.imported_records), 0)
+                  FROM import_run owner
+                  WHERE owner.status = 'completed'
+                    AND owner.source_kind = selected.source_kind
+                    AND owner.source_fingerprint = selected.source_fingerprint
+                )
+         FROM completed selected
          WHERE position = 1
          ORDER BY source_kind, source_fingerprint",
     )?;
@@ -172,9 +275,40 @@ fn read_latest_sources(connection: &Connection) -> rusqlite::Result<Vec<RawSourc
                 already_present: row.get(3)?,
                 skipped: row.get(4)?,
                 failed: row.get(5)?,
+                materialized_records: row.get(6)?,
+                declared_imported_records: row.get(7)?,
             })
         })?
         .collect()
+}
+
+fn logical_relations_are_coherent(
+    connection: &Connection,
+    event_count: i64,
+) -> rusqlite::Result<bool> {
+    let mut foreign_keys = connection.prepare("PRAGMA foreign_key_check")?;
+    let foreign_keys_ok = foreign_keys.query([])?.next()?.is_none();
+    let relations_ok = connection.query_row(
+        "SELECT
+           NOT EXISTS(SELECT 1 FROM import_record WHERE event_id IS NULL)
+           AND (SELECT count(*) FROM import_record) = ?1
+           AND (SELECT count(DISTINCT event_id) FROM import_record) = ?1
+           AND NOT EXISTS(
+             SELECT 1
+             FROM history_event he
+             LEFT JOIN import_record ir ON ir.event_id = he.event_id
+             WHERE ir.import_record_id IS NULL
+           )
+           AND NOT EXISTS(
+             SELECT 1
+             FROM import_record ir
+             JOIN import_run run ON run.import_run_id = ir.import_run_id
+             WHERE ir.source_kind != run.source_kind
+           )",
+        [event_count],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(foreign_keys_ok && relations_ok)
 }
 
 fn read_source_image_counts(
@@ -201,35 +335,20 @@ fn read_source_image_counts(
         .collect()
 }
 
-fn fts_is_coherent(connection: &Connection, document_count: i64) -> bool {
-    let result = (|| -> rusqlite::Result<bool> {
-        let fts_count = connection.query_row("SELECT count(*) FROM search_fts", [], |row| {
-            row.get::<_, i64>(0)
-        })?;
-        let missing_rows = connection.query_row(
-            "SELECT count(*)
-             FROM search_doc d
-             LEFT JOIN search_fts f ON f.rowid = d.content_id
-             WHERE f.rowid IS NULL",
+fn fts_is_coherent(connection: &Connection, _document_count: i64) -> bool {
+    (|| -> rusqlite::Result<()> {
+        let mut copy = Connection::open_in_memory()?;
+        {
+            let backup = Backup::new(connection, &mut copy)?;
+            backup.run_to_completion(128, Duration::ZERO, None)?;
+        }
+        copy.execute(
+            "INSERT INTO search_fts(search_fts, rank) VALUES('integrity-check', 1)",
             [],
-            |row| row.get::<_, i64>(0),
         )?;
-        let extra_rows = connection.query_row(
-            "SELECT count(*)
-             FROM search_fts f
-             LEFT JOIN search_doc d ON d.content_id = f.rowid
-             WHERE d.content_id IS NULL",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        let _: i64 = connection.query_row(
-            "SELECT count(*) FROM search_fts WHERE search_fts MATCH ?1",
-            [FTS_SMOKE_TOKEN],
-            |row| row.get(0),
-        )?;
-        Ok(fts_count == document_count && missing_rows == 0 && extra_rows == 0)
-    })();
-    result.unwrap_or(false)
+        Ok(())
+    })()
+    .is_ok()
 }
 
 fn verification_output(
@@ -253,6 +372,8 @@ fn verification_output(
         .collect::<Result<Vec<_>, CliFailure>>()?;
     let mut sources = Vec::with_capacity(snapshot.sources.len());
     let mut latest_source_total = 0_u64;
+    let mut selected_materialized_total = 0_u64;
+    let mut selected_sources_are_materialized = true;
     for source in snapshot.sources {
         let source_kind = known_source(&source.source_kind)?;
         let total = checked_count(source.total)?;
@@ -260,9 +381,18 @@ fn verification_output(
         let already_present = checked_count(source.already_present)?;
         let skipped = checked_count(source.skipped)?;
         let failed = checked_count(source.failed)?;
+        let materialized_records = checked_count(source.materialized_records)?;
+        let declared_imported_records = checked_count(source.declared_imported_records)?;
         latest_source_total = latest_source_total
             .checked_add(total)
             .ok_or_else(|| CliFailure::new("count_overflow"))?;
+        selected_materialized_total = selected_materialized_total
+            .checked_add(materialized_records)
+            .ok_or_else(|| CliFailure::new("count_overflow"))?;
+        selected_sources_are_materialized &= materialized_records == total
+            && declared_imported_records == materialized_records
+            && skipped == 0
+            && failed == 0;
         let (available_images, missing_images) = snapshot
             .image_counts
             .get(source_kind)
@@ -320,7 +450,13 @@ fn verification_output(
     let kinds_total = counts_by_kind
         .iter()
         .try_fold(0_u64, |total, kind| total.checked_add(kind.event_count));
+    let logical_accounting_ok = snapshot.logical_ok
+        && selected_sources_are_materialized
+        && selected_materialized_total == event_count;
     let healthy = snapshot.integrity_ok
+        && snapshot.run_status_ok
+        && logical_accounting_ok
+        && snapshot.blob_ok
         && snapshot.fts_ok
         && source_accounting_ok
         && one_source_each
@@ -344,6 +480,17 @@ fn verification_output(
         } else {
             "failed"
         },
+        run_status: if snapshot.run_status_ok {
+            "ok"
+        } else {
+            "failed"
+        },
+        logical_status: if logical_accounting_ok {
+            "ok"
+        } else {
+            "failed"
+        },
+        blob_status: if snapshot.blob_ok { "ok" } else { "failed" },
         fts_status: if snapshot.fts_ok { "ok" } else { "failed" },
     })
 }

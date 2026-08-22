@@ -4,6 +4,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use cap_fs_ext::DirExt;
+use cap_std::{ambient_authority, fs::Dir};
 use clipboard_store::StoreConfig;
 
 use crate::CliFailure;
@@ -22,16 +24,25 @@ pub(crate) fn prepare_import_paths(
     source: &Path,
     data_dir: &Path,
 ) -> Result<ValidatedImportPaths, CliFailure> {
+    prepare_import_paths_with_component_hook(source, data_dir, |_| {})
+}
+
+fn prepare_import_paths_with_component_hook(
+    source: &Path,
+    data_dir: &Path,
+    mut before_component_create: impl FnMut(&Path),
+) -> Result<ValidatedImportPaths, CliFailure> {
     let source = canonical_source(source)?;
-    let candidate = resolve_data_candidate(data_dir)?;
-    validate_data_boundary(&candidate)?;
-    validate_nonoverlap(&source, &candidate)?;
-    if candidate.exists() && !candidate.is_dir() {
+    let resolved = resolve_data_candidate(data_dir)?;
+    validate_data_boundary(&resolved.candidate)?;
+    validate_nonoverlap(&source, &resolved.candidate)?;
+    let data_directory =
+        create_missing_components_no_follow(&resolved, &mut before_component_create)?;
+    let data_dir = fs::canonicalize(&resolved.candidate)
+        .map_err(|_| CliFailure::new("storage_unavailable"))?;
+    if data_dir != resolved.candidate {
         return Err(CliFailure::new("unsafe_storage_layout"));
     }
-    fs::create_dir_all(&candidate).map_err(|_| CliFailure::new("storage_unavailable"))?;
-    let data_dir =
-        fs::canonicalize(&candidate).map_err(|_| CliFailure::new("storage_unavailable"))?;
     validate_data_boundary(&data_dir)?;
     let current_source = canonical_source(&source)?;
     if current_source != source {
@@ -42,11 +53,7 @@ pub(crate) fn prepare_import_paths(
     let database_path = data_dir.join(DATABASE_FILENAME);
     let blob_root = data_dir.join(BLOB_DIRECTORY);
     ensure_optional_child(&data_dir, &database_path, ChildKind::File)?;
-    let blobs_exist = ensure_optional_child(&data_dir, &blob_root, ChildKind::Directory)?;
-    if !blobs_exist {
-        fs::create_dir(&blob_root).map_err(|_| CliFailure::new("storage_unavailable"))?;
-    }
-    ensure_existing_child(&data_dir, &blob_root, ChildKind::Directory)?;
+    ensure_directory_child_no_follow(&data_directory, &data_dir, BLOB_DIRECTORY)?;
     Ok(ValidatedImportPaths {
         source,
         data_dir,
@@ -56,12 +63,13 @@ pub(crate) fn prepare_import_paths(
 }
 
 pub(crate) fn verify_created_storage(paths: &ValidatedImportPaths) -> Result<(), CliFailure> {
+    ensure_exact_directory(&paths.data_dir)?;
     ensure_existing_child(&paths.data_dir, &paths.database_path, ChildKind::File)?;
     ensure_existing_child(&paths.data_dir, &paths.blob_root, ChildKind::Directory)
 }
 
 pub(crate) fn verified_read_only_config(data_dir: &Path) -> Result<StoreConfig, CliFailure> {
-    let candidate = resolve_data_candidate(data_dir)?;
+    let candidate = resolve_data_candidate(data_dir)?.candidate;
     validate_data_boundary(&candidate)?;
     if !candidate.exists() {
         return Err(CliFailure::new("database_missing"));
@@ -77,8 +85,12 @@ pub(crate) fn verified_read_only_config(data_dir: &Path) -> Result<StoreConfig, 
     if !ensure_optional_child(&data_dir, &database_path, ChildKind::File)? {
         return Err(CliFailure::new("database_missing"));
     }
-    ensure_optional_child(&data_dir, &blob_root, ChildKind::Directory)?;
     Ok(StoreConfig::new(database_path).with_blob_root(blob_root))
+}
+
+pub(crate) fn exact_blob_root_is_valid(data_dir: &Path, blob_root: &Path) -> bool {
+    ensure_exact_directory(data_dir).is_ok()
+        && ensure_existing_child(data_dir, blob_root, ChildKind::Directory).is_ok()
 }
 
 pub(crate) fn canonical_source(path: &Path) -> Result<PathBuf, CliFailure> {
@@ -90,7 +102,13 @@ pub(crate) fn canonical_source(path: &Path) -> Result<PathBuf, CliFailure> {
     Ok(canonical)
 }
 
-fn resolve_data_candidate(path: &Path) -> Result<PathBuf, CliFailure> {
+struct ResolvedDataCandidate {
+    candidate: PathBuf,
+    existing_ancestor: PathBuf,
+    missing_components: Vec<OsString>,
+}
+
+fn resolve_data_candidate(path: &Path) -> Result<ResolvedDataCandidate, CliFailure> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -132,10 +150,70 @@ fn resolve_data_candidate(path: &Path) -> Result<PathBuf, CliFailure> {
     if !resolved.is_dir() {
         return Err(CliFailure::new("unsafe_storage_layout"));
     }
-    for component in suffix.into_iter().rev() {
+    suffix.reverse();
+    for component in &suffix {
         resolved.push(component);
     }
-    Ok(resolved)
+    Ok(ResolvedDataCandidate {
+        candidate: resolved,
+        existing_ancestor: fs::canonicalize(ancestor)
+            .map_err(|_| CliFailure::new("unsafe_data_dir"))?,
+        missing_components: suffix,
+    })
+}
+
+fn create_missing_components_no_follow(
+    resolved: &ResolvedDataCandidate,
+    before_component_create: &mut impl FnMut(&Path),
+) -> Result<Dir, CliFailure> {
+    let mut directory = Dir::open_ambient_dir(&resolved.existing_ancestor, ambient_authority())
+        .map_err(|_| CliFailure::new("storage_unavailable"))?;
+    let mut current_path = resolved.existing_ancestor.clone();
+    for component in &resolved.missing_components {
+        current_path.push(component);
+        before_component_create(&current_path);
+        match directory.create_dir(Path::new(component)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(CliFailure::new("storage_unavailable")),
+        }
+        directory = directory
+            .open_dir_nofollow(Path::new(component))
+            .map_err(|_| CliFailure::new("unsafe_storage_layout"))?;
+    }
+    ensure_exact_directory(&resolved.candidate)?;
+    Ok(directory)
+}
+
+fn ensure_directory_child_no_follow(
+    directory: &Dir,
+    parent: &Path,
+    child_name: &str,
+) -> Result<(), CliFailure> {
+    ensure_exact_directory(parent)?;
+    match directory.create_dir(child_name) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(CliFailure::new("storage_unavailable")),
+    }
+    directory
+        .open_dir_nofollow(child_name)
+        .map_err(|_| CliFailure::new("unsafe_storage_layout"))?;
+    let child = parent.join(child_name);
+    ensure_existing_child(parent, &child, ChildKind::Directory)
+}
+
+fn ensure_exact_directory(path: &Path) -> Result<(), CliFailure> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| CliFailure::new("unsafe_storage_layout"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CliFailure::new("unsafe_storage_layout"));
+    }
+    let canonical = fs::canonicalize(path).map_err(|_| CliFailure::new("unsafe_storage_layout"))?;
+    if canonical != path {
+        return Err(CliFailure::new("unsafe_storage_layout"));
+    }
+    Ok(())
 }
 
 fn validate_data_boundary(data_dir: &Path) -> Result<(), CliFailure> {
@@ -200,4 +278,49 @@ fn ensure_existing_child(
         return Err(CliFailure::new("unsafe_storage_layout"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, fs};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
+    use tempfile::tempdir;
+
+    use super::prepare_import_paths_with_component_hook;
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_substitution_between_resolution_and_component_creation() {
+        let temporary = tempdir().expect("temporary directory");
+        let source = temporary.path().join("synthetic-source.json");
+        fs::write(&source, b"synthetic").expect("synthetic source");
+        let existing_parent = temporary.path().join("storage-parent");
+        fs::create_dir(&existing_parent).expect("storage parent");
+        let outside = temporary.path().join("outside-target");
+        fs::create_dir(&outside).expect("outside target");
+        let marker = outside.join("must-remain");
+        fs::write(&marker, b"unchanged").expect("outside marker");
+        let data_dir = existing_parent.join("pending").join("data");
+        let substituted = Cell::new(false);
+
+        let result = prepare_import_paths_with_component_hook(&source, &data_dir, |component| {
+            if !substituted.replace(true) {
+                symlink(&outside, component).expect("insert deterministic substitution");
+            }
+        });
+
+        let error = match result {
+            Ok(_) => panic!("substitution must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "unsafe_storage_layout");
+        assert_eq!(
+            fs::read(&marker).expect("outside marker remains readable"),
+            b"unchanged"
+        );
+        assert!(!outside.join("data").exists());
+    }
 }

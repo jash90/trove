@@ -1,9 +1,12 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
 
+use clipboard_store::CasStore;
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
 fn cli(args: &[&str]) -> Output {
@@ -64,6 +67,134 @@ fn run_import(source: &Path, data_dir: &Path) -> Output {
         "--data-dir",
         data_dir.to_str().unwrap(),
     ])
+}
+
+fn run_verify(data_dir: &Path, expected_records: u64) -> Output {
+    cli(&[
+        "verify",
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "--expect-records",
+        &expected_records.to_string(),
+    ])
+}
+
+fn imported_two_source_store() -> (tempfile::TempDir, PathBuf) {
+    let sandbox = tempfile::tempdir().unwrap();
+    let raycast = sandbox.path().join("synthetic-raycast");
+    let supercmd = sandbox.path().join("synthetic-supercmd");
+    let data_dir = sandbox.path().join("synthetic-data");
+    valid_raycast_export(&raycast);
+    fs::create_dir_all(&supercmd).unwrap();
+    fs::write(
+        supercmd.join("clipboard.json"),
+        serde_json::to_vec(&json!([{
+            "copied_at": "2026-08-22T12:01:00Z",
+            "type": "text",
+            "source_app": "Synthetic App",
+            "bundle_id": "com.example.synthetic",
+            "text": "second sanitized fixture payload",
+            "has_image": false
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(run_import(&raycast, &data_dir).status.success());
+    assert!(run_import(&supercmd, &data_dir).status.success());
+    assert!(run_verify(&data_dir, 2).status.success());
+    (sandbox, data_dir)
+}
+
+fn imported_store_with_cas() -> (tempfile::TempDir, PathBuf) {
+    let sandbox = tempfile::tempdir().unwrap();
+    let raycast = sandbox.path().join("synthetic-raycast");
+    let supercmd = sandbox.path().join("synthetic-supercmd");
+    let data_dir = sandbox.path().join("synthetic-data");
+    valid_raycast_export(&raycast);
+    fs::create_dir_all(supercmd.join("images")).unwrap();
+    fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/clipboard-import/tests/fixtures/supercmd/images/sample.png"),
+        supercmd.join("images/synthetic-available.png"),
+    )
+    .unwrap();
+    fs::write(
+        supercmd.join("clipboard.json"),
+        serde_json::to_vec(&json!([{
+            "copied_at": "2026-08-22T12:01:00Z",
+            "type": "image",
+            "source_app": "Synthetic App",
+            "bundle_id": "com.example.synthetic",
+            "file_url": "images/synthetic-available.png",
+            "text": "",
+            "has_image": true
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(run_import(&raycast, &data_dir).status.success());
+    assert!(run_import(&supercmd, &data_dir).status.success());
+    assert!(run_verify(&data_dir, 2).status.success());
+    (sandbox, data_dir)
+}
+
+fn first_cas_blob_path(data_dir: &Path) -> PathBuf {
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    let relpath: String = connection
+        .query_row(
+            "SELECT blob_relpath FROM content_representation
+             WHERE storage_kind = 'cas' ORDER BY representation_id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    data_dir.join("blobs").join(relpath)
+}
+
+fn insert_unfinished_run(data_dir: &Path, status: &str, discriminator: u8) {
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    let mut external_id = [0_u8; 16];
+    external_id[0] = discriminator;
+    external_id[6] = 0x70;
+    external_id[8] = 0x80;
+    let source_fingerprint = [discriminator; 32];
+    let initial_failure_fingerprint = [discriminator.wrapping_add(1); 32];
+    let finished_at_ms = (status == "failed").then_some(2_i64);
+    connection
+        .execute(
+            "INSERT INTO import_run(
+               external_id, source_kind, source_fingerprint,
+               initial_failure_fingerprint, status, total_records,
+               candidate_records, next_candidate_offset, imported_records,
+               already_present_records, skipped_records, failed_records,
+               started_at_ms, finished_at_ms, error_code
+             ) VALUES (?1, 'raycast', ?2, ?3, ?4, 0, 0, 0, 0, 0, 0, 0, 1, ?5, ?6)",
+            params![
+                external_id.as_slice(),
+                source_fingerprint.as_slice(),
+                initial_failure_fingerprint.as_slice(),
+                status,
+                finished_at_ms,
+                (status == "failed").then_some("synthetic_failure")
+            ],
+        )
+        .unwrap();
+}
+
+fn assert_failed_verification(output: &Output, failed_field: &str) {
+    assert!(!output.status.success());
+    let value = json_output(output);
+    assert_eq!(value["status"], "failed");
+    assert_eq!(value[failed_field], "failed");
+    assert_redacted(
+        output,
+        &[
+            "synthetic-raycast",
+            "synthetic-supercmd",
+            "synthetic-data",
+            "sanitized fixture payload",
+        ],
+    );
 }
 
 #[test]
@@ -256,6 +387,265 @@ fn verify_of_a_missing_database_is_logically_read_only_and_noncreating() {
 }
 
 #[test]
+fn verify_fails_when_any_import_run_is_still_running() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    insert_unfinished_run(&data_dir, "running", 41);
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "runStatus");
+}
+
+#[test]
+fn verify_fails_when_any_import_run_has_failed() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    insert_unfinished_run(&data_dir, "failed", 42);
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "runStatus");
+}
+
+#[test]
+fn verify_fails_when_a_non_image_import_record_is_deleted() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    connection
+        .execute(
+            "DELETE FROM import_record
+             WHERE import_record_id = (
+               SELECT import_record_id FROM import_record
+               WHERE source_kind = 'raycast' ORDER BY import_record_id LIMIT 1
+             )",
+            [],
+        )
+        .unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "logicalStatus");
+}
+
+#[test]
+fn verify_fails_when_an_import_record_source_disagrees_with_its_run() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE import_record
+             SET source_kind = 'supercmd'
+             WHERE import_record_id = (
+               SELECT import_record_id FROM import_record
+               WHERE source_kind = 'raycast' ORDER BY import_record_id LIMIT 1
+             )",
+            [],
+        )
+        .unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "logicalStatus");
+}
+
+#[test]
+fn verify_fails_when_an_import_record_event_is_null() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE import_record SET event_id = NULL
+             WHERE import_record_id = (
+               SELECT import_record_id FROM import_record ORDER BY import_record_id LIMIT 1
+             )",
+            [],
+        )
+        .unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "logicalStatus");
+}
+
+#[test]
+fn verify_fails_when_two_import_records_point_to_one_event() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE import_record
+             SET event_id = (SELECT min(event_id) FROM history_event)
+             WHERE event_id = (SELECT max(event_id) FROM history_event)",
+            [],
+        )
+        .unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "logicalStatus");
+}
+
+#[test]
+fn verify_fails_foreign_key_check_without_disclosing_database_details() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifact(content_id, artifact_kind, blob_relpath, byte_size, created_at_ms)
+             VALUES (9223372036854775806, 'synthetic', '00/0000000000000000000000000000000000000000000000000000000000000000', 0, 1)",
+            [],
+        )
+        .unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "logicalStatus");
+}
+
+#[test]
+fn verify_reports_failed_blob_status_when_the_exact_blob_root_is_missing() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    fs::remove_dir(data_dir.join("blobs")).unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "blobStatus");
+}
+
+#[test]
+fn verify_reports_failed_blob_status_for_a_missing_cas_blob() {
+    let (_sandbox, data_dir) = imported_store_with_cas();
+    let blob_path = first_cas_blob_path(&data_dir);
+    fs::remove_file(blob_path).unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "blobStatus");
+}
+
+#[test]
+fn verify_reports_failed_blob_status_for_corrupt_cas_bytes() {
+    let (_sandbox, data_dir) = imported_store_with_cas();
+    let blob_path = first_cas_blob_path(&data_dir);
+    fs::write(blob_path, b"synthetic corrupt bytes").unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "blobStatus");
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_reports_failed_blob_status_for_a_symlinked_cas_blob() {
+    use std::os::unix::fs::symlink;
+
+    let (sandbox, data_dir) = imported_store_with_cas();
+    let blob_path = first_cas_blob_path(&data_dir);
+    let bytes = fs::read(&blob_path).unwrap();
+    fs::remove_file(&blob_path).unwrap();
+    let outside = sandbox.path().join("synthetic-outside-blob");
+    fs::write(&outside, bytes).unwrap();
+    symlink(outside, blob_path).unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "blobStatus");
+}
+
+#[test]
+fn verify_checks_artifact_blob_sizes_through_the_cas_boundary() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let cas = CasStore::new(data_dir.join("blobs"));
+    let blob = cas.put(b"synthetic artifact bytes").unwrap();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    let content_id: i64 = connection
+        .query_row(
+            "SELECT content_id FROM content ORDER BY content_id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifact(content_id, artifact_kind, blob_relpath, byte_size, created_at_ms)
+             VALUES (?1, 'synthetic-artifact', ?2, ?3, 1)",
+            params![
+                content_id,
+                blob.relpath,
+                i64::try_from(blob.byte_size).unwrap() + 1
+            ],
+        )
+        .unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "blobStatus");
+}
+
+#[test]
+fn verify_reads_artifact_references_through_the_cas_boundary() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let blob_root = data_dir.join("blobs");
+    let cas = CasStore::new(&blob_root);
+    let blob = cas.put(b"synthetic artifact boundary bytes").unwrap();
+    let blob_path = blob_root.join(&blob.relpath);
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    let content_id: i64 = connection
+        .query_row(
+            "SELECT content_id FROM content ORDER BY content_id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifact(content_id, artifact_kind, blob_relpath, byte_size, created_at_ms)
+             VALUES (?1, 'synthetic-boundary', ?2, ?3, 1)",
+            params![
+                content_id,
+                blob.relpath,
+                i64::try_from(blob.byte_size).unwrap()
+            ],
+        )
+        .unwrap();
+    fs::remove_file(blob_path).unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "blobStatus");
+}
+
+#[test]
+fn verify_detects_an_empty_external_content_fts_index() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO search_fts(search_fts) VALUES('delete-all')",
+            [],
+        )
+        .unwrap();
+    let source_documents: i64 = connection
+        .query_row("SELECT count(*) FROM search_doc", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(source_documents, 2);
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "ftsStatus");
+    let matches_after_verify: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM search_fts WHERE search_fts MATCH 'sanitized'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(matches_after_verify, 0);
+}
+
+#[test]
 fn all_error_channels_redact_source_paths_filenames_and_payloads() {
     let sandbox = tempfile::tempdir().unwrap();
     let source_name = "private-source-path-sentinel";
@@ -380,7 +770,34 @@ fn two_source_import_repeat_and_verify_report_only_sanitized_accounting() {
     assert_eq!(value["eventCount"], 5);
     assert_eq!(value["physicalContentCount"], 4);
     assert_eq!(value["integrityStatus"], "ok");
+    assert_eq!(value["runStatus"], "ok");
+    assert_eq!(value["logicalStatus"], "ok");
+    assert_eq!(value["blobStatus"], "ok");
     assert_eq!(value["ftsStatus"], "ok");
+    assert_eq!(
+        value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "blobStatus",
+            "countsByKind",
+            "eventCount",
+            "expectedRecords",
+            "ftsStatus",
+            "indexedDocumentCount",
+            "integrityStatus",
+            "latestSourceTotal",
+            "logicalStatus",
+            "missingPayloadCount",
+            "physicalContentCount",
+            "runStatus",
+            "sources",
+            "status",
+        ])
+    );
     let sources = value["sources"].as_array().unwrap();
     let raycast_summary = sources
         .iter()
@@ -396,6 +813,24 @@ fn two_source_import_repeat_and_verify_report_only_sanitized_accounting() {
     assert_eq!(supercmd_summary["alreadyPresent"], 3);
     assert_eq!(supercmd_summary["availableImageEvents"], 1);
     assert_eq!(supercmd_summary["missingImageEvents"], 1);
+    assert_eq!(
+        supercmd_summary
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "alreadyPresent",
+            "availableImageEvents",
+            "failed",
+            "imported",
+            "missingImageEvents",
+            "skipped",
+            "sourceKind",
+            "total",
+        ])
+    );
     assert_redacted(
         &verify,
         &["shared sanitized payload", "available.png", "missing.png"],

@@ -281,6 +281,8 @@ dependencies = [
 name = "clipboard-import-cli"
 version = "0.1.0"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
  "clap",
  "clipboard-core",
  "clipboard-import",
