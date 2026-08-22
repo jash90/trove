@@ -15,6 +15,8 @@ mod tests {
 
     #[test]
     fn normalizes_polish_l_and_diacritics_for_search() {
-        assert_eq!(normalize_search_text("ŁÓDŹ i łąka"), "lodz i laka");
+        let accented = normalize_search_text("ŁÓDŹ i łąka");
+        assert_eq!(accented, "lodz i laka");
+        assert_eq!(normalize_search_text("LODZ I LAKA"), accented);
     }
 }

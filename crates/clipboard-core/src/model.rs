@@ -125,6 +125,26 @@ mod tests {
     }
 
     #[test]
+    fn canonical_bytes_normalizes_textual_nfc_and_newlines() {
+        assert_eq!(
+            canonical_bytes(ContentKind::Text, "e\u{301}\r\n b  ".as_bytes()),
+            "é\n b  ".as_bytes(),
+        );
+    }
+
+    #[test]
+    fn canonical_bytes_preserves_non_textual_bytes() {
+        let payload = [0x00, 0xff, 0x0d, 0x0a];
+        assert_eq!(canonical_bytes(ContentKind::Image, &payload), payload);
+    }
+
+    #[test]
+    fn canonical_bytes_preserves_invalid_utf8() {
+        let payload = [0x66, 0x80, 0x0d, 0x0a];
+        assert_eq!(canonical_bytes(ContentKind::Text, &payload), payload);
+    }
+
+    #[test]
     fn equal_canonical_payloads_have_equal_blake3_hashes() {
         assert_eq!(
             content_hash(ContentKind::Text, "text/plain", b"a\n"),
