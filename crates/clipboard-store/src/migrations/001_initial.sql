@@ -12,16 +12,26 @@ CREATE TABLE content_representation (
   representation_id INTEGER PRIMARY KEY,
   content_id INTEGER NOT NULL REFERENCES content(content_id) ON DELETE CASCADE,
   format_id TEXT NOT NULL,
-  storage_kind TEXT NOT NULL CHECK(storage_kind IN ('inline', 'cas', 'missing')),
+  storage_kind TEXT NOT NULL CHECK(storage_kind IN ('inline', 'inline_zstd', 'cas', 'missing')),
   inline_payload BLOB,
   blob_relpath TEXT,
   missing_ref TEXT,
   original_byte_size INTEGER NOT NULL CHECK(original_byte_size >= 0),
   stored_byte_size INTEGER NOT NULL CHECK(stored_byte_size >= 0),
   CHECK(
-    (storage_kind = 'inline' AND inline_payload IS NOT NULL AND blob_relpath IS NULL AND length(inline_payload) < 4096)
-    OR (storage_kind = 'cas' AND inline_payload IS NULL AND blob_relpath IS NOT NULL)
-    OR (storage_kind = 'missing' AND inline_payload IS NULL AND blob_relpath IS NULL)
+    (storage_kind = 'inline'
+      AND inline_payload IS NOT NULL AND blob_relpath IS NULL AND missing_ref IS NULL
+      AND original_byte_size < 4096 AND stored_byte_size = length(inline_payload))
+    OR (storage_kind = 'inline_zstd'
+      AND inline_payload IS NOT NULL AND blob_relpath IS NULL AND missing_ref IS NULL
+      AND original_byte_size >= 4096 AND original_byte_size <= 262144
+      AND stored_byte_size = length(inline_payload))
+    OR (storage_kind = 'cas'
+      AND inline_payload IS NULL AND blob_relpath IS NOT NULL AND missing_ref IS NULL
+      AND stored_byte_size = original_byte_size)
+    OR (storage_kind = 'missing'
+      AND inline_payload IS NULL AND blob_relpath IS NULL AND missing_ref IS NOT NULL
+      AND original_byte_size = 0 AND stored_byte_size = 0)
   ),
   UNIQUE(content_id, format_id)
 );

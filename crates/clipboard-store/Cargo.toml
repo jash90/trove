@@ -6,10 +6,12 @@ license.workspace = true
 
 [dependencies]
 clipboard-core = { path = "../clipboard-core" }
+blake3.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

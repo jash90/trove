@@ -9,12 +9,13 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::{
-    StoreConfig, migrations,
+    CasError, CasStore, StoreConfig, migrations,
     reader::{open_reader_connection, open_writer_connection},
 };
 
 pub const WRITER_QUEUE_CAPACITY: usize = 256;
 const MAX_INLINE_PAYLOAD_BYTES: usize = 4 * 1024;
+const MAX_INLINE_ZSTD_PAYLOAD_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -26,6 +27,10 @@ pub enum StoreError {
     UnsupportedSchemaVersion(i64),
     #[error("payload storage is unavailable until CAS storage is configured")]
     PayloadStorageUnavailable,
+    #[error(transparent)]
+    Cas(#[from] CasError),
+    #[error("failed to compress inline payload")]
+    PayloadCompression(#[source] io::Error),
     #[error("the database writer is no longer running")]
     WriterClosed,
     #[error("the database writer dropped its response")]
@@ -44,6 +49,17 @@ pub struct IngestOutcome {
 pub struct StoreStats {
     pub content_count: i64,
     pub event_count: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StoredPayload {
+    Inline(Vec<u8>),
+    InlineZstd(Vec<u8>),
+    Cas {
+        hash: clipboard_core::ContentHash,
+        relpath: String,
+        byte_size: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -70,6 +86,7 @@ enum WriteCommand {
 
 impl StoreHandle {
     pub fn open(config: StoreConfig) -> Result<Self, StoreError> {
+        let cas = CasStore::new(config.blob_root().to_path_buf());
         let mut connection = open_writer_connection(&config)?;
         migrations().apply(&mut connection)?;
 
@@ -78,7 +95,7 @@ impl StoreHandle {
             .name("clipboard-db-writer".to_owned())
             .spawn(move || {
                 while let Some(command) = rx.blocking_recv() {
-                    handle_command(&mut connection, command);
+                    handle_command(&mut connection, &cas, command);
                 }
             })
             .map_err(StoreError::WriterThreadSpawn)?;
@@ -150,10 +167,10 @@ impl StoreHandle {
     }
 }
 
-fn handle_command(connection: &mut Connection, command: WriteCommand) {
+fn handle_command(connection: &mut Connection, cas: &CasStore, command: WriteCommand) {
     match command {
         WriteCommand::Ingest { input, reply } => {
-            let _ = reply.send(ingest(connection, &input));
+            let _ = reply.send(ingest(connection, cas, &input));
         }
         WriteCommand::SetPinned {
             event_id,
@@ -168,9 +185,17 @@ fn handle_command(connection: &mut Connection, command: WriteCommand) {
     }
 }
 
-fn ingest(connection: &mut Connection, input: &CaptureInput) -> Result<IngestOutcome, StoreError> {
-    let representations = inline_representations(input)?;
-    let primary_payload = representations[0].1;
+fn ingest(
+    connection: &mut Connection,
+    cas: &CasStore,
+    input: &CaptureInput,
+) -> Result<IngestOutcome, StoreError> {
+    let primary_payload = input
+        .representations
+        .first()
+        .and_then(|representation| representation.bytes.as_deref())
+        .ok_or(StoreError::PayloadStorageUnavailable)?;
+    let representations = stored_representations(input, cas)?;
     let content_hash = content_hash(input.kind, &input.primary_mime, primary_payload);
 
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -203,19 +228,24 @@ fn ingest(connection: &mut Connection, input: &CaptureInput) -> Result<IngestOut
         |row| row.get::<_, i64>(0),
     )?;
 
-    for (format_id, bytes) in representations {
+    for representation in representations {
+        let (storage_kind, inline_payload, blob_relpath, missing_ref, stored_byte_size) =
+            representation.storage_values();
         transaction.execute(
             "INSERT INTO content_representation
                (content_id, format_id, storage_kind, inline_payload, blob_relpath, missing_ref,
                 original_byte_size, stored_byte_size)
-             VALUES (?1, ?2, 'inline', ?3, NULL, NULL, ?4, ?5)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(content_id, format_id) DO NOTHING",
             params![
                 content_id,
-                format_id,
-                bytes,
-                bytes.len() as i64,
-                bytes.len() as i64
+                representation.format_id,
+                storage_kind,
+                inline_payload,
+                blob_relpath,
+                missing_ref,
+                representation.original_byte_size as i64,
+                stored_byte_size as i64,
             ],
         )?;
     }
@@ -273,27 +303,85 @@ fn delete_event(connection: &mut Connection, event_id: i64) -> Result<(), StoreE
     Ok(())
 }
 
-fn inline_representations(input: &CaptureInput) -> Result<Vec<(&str, &[u8])>, StoreError> {
-    if matches!(input.kind, ContentKind::Image | ContentKind::File)
-        || input.representations.is_empty()
-    {
+struct StoredRepresentation<'a> {
+    format_id: &'a str,
+    original_byte_size: u64,
+    payload: PreparedPayload,
+}
+
+enum PreparedPayload {
+    Stored(StoredPayload),
+    Missing(String),
+}
+
+impl StoredRepresentation<'_> {
+    fn storage_values(&self) -> (&str, Option<&[u8]>, Option<&str>, Option<&str>, u64) {
+        match &self.payload {
+            PreparedPayload::Stored(StoredPayload::Inline(bytes)) => {
+                ("inline", Some(bytes), None, None, bytes.len() as u64)
+            }
+            PreparedPayload::Stored(StoredPayload::InlineZstd(bytes)) => {
+                ("inline_zstd", Some(bytes), None, None, bytes.len() as u64)
+            }
+            PreparedPayload::Stored(StoredPayload::Cas {
+                relpath, byte_size, ..
+            }) => ("cas", None, Some(relpath), None, *byte_size),
+            PreparedPayload::Missing(missing_ref) => ("missing", None, None, Some(missing_ref), 0),
+        }
+    }
+}
+
+fn stored_representations<'a>(
+    input: &'a CaptureInput,
+    cas: &CasStore,
+) -> Result<Vec<StoredRepresentation<'a>>, StoreError> {
+    if input.representations.is_empty() {
         return Err(StoreError::PayloadStorageUnavailable);
     }
-
     input
         .representations
         .iter()
         .map(|representation| {
-            let bytes = representation
-                .bytes
+            if let Some(bytes) = representation.bytes.as_deref() {
+                return Ok(StoredRepresentation {
+                    format_id: representation.format_id.as_str(),
+                    original_byte_size: bytes.len() as u64,
+                    payload: PreparedPayload::Stored(classify_payload(input.kind, bytes, cas)?),
+                });
+            }
+            let missing_ref = representation
+                .missing_ref
                 .as_deref()
                 .ok_or(StoreError::PayloadStorageUnavailable)?;
-            if bytes.len() >= MAX_INLINE_PAYLOAD_BYTES {
-                return Err(StoreError::PayloadStorageUnavailable);
-            }
-            Ok((representation.format_id.as_str(), bytes))
+            Ok(StoredRepresentation {
+                format_id: representation.format_id.as_str(),
+                original_byte_size: 0,
+                payload: PreparedPayload::Missing(missing_ref.to_owned()),
+            })
         })
         .collect()
+}
+
+pub fn classify_payload(
+    kind: ContentKind,
+    bytes: &[u8],
+    cas: &CasStore,
+) -> Result<StoredPayload, StoreError> {
+    if matches!(kind, ContentKind::Image | ContentKind::File)
+        || bytes.len() > MAX_INLINE_ZSTD_PAYLOAD_BYTES
+    {
+        let blob = cas.put(bytes)?;
+        return Ok(StoredPayload::Cas {
+            hash: blob.hash,
+            relpath: blob.relpath,
+            byte_size: blob.byte_size,
+        });
+    }
+    if bytes.len() >= MAX_INLINE_PAYLOAD_BYTES {
+        let compressed = zstd::bulk::compress(bytes, 3).map_err(StoreError::PayloadCompression)?;
+        return Ok(StoredPayload::InlineZstd(compressed));
+    }
+    Ok(StoredPayload::Inline(bytes.to_vec()))
 }
 
 fn normalized_text(input: &CaptureInput, primary_payload: &[u8]) -> Option<String> {

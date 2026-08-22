@@ -105,23 +105,55 @@ async fn ingest_transaction_writes_normalized_search_document_and_uuid_blob() {
 }
 
 #[tokio::test]
-async fn ingest_rejects_payloads_without_available_storage() {
+async fn ingest_uses_inline_zstd_for_a_moderately_incompressible_payload() {
     let directory = tempfile::tempdir().unwrap();
     let store =
         StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
-    let mut oversized = text_capture("small", 1_000);
-    oversized.representations[0].bytes = Some(vec![0; 4_096]);
-    let mut image = text_capture("small", 2_000);
-    image.kind = ContentKind::Image;
+    let bytes = pseudo_random_bytes(12_288);
+    let mut capture = text_capture("small", 1_000);
+    capture.representations[0].bytes = Some(bytes.clone());
 
-    let oversized_error = store.ingest(oversized).await.unwrap_err();
-    let image_error = store.ingest(image).await.unwrap_err();
+    let outcome = store.ingest(capture).await.unwrap();
+    let (storage_kind, original_size, stored_size, round_trip) = store
+        .with_reader(|connection| {
+            let (storage_kind, original_size, stored_size, compressed) = connection.query_row(
+                "SELECT storage_kind, original_byte_size, stored_byte_size, inline_payload
+                 FROM content_representation WHERE content_id = ?1",
+                [outcome.content_id],
+                |row| {
+                    Ok::<_, rusqlite::Error>((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                    ))
+                },
+            )?;
+            Ok::<_, rusqlite::Error>((
+                storage_kind,
+                original_size,
+                stored_size,
+                zstd::bulk::decompress(&compressed, bytes.len()).unwrap(),
+            ))
+        })
+        .unwrap();
 
-    assert!(matches!(
-        oversized_error,
-        StoreError::PayloadStorageUnavailable
-    ));
-    assert!(matches!(image_error, StoreError::PayloadStorageUnavailable));
+    assert_eq!(storage_kind, "inline_zstd");
+    assert_eq!(original_size, bytes.len() as i64);
+    assert!(stored_size >= 4_096);
+    assert_eq!(round_trip, bytes);
+}
+
+fn pseudo_random_bytes(length: usize) -> Vec<u8> {
+    let mut state = 0x6a09_e667_f3bc_c909_u64;
+    (0..length)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
 }
 
 #[tokio::test]
