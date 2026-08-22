@@ -73,6 +73,81 @@ fn maps_supercmd_ocr_without_replacing_original_text() {
 }
 
 #[test]
+fn parses_supercmd_zero_one_flags_and_nullable_text() {
+    let root = TempDir::new().unwrap();
+    let path = write_export(
+        root.path(),
+        r#"[
+          {"copied_at":"2026-01-02T03:04:05Z","type":"text","pinned":0,"text":null,"has_image":0},
+          {"copied_at":"2026-01-02T03:05:05Z","type":"image","pinned":1,"file_url":"images/missing.png","text":null,"has_image":1}
+        ]"#,
+    );
+
+    let report = parse_supercmd_report(root.path(), path).unwrap();
+
+    assert_eq!(report.total, 2);
+    assert_eq!(report.candidates.len(), 2);
+    assert!(report.failures.is_empty());
+    assert!(!report.candidates[0].capture.pinned);
+    assert_eq!(report.candidates[0].primary_text.as_deref(), Some(""));
+    assert!(
+        report.candidates[0]
+            .capture
+            .content_flags
+            .contains(ContentFlags::DO_NOT_INDEX)
+    );
+    assert!(report.candidates[1].capture.pinned);
+    assert_eq!(report.candidates[1].capture.kind, ContentKind::Image);
+    assert!(report.candidates[1].missing_payload);
+}
+
+#[test]
+fn parses_supercmd_naive_timestamp_as_utc_deterministically() {
+    let root = TempDir::new().unwrap();
+    let path = write_export(
+        root.path(),
+        r#"[
+          {"copied_at":"2026-01-02 03:04:05","type":"text","pinned":0,"text":null,"has_image":0}
+        ]"#,
+    );
+
+    let report = parse_supercmd_report(root.path(), path).unwrap();
+
+    assert!(report.failures.is_empty());
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(
+        report.candidates[0].capture.captured_at_ms,
+        chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+            .unwrap()
+            .timestamp_millis()
+    );
+}
+
+#[test]
+fn rejects_supercmd_numeric_flags_outside_zero_and_one() {
+    let root = TempDir::new().unwrap();
+    let path = write_export(
+        root.path(),
+        r#"[
+          {"copied_at":"2026-01-02T03:04:05Z","type":"text","pinned":2,"text":"fixture","has_image":0},
+          {"copied_at":"2026-01-02T03:05:05Z","type":"text","pinned":0,"text":"fixture","has_image":-1}
+        ]"#,
+    );
+
+    let report = parse_supercmd_report(root.path(), path).unwrap();
+
+    assert_eq!(report.total, 2);
+    assert!(report.candidates.is_empty());
+    assert_eq!(report.failures.len(), 2);
+    assert!(
+        report
+            .failures
+            .iter()
+            .all(|failure| failure.reason == "invalid_record")
+    );
+}
+
+#[test]
 fn resolves_a_declared_in_root_supercmd_image_to_owned_bytes() {
     let records = parse_supercmd(fixture("supercmd"), fixture("supercmd/clipboard.json")).unwrap();
 

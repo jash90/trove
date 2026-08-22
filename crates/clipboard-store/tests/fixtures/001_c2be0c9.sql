@@ -1,9 +1,9 @@
 CREATE TABLE schema_identity (
   identity TEXT PRIMARY KEY CHECK(identity = 'clipboard-store'),
-  revision INTEGER NOT NULL CHECK(revision = 4)
+  revision INTEGER NOT NULL CHECK(revision = 3)
 );
 
-INSERT INTO schema_identity(identity, revision) VALUES ('clipboard-store', 4);
+INSERT INTO schema_identity(identity, revision) VALUES ('clipboard-store', 3);
 
 CREATE TABLE content (
   content_id INTEGER PRIMARY KEY,
@@ -13,10 +13,6 @@ CREATE TABLE content (
   kind TEXT NOT NULL,
   primary_mime TEXT NOT NULL,
   byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
-  preview_text TEXT NOT NULL CHECK(
-    typeof(preview_text) = 'text'
-      AND length(CAST(preview_text AS BLOB)) <= 512
-  ),
   flags INTEGER NOT NULL DEFAULT 0,
   created_at_ms INTEGER NOT NULL
 );

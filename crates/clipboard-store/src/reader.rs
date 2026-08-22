@@ -2,7 +2,30 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
 
-use crate::{StoreConfig, StoreError};
+use crate::{StoreConfig, StoreError, migrations::validate_current_schema};
+
+pub struct ReadOnlyStore {
+    config: StoreConfig,
+}
+
+impl ReadOnlyStore {
+    pub fn open_existing(config: StoreConfig) -> Result<Self, StoreError> {
+        if !config.database_path().is_file() {
+            return Err(StoreError::DatabaseMissing);
+        }
+        let connection = open_reader_connection(&config)?;
+        validate_current_schema(&connection)?;
+        Ok(Self { config })
+    }
+
+    pub fn with_reader<T>(
+        &self,
+        operation: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, StoreError> {
+        let connection = open_reader_connection(&self.config)?;
+        Ok(operation(&connection)?)
+    }
+}
 
 pub(crate) fn open_writer_connection(config: &StoreConfig) -> Result<Connection, StoreError> {
     let connection = Connection::open(config.database_path())?;

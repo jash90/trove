@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    fmt,
     io::Read,
     path::{Component, Path},
 };
@@ -9,11 +10,14 @@ use cap_std::{
     ambient_authority,
     fs::{Dir, DirEntry, OpenOptions},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use clipboard_core::{
     CaptureInput, ContentFlags, ContentKind, EventFlags, RepresentationInput, SourceConfidence,
 };
-use serde::Deserialize;
+use serde::{
+    Deserialize, Deserializer,
+    de::{self, Visitor},
+};
 
 use crate::{
     FramedHasher, ImportCandidate, ImportError, ImportParseReport, ImportRecordFailure,
@@ -51,18 +55,83 @@ struct SuperCmdRecord {
     source_app: Option<String>,
     #[serde(default, alias = "bundleId")]
     bundle_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_zero_one_bool")]
     pinned: bool,
     #[serde(default, alias = "fileUrl")]
     file_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     text: String,
     #[serde(default, alias = "ocrText")]
     ocr_text: Option<String>,
-    #[serde(default, alias = "hasImage")]
+    #[serde(
+        default,
+        alias = "hasImage",
+        deserialize_with = "deserialize_zero_one_bool"
+    )]
     has_image: bool,
     #[serde(default, alias = "imageHash", alias = "hash")]
     image_hash: Option<String>,
+}
+
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+fn deserialize_zero_one_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct ZeroOneBoolVisitor;
+
+    impl Visitor<'_> for ZeroOneBoolVisitor {
+        type Value = bool;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a boolean or zero/one flag")
+        }
+
+        fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+            Ok(value)
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            match value {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(E::invalid_value(de::Unexpected::Signed(value), &self)),
+            }
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            match value {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(E::invalid_value(de::Unexpected::Unsigned(value), &self)),
+            }
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            match value {
+                "false" | "0" => Ok(false),
+                "true" | "1" => Ok(true),
+                _ => Err(E::invalid_value(de::Unexpected::Str(value), &self)),
+            }
+        }
+    }
+
+    deserializer.deserialize_any(ZeroOneBoolVisitor)
 }
 
 pub fn parse_supercmd(
@@ -146,9 +215,8 @@ fn map_record(
     auxiliary_bytes_remaining: &mut usize,
     traversal_limits: TraversalLimits,
 ) -> Result<ImportCandidate, ImportRecordFailure> {
-    let captured_at_ms = DateTime::parse_from_rfc3339(&record.copied_at)
-        .map(|timestamp| timestamp.with_timezone(&Utc).timestamp_millis())
-        .map_err(|_| record_failure(ImportSource::SuperCmd, index, "invalid_timestamp"))?;
+    let captured_at_ms = parse_timestamp_ms(&record.copied_at)
+        .ok_or_else(|| record_failure(ImportSource::SuperCmd, index, "invalid_timestamp"))?;
     let kind = content_kind(&record.content_type, record.has_image, index)?;
     let primary_text = kind.is_textual().then_some(record.text.clone());
     let mut content_flags = ContentFlags::empty();
@@ -238,6 +306,16 @@ fn map_record(
         missing_payload,
         source_application_path: None,
     })
+}
+
+fn parse_timestamp_ms(value: &str) -> Option<i64> {
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(value) {
+        return Some(timestamp.with_timezone(&Utc).timestamp_millis());
+    }
+    ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S%.f"]
+        .into_iter()
+        .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
+        .map(|timestamp| timestamp.and_utc().timestamp_millis())
 }
 
 fn content_kind(

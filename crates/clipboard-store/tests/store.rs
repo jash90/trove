@@ -3,8 +3,8 @@ use clipboard_core::{
 };
 use clipboard_store::{
     BeginImportRun, ImportSourceKind, MAX_SEARCH_DERIVATION_BYTES,
-    MAX_SEARCH_DERIVATIONS_PER_CONTENT, MAX_SEARCH_DOCUMENT_BYTES, StoreConfig, StoreError,
-    StoreHandle, StoreImportCandidate, WRITER_QUEUE_CAPACITY, migrations,
+    MAX_SEARCH_DERIVATIONS_PER_CONTENT, MAX_SEARCH_DOCUMENT_BYTES, ReadOnlyStore, StoreConfig,
+    StoreError, StoreHandle, StoreImportCandidate, WRITER_QUEUE_CAPACITY, migrations,
 };
 
 fn text_capture(value: &str, captured_at_ms: i64) -> CaptureInput {
@@ -141,6 +141,31 @@ fn immediately_prior_pre_release_schema_revision_is_rejected() {
 }
 
 #[test]
+fn exact_c2be0c9_pre_release_schema_revision_is_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("history.sqlite");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(include_str!("fixtures/001_c2be0c9.sql"))
+        .unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+
+    let error = match StoreHandle::open(StoreConfig::new(&database_path)) {
+        Ok(_) => panic!("the c2be0c9 pre-release schema unexpectedly opened"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, StoreError::IncompatibleSchema));
+    assert_eq!(
+        error.to_string(),
+        "database schema is incompatible; development reset required"
+    );
+    assert!(!error.to_string().contains("history.sqlite"));
+    assert!(!error.to_string().contains("revision"));
+}
+
+#[test]
 fn fresh_schema_reopens_and_is_validated_on_every_open() {
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("history.sqlite");
@@ -157,6 +182,48 @@ fn fresh_schema_reopens_and_is_validated_on_every_open() {
         Err(error) => error,
     };
     assert!(matches!(error, StoreError::IncompatibleSchema));
+}
+
+#[test]
+fn read_only_open_of_a_missing_database_does_not_create_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("missing.sqlite");
+
+    let error = match ReadOnlyStore::open_existing(StoreConfig::new(&database_path)) {
+        Ok(_) => panic!("missing database unexpectedly opened"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, StoreError::DatabaseMissing));
+    assert!(!database_path.exists());
+    assert_eq!(error.to_string(), "database does not exist");
+}
+
+#[test]
+fn read_only_store_validates_schema_and_rejects_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("history.sqlite");
+    drop(StoreHandle::open(StoreConfig::new(&database_path)).unwrap());
+
+    let store = ReadOnlyStore::open_existing(StoreConfig::new(&database_path)).unwrap();
+    let query_only = store
+        .with_reader(|connection| {
+            connection.query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0))
+        })
+        .unwrap();
+    let mutation = store
+        .with_reader(|connection| {
+            connection.execute(
+                "INSERT INTO content
+                   (content_hash, kind, primary_mime, byte_size, preview_text, flags, created_at_ms)
+                 VALUES (zeroblob(32), 'text', 'text/plain', 0, '', 0, 0)",
+                [],
+            )
+        })
+        .unwrap_err();
+
+    assert_eq!(query_only, 1);
+    assert!(matches!(mutation, StoreError::Database(_)));
 }
 
 #[tokio::test]
@@ -218,6 +285,28 @@ async fn ingest_transaction_writes_normalized_search_document_and_uuid_blob() {
     assert_eq!(search_text, "lodz");
     assert_eq!(global_id_size, 16);
     assert_eq!(fts_count, 1);
+}
+
+#[tokio::test]
+async fn ingest_transaction_stores_a_bounded_original_utf8_preview() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+    let original = format!("Łódź {}", "ą".repeat(300));
+    let outcome = store.ingest(text_capture(&original, 1_000)).await.unwrap();
+
+    let preview = store
+        .with_reader(|connection| {
+            connection.query_row(
+                "SELECT preview_text FROM content WHERE content_id = ?1",
+                [outcome.content_id],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .unwrap();
+
+    assert_eq!(preview, format!("Łódź {}", "ą".repeat(252)));
+    assert_eq!(preview.len(), 512);
 }
 
 #[tokio::test]

@@ -5,7 +5,7 @@ use crate::StoreError;
 const INITIAL_MIGRATION: &str = include_str!("migrations/001_initial.sql");
 const LATEST_SCHEMA_VERSION: i64 = 1;
 const SCHEMA_IDENTITY: &str = "clipboard-store";
-const SCHEMA_REVISION: i64 = 3;
+const SCHEMA_REVISION: i64 = 4;
 
 pub struct Migrations;
 
@@ -35,6 +35,19 @@ impl Migrations {
         transaction.commit()?;
         validate_schema_identity(connection)
     }
+}
+
+pub(crate) fn validate_current_schema(connection: &Connection) -> Result<(), StoreError> {
+    let version =
+        connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+    if version != LATEST_SCHEMA_VERSION {
+        return Err(if version > LATEST_SCHEMA_VERSION {
+            StoreError::UnsupportedSchemaVersion(version)
+        } else {
+            StoreError::IncompatibleSchema
+        });
+    }
+    validate_schema_identity(connection)
 }
 
 fn validate_schema_identity(connection: &Connection) -> Result<(), StoreError> {

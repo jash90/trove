@@ -28,6 +28,7 @@ pub const IMPORT_BATCH_SIZE: usize = 250;
 pub const MAX_SEARCH_DERIVATIONS_PER_CONTENT: usize = 16;
 pub const MAX_SEARCH_DERIVATION_BYTES: usize = 64 * 1024;
 pub const MAX_SEARCH_DOCUMENT_BYTES: usize = 512 * 1024;
+pub const MAX_PREVIEW_BYTES: usize = 512;
 const MAX_INLINE_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_INLINE_ZSTD_PAYLOAD_BYTES: usize = 256 * 1024;
 
@@ -41,6 +42,8 @@ pub enum StoreError {
     UnsupportedSchemaVersion(i64),
     #[error("database schema is incompatible; development reset required")]
     IncompatibleSchema,
+    #[error("database does not exist")]
+    DatabaseMissing,
     #[error("payload storage is unavailable until CAS storage is configured")]
     PayloadStorageUnavailable,
     #[error(transparent)]
@@ -895,6 +898,7 @@ fn delete_event(connection: &mut Connection, event_id: i64) -> Result<(), StoreE
 struct PreparedIngest<'a> {
     content_hash: ContentHash,
     byte_size: u64,
+    preview_text: String,
     primary_payload: Option<&'a [u8]>,
     representations: Vec<StoredRepresentation<'a>>,
 }
@@ -924,6 +928,7 @@ fn prepare_ingest<'a>(
     Ok(PreparedIngest {
         content_hash,
         byte_size,
+        preview_text: original_preview(input.kind, primary_payload),
         primary_payload,
         representations: stored_representations(input, cas)?,
     })
@@ -938,14 +943,16 @@ fn write_ingest(
 ) -> Result<IngestOutcome, StoreError> {
     let normalized_text = normalized_text(input, prepared.primary_payload, search_override);
     transaction.execute(
-        "INSERT INTO content (content_hash, kind, primary_mime, byte_size, flags, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO content
+           (content_hash, kind, primary_mime, byte_size, preview_text, flags, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(content_hash) DO NOTHING",
         params![
             prepared.content_hash.as_slice(),
             input.kind.as_str(),
             input.primary_mime,
             sql_count(prepared.byte_size)?,
+            prepared.preview_text,
             i64::from(input.content_flags.bits()),
             input.captured_at_ms,
         ],
@@ -1019,6 +1026,22 @@ fn write_ingest(
         content_id,
         event_id: transaction.last_insert_rowid(),
     })
+}
+
+fn original_preview(kind: ContentKind, primary_payload: Option<&[u8]>) -> String {
+    if !kind.is_textual() {
+        return String::new();
+    }
+    let Some(payload) = primary_payload else {
+        return String::new();
+    };
+    let boundary = payload.len().min(MAX_PREVIEW_BYTES);
+    match std::str::from_utf8(&payload[..boundary]) {
+        Ok(value) => value.to_owned(),
+        Err(error) => std::str::from_utf8(&payload[..error.valid_up_to()])
+            .unwrap_or_default()
+            .to_owned(),
+    }
 }
 
 fn search_derivation_hash(normalized_text: &str) -> [u8; 32] {
