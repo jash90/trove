@@ -1,10 +1,3 @@
-CREATE TABLE schema_identity (
-  identity TEXT PRIMARY KEY CHECK(identity = 'clipboard-store'),
-  revision INTEGER NOT NULL CHECK(revision = 2)
-);
-
-INSERT INTO schema_identity(identity, revision) VALUES ('clipboard-store', 2);
-
 CREATE TABLE content (
   content_id INTEGER PRIMARY KEY,
   content_hash BLOB NOT NULL UNIQUE CHECK(length(content_hash) = 32),
@@ -65,13 +58,6 @@ CREATE TABLE search_doc (
   normalized_text TEXT NOT NULL
 );
 
-CREATE TABLE search_derivation (
-  content_id INTEGER NOT NULL REFERENCES content(content_id) ON DELETE CASCADE,
-  derivation_hash BLOB NOT NULL CHECK(length(derivation_hash) = 32),
-  normalized_text TEXT NOT NULL,
-  PRIMARY KEY(content_id, derivation_hash)
-);
-
 CREATE VIRTUAL TABLE search_fts USING fts5(
   normalized_text,
   content = 'search_doc',
@@ -109,7 +95,7 @@ CREATE TABLE artifact (
 CREATE TABLE import_run (
   import_run_id INTEGER PRIMARY KEY,
   external_id BLOB NOT NULL UNIQUE CHECK(length(external_id) = 16),
-  source_kind TEXT NOT NULL CHECK(source_kind IN ('raycast', 'supercmd')),
+  source_kind TEXT NOT NULL,
   source_fingerprint BLOB NOT NULL CHECK(length(source_fingerprint) = 32),
   status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
   worker_generation INTEGER NOT NULL DEFAULT 1 CHECK(worker_generation > 0),
@@ -145,9 +131,9 @@ CREATE TABLE import_failure_reason (
 
 CREATE TABLE import_record (
   import_record_id INTEGER PRIMARY KEY,
-  import_run_id INTEGER NOT NULL REFERENCES import_run(import_run_id) ON DELETE RESTRICT,
-  source_kind TEXT NOT NULL CHECK(source_kind IN ('raycast', 'supercmd')),
-  record_fingerprint BLOB NOT NULL CHECK(length(record_fingerprint) = 32),
+  import_run_id INTEGER NOT NULL REFERENCES import_run(import_run_id) ON DELETE CASCADE,
+  source_kind TEXT NOT NULL,
+  record_fingerprint BLOB NOT NULL,
   event_id INTEGER REFERENCES history_event(event_id) ON DELETE SET NULL,
   created_at_ms INTEGER NOT NULL,
   UNIQUE(source_kind, record_fingerprint)

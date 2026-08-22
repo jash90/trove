@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
 };
 
@@ -7,11 +7,20 @@ use serde_json::Value;
 
 use crate::{ImportError, ImportSource};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DetectedExport {
     pub source: ImportSource,
     pub export_path: PathBuf,
     pub source_fingerprint: [u8; 32],
+}
+
+impl fmt::Debug for DetectedExport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DetectedExport")
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
 }
 
 pub fn detect_export(path: impl AsRef<Path>) -> Result<DetectedExport, ImportError> {
@@ -121,4 +130,25 @@ fn detect_json_source(value: &Value) -> Result<ImportSource, ImportError> {
         return Ok(ImportSource::SuperCmd);
     }
     Err(ImportError::export("detection", "unknown_schema"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detected_export_debug_omits_selected_path_and_fingerprint() {
+        let fingerprint = [173_u8; 32];
+        let detected = DetectedExport {
+            source: ImportSource::SuperCmd,
+            export_path: PathBuf::from("/sentinel/private/export-name.json"),
+            source_fingerprint: fingerprint,
+        };
+
+        let rendered = format!("{detected:?}");
+        assert!(!rendered.contains("sentinel"));
+        assert!(!rendered.contains("export-name.json"));
+        assert!(!rendered.contains(&format!("{fingerprint:?}")));
+        assert!(rendered.contains("SuperCmd"));
+    }
 }

@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use clipboard_store::{
     BeginImportRun, ImportFailureCount, ImportSourceKind, ImportWorkerLease, ResumeImportRun,
@@ -8,13 +12,15 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    ImportCandidate, ImportError, ImportParseReport, ImportSource, detect_export,
+    FramedHasher, ImportCandidate, ImportError, ImportParseReport, ImportSource, detect_export,
     parse_export_report,
 };
 
 pub const IMPORT_BATCH_SIZE: usize = clipboard_store::IMPORT_BATCH_SIZE;
+const PREPARED_SESSION_CAPACITY: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportRunHandle {
     pub run_id: Uuid,
 }
@@ -28,13 +34,16 @@ pub enum ImportRunState {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportAnalysis {
+    pub analysis_id: Uuid,
     pub total: u64,
     pub candidate_records: u64,
     pub failed: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportSummary {
     pub run_id: Uuid,
     pub total: u64,
@@ -45,6 +54,7 @@ pub struct ImportSummary {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportProgress {
     pub run_id: Uuid,
     pub state: ImportRunState,
@@ -107,6 +117,7 @@ impl Default for ImportWorkerPolicy {
 pub struct ImportService {
     store: StoreHandle,
     worker_policy: Arc<ImportWorkerPolicy>,
+    prepared_sessions: Arc<Mutex<PreparedSessions>>,
 }
 
 impl ImportService {
@@ -119,6 +130,7 @@ impl ImportService {
         Self {
             store,
             worker_policy: Arc::new(worker_policy),
+            prepared_sessions: Arc::new(Mutex::new(PreparedSessions::default())),
         }
     }
 
@@ -128,15 +140,29 @@ impl ImportService {
 
     pub fn analyze(&self, path: impl AsRef<Path>) -> Result<ImportAnalysis, ImportError> {
         let source = prepare_source(path.as_ref())?;
+        let total = source.total_records;
+        let candidate_records = source.candidate_records();
+        let failed = source.initial_failed_records();
+        let analysis_id = self
+            .prepared_sessions
+            .lock()
+            .map_err(|_| ImportError::service("analysis_unavailable"))?
+            .insert(source);
         Ok(ImportAnalysis {
-            total: source.total_records,
-            candidate_records: source.candidate_records(),
-            failed: source.initial_failed_records(),
+            analysis_id,
+            total,
+            candidate_records,
+            failed,
         })
     }
 
-    pub async fn begin(&self, path: impl AsRef<Path>) -> Result<ImportRunHandle, ImportError> {
-        let source = prepare_source(path.as_ref())?;
+    pub async fn begin(&self, analysis_id: Uuid) -> Result<ImportRunHandle, ImportError> {
+        let source = self
+            .prepared_sessions
+            .lock()
+            .map_err(|_| ImportError::service("analysis_unavailable"))?
+            .take(analysis_id)
+            .ok_or_else(|| ImportError::service("analysis_not_found"))?;
         let status = self.persist_run(&source).await?;
         let run_id = status.run_id;
         let generation = status.generation;
@@ -292,6 +318,33 @@ impl ImportService {
     }
 }
 
+#[derive(Default)]
+struct PreparedSessions {
+    sources: BTreeMap<Uuid, PreparedSource>,
+    insertion_order: VecDeque<Uuid>,
+}
+
+impl PreparedSessions {
+    fn insert(&mut self, source: PreparedSource) -> Uuid {
+        while self.sources.len() >= PREPARED_SESSION_CAPACITY {
+            if let Some(expired) = self.insertion_order.pop_front() {
+                self.sources.remove(&expired);
+            }
+        }
+        let analysis_id = Uuid::now_v7();
+        self.sources.insert(analysis_id, source);
+        self.insertion_order.push_back(analysis_id);
+        analysis_id
+    }
+
+    fn take(&mut self, analysis_id: Uuid) -> Option<PreparedSource> {
+        let source = self.sources.remove(&analysis_id)?;
+        self.insertion_order
+            .retain(|candidate| *candidate != analysis_id);
+        Some(source)
+    }
+}
+
 enum WorkerCompletion {
     Completed,
     Interrupted,
@@ -351,14 +404,47 @@ fn prepare_source_with_hook(
     let report = report?;
     let total_records =
         u64::try_from(report.total).map_err(|_| ImportError::service("source_too_large"))?;
+    let source_fingerprint = prepared_snapshot_fingerprint(
+        detected.source,
+        detected.source_fingerprint,
+        total_records,
+        &report,
+    )?;
     let failure_counts = aggregate_failures(&report);
     Ok(PreparedSource {
         source_kind: store_source(detected.source),
-        source_fingerprint: detected.source_fingerprint,
+        source_fingerprint,
         total_records,
         candidates: report.candidates,
         failure_counts,
     })
+}
+
+fn prepared_snapshot_fingerprint(
+    source: ImportSource,
+    manifest_fingerprint: [u8; 32],
+    total_records: u64,
+    report: &ImportParseReport,
+) -> Result<[u8; 32], ImportError> {
+    let mut hasher = FramedHasher::new();
+    hasher.add_optional(Some(b"clipboard-import.prepared-snapshot-v1"));
+    hasher.add_optional(Some(source.as_str().as_bytes()));
+    hasher.add_optional(Some(&manifest_fingerprint));
+    hasher.add_optional(Some(&total_records.to_be_bytes()));
+    hasher.add_optional(Some(&(report.candidates.len() as u64).to_be_bytes()));
+    for candidate in &report.candidates {
+        hasher.add_optional(Some(b"candidate"));
+        hasher.add_optional(Some(&candidate.record_fingerprint));
+    }
+    hasher.add_optional(Some(&(report.failures.len() as u64).to_be_bytes()));
+    for failure in &report.failures {
+        let record =
+            u64::try_from(failure.record).map_err(|_| ImportError::service("source_too_large"))?;
+        hasher.add_optional(Some(b"failure"));
+        hasher.add_optional(Some(&record.to_be_bytes()));
+        hasher.add_optional(Some(failure.reason.as_bytes()));
+    }
+    Ok(hasher.finish())
 }
 
 fn aggregate_failures(report: &ImportParseReport) -> Vec<ImportFailureCount> {
@@ -505,5 +591,28 @@ mod tests {
                 reason: "source_changed"
             })
         ));
+    }
+
+    #[test]
+    fn prepared_session_cache_evicts_the_oldest_unconsumed_analysis() {
+        let mut sessions = PreparedSessions::default();
+        let mut first = None;
+        let mut newest = None;
+        for index in 0..=PREPARED_SESSION_CAPACITY {
+            let fingerprint_byte = u8::try_from(index).unwrap();
+            let analysis_id = sessions.insert(PreparedSource {
+                source_kind: ImportSourceKind::Raycast,
+                source_fingerprint: [fingerprint_byte; 32],
+                total_records: 0,
+                candidates: Vec::new(),
+                failure_counts: Vec::new(),
+            });
+            first.get_or_insert(analysis_id);
+            newest = Some(analysis_id);
+        }
+
+        assert!(sessions.take(first.unwrap()).is_none());
+        assert!(sessions.take(newest.unwrap()).is_some());
+        assert_eq!(sessions.sources.len(), PREPARED_SESSION_CAPACITY - 1);
     }
 }

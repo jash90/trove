@@ -46,6 +46,50 @@ fn migrations_are_valid() {
     migrations().validate().unwrap();
 }
 
+#[test]
+fn exact_prior_pre_release_v1_schema_is_rejected_with_a_stable_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("history.sqlite");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(include_str!("fixtures/001_acd4d31.sql"))
+        .unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+
+    let error = match StoreHandle::open(StoreConfig::new(&database_path)) {
+        Ok(_) => panic!("the prior pre-release schema unexpectedly opened"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, StoreError::IncompatibleSchema));
+    assert_eq!(
+        error.to_string(),
+        "database schema is incompatible; development reset required"
+    );
+    assert!(!error.to_string().contains("history.sqlite"));
+    assert!(!error.to_string().contains("schema_identity"));
+}
+
+#[test]
+fn fresh_schema_reopens_and_is_validated_on_every_open() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("history.sqlite");
+    drop(StoreHandle::open(StoreConfig::new(&database_path)).unwrap());
+    drop(StoreHandle::open(StoreConfig::new(&database_path)).unwrap());
+
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute("DELETE FROM schema_identity", [])
+        .unwrap();
+    drop(connection);
+    let error = match StoreHandle::open(StoreConfig::new(&database_path)) {
+        Ok(_) => panic!("a schema without its identity unexpectedly reopened"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, StoreError::IncompatibleSchema));
+}
+
 #[tokio::test]
 async fn opened_connections_apply_the_required_sqlite_policy() {
     let directory = tempfile::tempdir().unwrap();
@@ -222,7 +266,7 @@ async fn deduplicating_do_not_index_removes_existing_search_document() {
     restricted.content_flags = ContentFlags::DO_NOT_INDEX;
     store.ingest(restricted).await.unwrap();
 
-    let (content_flags, documents, fts_matches) = store
+    let (content_flags, documents, derivations, fts_matches) = store
         .with_reader(|connection| {
             Ok::<_, rusqlite::Error>((
                 connection.query_row(
@@ -231,6 +275,9 @@ async fn deduplicating_do_not_index_removes_existing_search_document() {
                     |row| row.get::<_, i64>(0),
                 )?,
                 connection.query_row("SELECT count(*) FROM search_doc", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                connection.query_row("SELECT count(*) FROM search_derivation", [], |row| {
                     row.get::<_, i64>(0)
                 })?,
                 connection.query_row(
@@ -247,6 +294,7 @@ async fn deduplicating_do_not_index_removes_existing_search_document() {
         0
     );
     assert_eq!(documents, 0);
+    assert_eq!(derivations, 0);
     assert_eq!(fts_matches, 0);
     assert_eq!(store.stats().unwrap().event_count, 2);
 }
@@ -261,7 +309,7 @@ async fn deduplicating_indexable_content_never_recreates_a_do_not_index_document
     let first = store.ingest(restricted).await.unwrap();
     store.ingest(text_capture("Łódź", 2_000)).await.unwrap();
 
-    let (content_flags, documents, fts_matches) = store
+    let (content_flags, documents, derivations, fts_matches) = store
         .with_reader(|connection| {
             Ok::<_, rusqlite::Error>((
                 connection.query_row(
@@ -270,6 +318,9 @@ async fn deduplicating_indexable_content_never_recreates_a_do_not_index_document
                     |row| row.get::<_, i64>(0),
                 )?,
                 connection.query_row("SELECT count(*) FROM search_doc", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                connection.query_row("SELECT count(*) FROM search_derivation", [], |row| {
                     row.get::<_, i64>(0)
                 })?,
                 connection.query_row(
@@ -286,6 +337,7 @@ async fn deduplicating_indexable_content_never_recreates_a_do_not_index_document
         0
     );
     assert_eq!(documents, 0);
+    assert_eq!(derivations, 0);
     assert_eq!(fts_matches, 0);
     assert_eq!(store.stats().unwrap().event_count, 2);
 }
@@ -386,6 +438,124 @@ async fn replaying_a_committed_same_run_offset_cannot_advance_or_double_count_it
     assert_eq!(status.imported_records, 1);
     assert_eq!(status.already_present_records, 0);
     assert_eq!(store.stats().unwrap().event_count, 1);
+}
+
+#[tokio::test]
+async fn import_run_deletion_cannot_erase_global_idempotency_claims() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("history.sqlite");
+    let store = StoreHandle::open(StoreConfig::new(&database_path)).unwrap();
+    let first_run = store
+        .begin_import(BeginImportRun {
+            source_kind: ImportSourceKind::Raycast,
+            source_fingerprint: [31; 32],
+            total_records: 1,
+            candidate_records: 1,
+            initial_failures: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let candidate = || StoreImportCandidate {
+        candidate_offset: 0,
+        record_fingerprint: [41; 32],
+        capture: text_capture("synthetic retained claim", 1_000),
+        search_text: Some("synthetic retained claim".to_owned()),
+        source_app_original: None,
+    };
+    store
+        .import_batch(first_run.run_id, first_run.generation, vec![candidate()])
+        .await
+        .unwrap();
+    store
+        .finish_import(first_run.run_id, first_run.generation)
+        .await
+        .unwrap();
+
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
+    let deletion = connection.execute(
+        "DELETE FROM import_run WHERE external_id = ?1",
+        [first_run.run_id.as_bytes().as_slice()],
+    );
+    drop(connection);
+
+    assert!(deletion.is_err());
+    let second_run = store
+        .begin_import(BeginImportRun {
+            source_kind: ImportSourceKind::Raycast,
+            source_fingerprint: [32; 32],
+            total_records: 1,
+            candidate_records: 1,
+            initial_failures: Vec::new(),
+        })
+        .await
+        .unwrap();
+    store
+        .import_batch(second_run.run_id, second_run.generation, vec![candidate()])
+        .await
+        .unwrap();
+    let completed = store
+        .finish_import(second_run.run_id, second_run.generation)
+        .await
+        .unwrap();
+    assert_eq!(completed.imported_records, 0);
+    assert_eq!(completed.already_present_records, 1);
+    assert_eq!(store.stats().unwrap().event_count, 1);
+}
+
+#[tokio::test]
+async fn import_tables_reject_unknown_sources_and_non_digest_record_fingerprints() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("history.sqlite");
+    let store = StoreHandle::open(StoreConfig::new(&database_path)).unwrap();
+    let run = store
+        .begin_import(BeginImportRun {
+            source_kind: ImportSourceKind::SuperCmd,
+            source_fingerprint: [51; 32],
+            total_records: 1,
+            candidate_records: 1,
+            initial_failures: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let import_run_id = store
+        .with_reader(|connection| {
+            connection.query_row(
+                "SELECT import_run_id FROM import_run WHERE external_id = ?1",
+                [run.run_id.as_bytes().as_slice()],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .unwrap();
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
+    let invalid_run_source = connection.execute(
+        "INSERT INTO import_run
+           (external_id, source_kind, source_fingerprint, status, total_records,
+            candidate_records, started_at_ms)
+         VALUES (?1, 'unknown', ?2, 'running', 0, 0, 0)",
+        rusqlite::params![[61_u8; 16].as_slice(), [62_u8; 32].as_slice()],
+    );
+    let invalid_fingerprint = connection.execute(
+        "INSERT INTO import_record
+           (import_run_id, source_kind, record_fingerprint, created_at_ms)
+         VALUES (?1, 'supercmd', ?2, 0)",
+        rusqlite::params![import_run_id, [63_u8; 31].as_slice()],
+    );
+    let invalid_record_source = connection.execute(
+        "INSERT INTO import_record
+           (import_run_id, source_kind, record_fingerprint, created_at_ms)
+         VALUES (?1, 'unknown', ?2, 0)",
+        rusqlite::params![import_run_id, [64_u8; 32].as_slice()],
+    );
+
+    assert!(invalid_run_source.is_err());
+    assert!(invalid_fingerprint.is_err());
+    assert!(invalid_record_source.is_err());
 }
 
 #[test]

@@ -30,6 +30,8 @@ pub enum StoreError {
     WalUnavailable(String),
     #[error("database schema version {0} is newer than this application supports")]
     UnsupportedSchemaVersion(i64),
+    #[error("database schema is incompatible; development reset required")]
+    IncompatibleSchema,
     #[error("payload storage is unavailable until CAS storage is configured")]
     PayloadStorageUnavailable,
     #[error(transparent)]
@@ -876,12 +878,33 @@ fn write_ingest(
 
     if merged_content_flags & i64::from(ContentFlags::DO_NOT_INDEX.bits()) != 0 {
         transaction.execute("DELETE FROM search_doc WHERE content_id = ?1", [content_id])?;
+        transaction.execute(
+            "DELETE FROM search_derivation WHERE content_id = ?1",
+            [content_id],
+        )?;
     } else if let Some(normalized_text) = normalized_text {
+        let derivation_hash = search_derivation_hash(&normalized_text);
+        transaction.execute(
+            "INSERT INTO search_derivation(content_id, derivation_hash, normalized_text)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(content_id, derivation_hash) DO NOTHING",
+            params![content_id, derivation_hash.as_slice(), normalized_text],
+        )?;
+        let merged_text = {
+            let mut statement = transaction.prepare(
+                "SELECT normalized_text FROM search_derivation
+                 WHERE content_id = ?1 ORDER BY derivation_hash",
+            )?;
+            statement
+                .query_map([content_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n")
+        };
         transaction.execute(
             "INSERT INTO search_doc(content_id, normalized_text) VALUES (?1, ?2)
              ON CONFLICT(content_id) DO UPDATE
              SET normalized_text = excluded.normalized_text",
-            params![content_id, normalized_text],
+            params![content_id, merged_text],
         )?;
     }
 
@@ -907,6 +930,14 @@ fn write_ingest(
         content_id,
         event_id: transaction.last_insert_rowid(),
     })
+}
+
+fn search_derivation_hash(normalized_text: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"clipboard-store.search-derivation-v1");
+    hasher.update(&(normalized_text.len() as u64).to_be_bytes());
+    hasher.update(normalized_text.as_bytes());
+    *hasher.finalize().as_bytes()
 }
 
 struct StoredRepresentation<'a> {

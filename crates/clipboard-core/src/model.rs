@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 pub type ContentHash = [u8; 32];
@@ -61,14 +63,28 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct RepresentationInput {
     pub format_id: String,
     pub bytes: Option<Vec<u8>>,
     pub missing_ref: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl fmt::Debug for RepresentationInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RepresentationInput")
+            .field("has_payload", &self.bytes.is_some())
+            .field(
+                "byte_size",
+                &self.bytes.as_ref().map_or(0, std::vec::Vec::len),
+            )
+            .field("missing", &self.missing_ref.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct CaptureInput {
     pub captured_at_ms: i64,
     pub kind: ContentKind,
@@ -81,6 +97,21 @@ pub struct CaptureInput {
     pub occurrence_count: u32,
     pub content_flags: ContentFlags,
     pub event_flags: EventFlags,
+}
+
+impl fmt::Debug for CaptureInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CaptureInput")
+            .field("kind", &self.kind)
+            .field("representation_count", &self.representations.len())
+            .field("source_confidence", &self.source_confidence)
+            .field("pinned", &self.pinned)
+            .field("occurrence_count", &self.occurrence_count)
+            .field("content_flags", &self.content_flags)
+            .field("event_flags", &self.event_flags)
+            .finish()
+    }
 }
 
 pub fn canonical_text_bytes(value: &str) -> Vec<u8> {
@@ -154,5 +185,42 @@ mod tests {
                 canonical_text_bytes("a\r\n").as_slice()
             ),
         );
+    }
+
+    #[test]
+    fn capture_debug_omits_payloads_missing_references_and_raw_source_apps() {
+        let payload = b"sentinel private payload".to_vec();
+        let missing_reference = "sentinel-private-filename.png";
+        let source_id = "com.private.sentinel";
+        let source_name = "Private Sentinel App";
+        let input = CaptureInput {
+            captured_at_ms: 1_000,
+            kind: ContentKind::Image,
+            primary_mime: "image/png".to_owned(),
+            representations: vec![RepresentationInput {
+                format_id: "image/png".to_owned(),
+                bytes: Some(payload.clone()),
+                missing_ref: Some(missing_reference.to_owned()),
+            }],
+            source_app_id: Some(source_id.to_owned()),
+            source_app_name: Some(source_name.to_owned()),
+            source_confidence: SourceConfidence::Declared,
+            pinned: false,
+            occurrence_count: 1,
+            content_flags: ContentFlags::empty(),
+            event_flags: EventFlags::empty(),
+        };
+
+        let representation_debug = format!("{:?}", input.representations[0]);
+        let capture_debug = format!("{input:?}");
+        let byte_debug = format!("{payload:?}");
+        for rendered in [&representation_debug, &capture_debug] {
+            assert!(!rendered.contains(&byte_debug));
+            assert!(!rendered.contains(missing_reference));
+            assert!(!rendered.contains(source_id));
+            assert!(!rendered.contains(source_name));
+        }
+        assert!(representation_debug.contains("byte_size: 24"));
+        assert!(capture_debug.contains("representation_count: 1"));
     }
 }
