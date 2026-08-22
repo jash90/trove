@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/clipboard-core",
+  "crates/clipboard-store",
+  "crates/clipboard-search",
+  "crates/clipboard-images",
+  "crates/clipboard-import",
+  "tools/clipboard-import-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0"
+base64 = "0.23.1"
+bitflags = { version = "2.13.1", features = ["serde"] }
+blake3 = "1.8.7"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.6", features = ["derive"] }
+csv = "1.4.0"
+directories = "6.0.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "cache"] }
+rusqlite_migration = "2.6.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.151"
+tempfile = "3.27.0"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync"] }
+unicode-normalization = "0.1.25"
+uuid = { version = "1.24.1", features = ["v7", "serde"] }
+zstd = "0.13.3"
