@@ -49,7 +49,7 @@ async fn opened_connections_apply_the_required_sqlite_policy() {
     let store =
         StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
 
-    let (journal_mode, foreign_keys, synchronous, busy_timeout, cache_size) = store
+    let (journal_mode, foreign_keys, synchronous, busy_timeout, cache_size, query_only) = store
         .with_reader(|connection| {
             Ok::<_, rusqlite::Error>((
                 connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?,
@@ -57,6 +57,7 @@ async fn opened_connections_apply_the_required_sqlite_policy() {
                 connection.query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))?,
                 connection.query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))?,
                 connection.query_row("PRAGMA cache_size", [], |row| row.get::<_, i64>(0))?,
+                connection.query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0))?,
             ))
         })
         .unwrap();
@@ -66,10 +67,11 @@ async fn opened_connections_apply_the_required_sqlite_policy() {
     assert_eq!(synchronous, 1);
     assert_eq!(busy_timeout, 5_000);
     assert_eq!(cache_size, -65_536);
+    assert_eq!(query_only, 1);
 }
 
 #[tokio::test]
-async fn ingest_writes_normalized_search_document_and_uuid_blob() {
+async fn ingest_transaction_writes_normalized_search_document_and_uuid_blob() {
     let directory = tempfile::tempdir().unwrap();
     let store =
         StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
@@ -143,6 +145,114 @@ async fn mutations_update_and_remove_the_selected_event() {
 
     store.delete_event(outcome.event_id).await.unwrap();
     assert_eq!(store.stats().unwrap().event_count, 0);
+}
+
+#[tokio::test]
+async fn reader_connections_reject_mutation_while_writer_mutations_succeed() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+    let outcome = store.ingest(text_capture("one", 1_000)).await.unwrap();
+
+    let reader_error = store
+        .with_reader(|connection| {
+            connection.execute(
+                "UPDATE history_event SET pinned = 1 WHERE event_id = ?1",
+                [outcome.event_id],
+            )
+        })
+        .unwrap_err();
+    assert!(matches!(reader_error, StoreError::Database(_)));
+
+    store.set_pinned(outcome.event_id, true).await.unwrap();
+    let pinned = store
+        .with_reader(|connection| {
+            connection.query_row(
+                "SELECT pinned FROM history_event WHERE event_id = ?1",
+                [outcome.event_id],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(pinned, 1);
+}
+
+#[tokio::test]
+async fn deduplicating_do_not_index_removes_existing_search_document() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+    let first = store.ingest(text_capture("Łódź", 1_000)).await.unwrap();
+    let mut restricted = text_capture("Łódź", 2_000);
+    restricted.content_flags = ContentFlags::DO_NOT_INDEX;
+    store.ingest(restricted).await.unwrap();
+
+    let (content_flags, documents, fts_matches) = store
+        .with_reader(|connection| {
+            Ok::<_, rusqlite::Error>((
+                connection.query_row(
+                    "SELECT flags FROM content WHERE content_id = ?1",
+                    [first.content_id],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                connection.query_row("SELECT count(*) FROM search_doc", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                connection.query_row(
+                    "SELECT count(*) FROM search_fts WHERE search_fts MATCH 'lodz'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+            ))
+        })
+        .unwrap();
+
+    assert_ne!(
+        content_flags & i64::from(ContentFlags::DO_NOT_INDEX.bits()),
+        0
+    );
+    assert_eq!(documents, 0);
+    assert_eq!(fts_matches, 0);
+    assert_eq!(store.stats().unwrap().event_count, 2);
+}
+
+#[tokio::test]
+async fn deduplicating_indexable_content_never_recreates_a_do_not_index_document() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+    let mut restricted = text_capture("Łódź", 1_000);
+    restricted.content_flags = ContentFlags::DO_NOT_INDEX;
+    let first = store.ingest(restricted).await.unwrap();
+    store.ingest(text_capture("Łódź", 2_000)).await.unwrap();
+
+    let (content_flags, documents, fts_matches) = store
+        .with_reader(|connection| {
+            Ok::<_, rusqlite::Error>((
+                connection.query_row(
+                    "SELECT flags FROM content WHERE content_id = ?1",
+                    [first.content_id],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                connection.query_row("SELECT count(*) FROM search_doc", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                connection.query_row(
+                    "SELECT count(*) FROM search_fts WHERE search_fts MATCH 'lodz'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+            ))
+        })
+        .unwrap();
+
+    assert_ne!(
+        content_flags & i64::from(ContentFlags::DO_NOT_INDEX.bits()),
+        0
+    );
+    assert_eq!(documents, 0);
+    assert_eq!(fts_matches, 0);
+    assert_eq!(store.stats().unwrap().event_count, 2);
 }
 
 #[test]

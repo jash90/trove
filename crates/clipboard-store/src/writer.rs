@@ -8,7 +8,10 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::{StoreConfig, migrations, reader::open_connection};
+use crate::{
+    StoreConfig, migrations,
+    reader::{open_reader_connection, open_writer_connection},
+};
 
 pub const WRITER_QUEUE_CAPACITY: usize = 256;
 const MAX_INLINE_PAYLOAD_BYTES: usize = 4 * 1024;
@@ -67,7 +70,7 @@ enum WriteCommand {
 
 impl StoreHandle {
     pub fn open(config: StoreConfig) -> Result<Self, StoreError> {
-        let mut connection = open_connection(&config)?;
+        let mut connection = open_writer_connection(&config)?;
         migrations().apply(&mut connection)?;
 
         let (tx, mut rx) = mpsc::channel(WRITER_QUEUE_CAPACITY);
@@ -142,7 +145,7 @@ impl StoreHandle {
         &self,
         operation: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, StoreError> {
-        let connection = open_connection(&self.config)?;
+        let connection = open_reader_connection(&self.config)?;
         Ok(operation(&connection)?)
     }
 }
@@ -169,9 +172,9 @@ fn ingest(connection: &mut Connection, input: &CaptureInput) -> Result<IngestOut
     let representations = inline_representations(input)?;
     let primary_payload = representations[0].1;
     let content_hash = content_hash(input.kind, &input.primary_mime, primary_payload);
-    let normalized_text = normalized_text(input, primary_payload);
 
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let normalized_text = normalized_text(input, primary_payload);
     transaction.execute(
         "INSERT INTO content (content_hash, kind, primary_mime, byte_size, flags, created_at_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -188,6 +191,15 @@ fn ingest(connection: &mut Connection, input: &CaptureInput) -> Result<IngestOut
     let content_id = transaction.query_row(
         "SELECT content_id FROM content WHERE content_hash = ?1",
         [content_hash.as_slice()],
+        |row| row.get::<_, i64>(0),
+    )?;
+    transaction.execute(
+        "UPDATE content SET flags = flags | ?1 WHERE content_id = ?2",
+        params![i64::from(input.content_flags.bits()), content_id],
+    )?;
+    let merged_content_flags = transaction.query_row(
+        "SELECT flags FROM content WHERE content_id = ?1",
+        [content_id],
         |row| row.get::<_, i64>(0),
     )?;
 
@@ -208,7 +220,9 @@ fn ingest(connection: &mut Connection, input: &CaptureInput) -> Result<IngestOut
         )?;
     }
 
-    if let Some(normalized_text) = normalized_text {
+    if merged_content_flags & i64::from(ContentFlags::DO_NOT_INDEX.bits()) != 0 {
+        transaction.execute("DELETE FROM search_doc WHERE content_id = ?1", [content_id])?;
+    } else if let Some(normalized_text) = normalized_text {
         transaction.execute(
             "INSERT INTO search_doc(content_id, normalized_text) VALUES (?1, ?2)
              ON CONFLICT(content_id) DO NOTHING",
