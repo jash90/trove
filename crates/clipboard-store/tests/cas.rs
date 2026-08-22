@@ -1,7 +1,12 @@
-use std::{collections::BTreeSet, fs};
+use std::{
+    collections::BTreeSet,
+    fs,
+    sync::{Arc, Barrier},
+    thread,
+};
 
 use clipboard_core::ContentKind;
-use clipboard_store::{CasStore, classify_payload};
+use clipboard_store::{CasError, CasStore, StoreError, classify_payload};
 
 fn test_cas() -> (tempfile::TempDir, CasStore) {
     let directory = tempfile::tempdir().unwrap();
@@ -27,8 +32,69 @@ fn cas_rejects_paths_outside_its_content_addressed_root() {
     let outside = directory.path().join("outside");
     fs::write(&outside, b"must remain").unwrap();
 
-    assert!(cas.read("../outside").is_err());
+    let error = cas.read("../outside").unwrap_err();
+    assert_eq!(error.to_string(), "invalid CAS relative path");
+    assert!(!error.to_string().contains("outside"));
     assert_eq!(fs::read(outside).unwrap(), b"must remain");
+}
+
+#[test]
+fn cas_io_errors_have_stable_path_free_display_text() {
+    let (_directory, cas) = test_cas();
+    let hash = blake3::hash(b"missing").to_hex().to_string();
+    let relpath = format!("{}/{}", &hash[..2], hash);
+
+    let error = cas.read(&relpath).unwrap_err();
+
+    assert_eq!(error.to_string(), "CAS filesystem operation failed");
+    assert!(!error.to_string().contains("blobs"));
+    assert!(!error.to_string().contains(&relpath));
+}
+
+#[test]
+fn transparent_store_errors_preserve_path_free_cas_display_text() {
+    let error = StoreError::from(CasError::InvalidRelativePath);
+
+    assert_eq!(error.to_string(), "invalid CAS relative path");
+}
+
+#[test]
+fn cas_rejects_corrupt_existing_blobs_without_leaking_paths_or_hashes() {
+    let (_directory, cas) = test_cas();
+    let blob = cas.put(b"payload").unwrap();
+    fs::write(cas.root().join(&blob.relpath), b"corrupt").unwrap();
+
+    let read_error = cas.read(&blob.relpath).unwrap_err();
+    let put_error = cas.put(b"payload").unwrap_err();
+
+    assert_eq!(read_error.to_string(), "CAS blob integrity check failed");
+    assert_eq!(put_error.to_string(), "CAS blob integrity check failed");
+    assert!(!read_error.to_string().contains(&blob.relpath));
+    assert!(!put_error.to_string().contains(&blob.relpath));
+}
+
+#[test]
+fn concurrent_puts_are_idempotent() {
+    let (_directory, cas) = test_cas();
+    let cas = Arc::new(cas);
+    let barrier = Arc::new(Barrier::new(8));
+    let handles = (0..8)
+        .map(|_| {
+            let cas = Arc::clone(&cas);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                cas.put(b"concurrent payload").unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let blobs = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(blobs.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(cas.read(&blobs[0].relpath).unwrap(), b"concurrent payload");
 }
 
 #[test]
@@ -42,6 +108,17 @@ fn remove_orphans_only_removes_unreferenced_valid_blobs() {
 
     assert_eq!(cas.read(&live.relpath).unwrap(), b"live");
     assert!(cas.read(&orphan.relpath).is_err());
+}
+
+#[test]
+fn remove_orphans_rejects_corrupt_blobs() {
+    let (_directory, cas) = test_cas();
+    let blob = cas.put(b"orphan").unwrap();
+    fs::write(cas.root().join(&blob.relpath), b"corrupt").unwrap();
+
+    let error = cas.remove_orphans(&BTreeSet::new()).unwrap_err();
+
+    assert_eq!(error.to_string(), "CAS blob integrity check failed");
 }
 
 #[test]
@@ -61,4 +138,84 @@ fn payload_classifier_uses_the_three_storage_tiers() {
         classify_payload(ContentKind::Image, b"image", &cas).unwrap(),
         clipboard_store::StoredPayload::Cas { .. }
     ));
+}
+
+#[cfg(unix)]
+mod unix_symlink_tests {
+    use std::{fs, os::unix::fs::symlink};
+
+    use super::test_cas;
+
+    #[test]
+    fn put_rejects_a_symlinked_cas_root() {
+        let (directory, cas) = test_cas();
+        let external = directory.path().join("external");
+        fs::create_dir(&external).unwrap();
+        symlink(&external, cas.root()).unwrap();
+
+        let error = cas.put(b"payload").unwrap_err();
+
+        assert_eq!(error.to_string(), "CAS filesystem boundary is invalid");
+        assert!(fs::read_dir(external).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn put_rejects_a_symlinked_temporary_directory() {
+        let (directory, cas) = test_cas();
+        fs::create_dir_all(cas.root()).unwrap();
+        let external = directory.path().join("external");
+        fs::create_dir(&external).unwrap();
+        symlink(&external, cas.root().join(".tmp")).unwrap();
+
+        let error = cas.put(b"payload").unwrap_err();
+
+        assert_eq!(error.to_string(), "CAS filesystem boundary is invalid");
+        assert!(fs::read_dir(external).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn put_rejects_a_symlinked_shard_directory() {
+        let (directory, cas) = test_cas();
+        let hash = blake3::hash(b"payload").to_hex().to_string();
+        fs::create_dir_all(cas.root()).unwrap();
+        let external = directory.path().join("external");
+        fs::create_dir(&external).unwrap();
+        symlink(&external, cas.root().join(&hash[..2])).unwrap();
+
+        let error = cas.put(b"payload").unwrap_err();
+
+        assert_eq!(error.to_string(), "CAS filesystem boundary is invalid");
+        assert!(fs::read_dir(external).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn read_and_put_reject_a_symlinked_blob_even_when_it_has_matching_bytes() {
+        let (directory, cas) = test_cas();
+        let blob = cas.put(b"payload").unwrap();
+        fs::remove_file(cas.root().join(&blob.relpath)).unwrap();
+        let external = directory.path().join("external-blob");
+        fs::write(&external, b"payload").unwrap();
+        symlink(&external, cas.root().join(&blob.relpath)).unwrap();
+
+        let read_error = cas.read(&blob.relpath).unwrap_err();
+        let put_error = cas.put(b"payload").unwrap_err();
+
+        assert_eq!(read_error.to_string(), "CAS filesystem boundary is invalid");
+        assert_eq!(put_error.to_string(), "CAS filesystem boundary is invalid");
+    }
+
+    #[test]
+    fn cleanup_rejects_a_symlinked_blob_without_touching_its_target() {
+        let (directory, cas) = test_cas();
+        let blob = cas.put(b"orphan").unwrap();
+        fs::remove_file(cas.root().join(&blob.relpath)).unwrap();
+        let external = directory.path().join("external-blob");
+        fs::write(&external, b"must remain").unwrap();
+        symlink(&external, cas.root().join(&blob.relpath)).unwrap();
+
+        let error = cas.remove_orphans(&Default::default()).unwrap_err();
+
+        assert_eq!(error.to_string(), "CAS filesystem boundary is invalid");
+        assert_eq!(fs::read(external).unwrap(), b"must remain");
+    }
 }
