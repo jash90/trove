@@ -13,10 +13,11 @@ node_modules/
 dist/
 target/
 .turbo/
+.worktrees/
+.superpowers/
 
 # Local tooling
 .DS_Store
 .env
 .env.*
 !.env.example
-
