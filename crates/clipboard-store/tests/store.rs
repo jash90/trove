@@ -1,7 +1,10 @@
 use clipboard_core::{
     CaptureInput, ContentFlags, ContentKind, EventFlags, RepresentationInput, SourceConfidence,
 };
-use clipboard_store::{StoreConfig, StoreError, StoreHandle, WRITER_QUEUE_CAPACITY, migrations};
+use clipboard_store::{
+    BeginImportRun, ImportSourceKind, StoreConfig, StoreError, StoreHandle, StoreImportCandidate,
+    WRITER_QUEUE_CAPACITY, migrations,
+};
 
 fn text_capture(value: &str, captured_at_ms: i64) -> CaptureInput {
     CaptureInput {
@@ -285,6 +288,104 @@ async fn deduplicating_indexable_content_never_recreates_a_do_not_index_document
     assert_eq!(documents, 0);
     assert_eq!(fts_matches, 0);
     assert_eq!(store.stats().unwrap().event_count, 2);
+}
+
+#[tokio::test]
+async fn ingest_persists_a_missing_primary_without_inventing_payload_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+    let mut capture = text_capture("unused", 1_000);
+    capture.kind = ContentKind::Image;
+    capture.primary_mime = "image/png".to_owned();
+    capture.representations = vec![RepresentationInput {
+        format_id: "image/png".to_owned(),
+        bytes: None,
+        missing_ref: Some("synthetic-missing-reference".to_owned()),
+    }];
+    capture.content_flags = ContentFlags::MISSING_PAYLOAD;
+
+    let first = store.ingest(capture.clone()).await.unwrap();
+    let second = store.ingest(capture.clone()).await.unwrap();
+    let mut other_mime = capture.clone();
+    other_mime.primary_mime = "image/jpeg".to_owned();
+    other_mime.representations[0].format_id = "image/jpeg".to_owned();
+    let other_mime = store.ingest(other_mime).await.unwrap();
+    let mut other_kind = capture;
+    other_kind.kind = ContentKind::File;
+    let other_kind = store.ingest(other_kind).await.unwrap();
+
+    assert_eq!(first.content_id, second.content_id);
+    assert_ne!(first.event_id, second.event_id);
+    assert_ne!(first.content_id, other_mime.content_id);
+    assert_ne!(first.content_id, other_kind.content_id);
+    let (byte_size, storage_kind, inline_payload, original_size, stored_size) = store
+        .with_reader(|connection| {
+            connection.query_row(
+                "SELECT content.byte_size, content_representation.storage_kind,
+                        content_representation.inline_payload,
+                        content_representation.original_byte_size,
+                        content_representation.stored_byte_size
+                 FROM content JOIN content_representation USING(content_id)
+                 WHERE content.content_id = ?1",
+                [first.content_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<Vec<u8>>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(byte_size, 0);
+    assert_eq!(storage_kind, "missing");
+    assert_eq!(inline_payload, None);
+    assert_eq!(original_size, 0);
+    assert_eq!(stored_size, 0);
+}
+
+#[tokio::test]
+async fn replaying_a_committed_same_run_offset_cannot_advance_or_double_count_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+    let run = store
+        .begin_import(BeginImportRun {
+            source_kind: ImportSourceKind::Raycast,
+            source_fingerprint: [7; 32],
+            total_records: 2,
+            candidate_records: 2,
+            initial_failures: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let candidate = || StoreImportCandidate {
+        candidate_offset: 0,
+        record_fingerprint: [9; 32],
+        capture: text_capture("synthetic imported value", 1_000),
+        search_text: Some("synthetic imported value".to_owned()),
+        source_app_original: None,
+    };
+
+    store
+        .import_batch(run.run_id, run.generation, vec![candidate()])
+        .await
+        .unwrap();
+    let error = store
+        .import_batch(run.run_id, run.generation, vec![candidate()])
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, StoreError::ImportCheckpointMismatch));
+    let status = store.import_status(run.run_id).unwrap();
+    assert_eq!(status.next_candidate_offset, 1);
+    assert_eq!(status.imported_records, 1);
+    assert_eq!(status.already_present_records, 0);
+    assert_eq!(store.stats().unwrap().event_count, 1);
 }
 
 #[test]

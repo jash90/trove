@@ -1,9 +1,13 @@
-use std::{io, thread};
+use std::{
+    io, thread,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use clipboard_core::{
-    CaptureInput, ContentFlags, ContentKind, SourceConfidence, content_hash, normalize_search_text,
+    CaptureInput, ContentFlags, ContentHash, ContentKind, SourceConfidence, content_hash,
+    normalize_search_text,
 };
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -14,6 +18,7 @@ use crate::{
 };
 
 pub const WRITER_QUEUE_CAPACITY: usize = 256;
+pub const IMPORT_BATCH_SIZE: usize = 250;
 const MAX_INLINE_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_INLINE_ZSTD_PAYLOAD_BYTES: usize = 256 * 1024;
 
@@ -37,6 +42,22 @@ pub enum StoreError {
     WriterResponseDropped,
     #[error("failed to start the database writer thread")]
     WriterThreadSpawn(#[source] io::Error),
+    #[error("invalid import input")]
+    InvalidImportInput,
+    #[error("import run not found")]
+    ImportRunNotFound,
+    #[error("import source does not match the persisted run")]
+    ImportSourceMismatch,
+    #[error("import run is not resumable")]
+    ImportRunNotResumable,
+    #[error("import checkpoint is inconsistent")]
+    ImportCheckpointMismatch,
+    #[error("import worker was superseded")]
+    ImportWorkerSuperseded,
+    #[error("import accounting invariant failed")]
+    ImportInvariant,
+    #[error("import batch exceeds the configured bound")]
+    ImportBatchTooLarge,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,7 +72,7 @@ pub struct StoreStats {
     pub event_count: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum StoredPayload {
     Inline(Vec<u8>),
     InlineZstd(Vec<u8>),
@@ -60,6 +81,84 @@ pub enum StoredPayload {
         relpath: String,
         byte_size: u64,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImportSourceKind {
+    Raycast,
+    SuperCmd,
+}
+
+impl ImportSourceKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Raycast => "raycast",
+            Self::SuperCmd => "supercmd",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportFailureCount {
+    pub reason_code: String,
+    pub count: u64,
+}
+
+pub struct BeginImportRun {
+    pub source_kind: ImportSourceKind,
+    pub source_fingerprint: [u8; 32],
+    pub total_records: u64,
+    pub candidate_records: u64,
+    pub initial_failures: Vec<ImportFailureCount>,
+}
+
+pub struct ResumeImportRun {
+    pub run_id: Uuid,
+    pub source_kind: ImportSourceKind,
+    pub source_fingerprint: [u8; 32],
+    pub total_records: u64,
+    pub candidate_records: u64,
+}
+
+pub struct StoreImportCandidate {
+    pub candidate_offset: u64,
+    pub record_fingerprint: [u8; 32],
+    pub capture: CaptureInput,
+    pub search_text: Option<String>,
+    pub source_app_original: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoreImportRunState {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreImportRunStatus {
+    pub run_id: Uuid,
+    pub state: StoreImportRunState,
+    pub total_records: u64,
+    pub candidate_records: u64,
+    pub next_candidate_offset: u64,
+    pub imported_records: u64,
+    pub already_present_records: u64,
+    pub skipped_records: u64,
+    pub failed_records: u64,
+    pub error_code: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImportWorkerLease {
+    pub run_id: Uuid,
+    pub generation: u64,
+    pub next_candidate_offset: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImportBatchOutcome {
+    pub processed_candidates: u64,
 }
 
 #[derive(Clone)]
@@ -80,6 +179,31 @@ enum WriteCommand {
     },
     DeleteEvent {
         event_id: i64,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    BeginImport {
+        input: BeginImportRun,
+        reply: oneshot::Sender<Result<ImportWorkerLease, StoreError>>,
+    },
+    ResumeImport {
+        input: ResumeImportRun,
+        reply: oneshot::Sender<Result<ImportWorkerLease, StoreError>>,
+    },
+    ImportBatch {
+        run_id: Uuid,
+        generation: u64,
+        candidates: Vec<StoreImportCandidate>,
+        reply: oneshot::Sender<Result<ImportBatchOutcome, StoreError>>,
+    },
+    FinishImport {
+        run_id: Uuid,
+        generation: u64,
+        reply: oneshot::Sender<Result<StoreImportRunStatus, StoreError>>,
+    },
+    FailImport {
+        run_id: Uuid,
+        generation: u64,
+        error_code: String,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
 }
@@ -144,6 +268,107 @@ impl StoreHandle {
             .map_err(|_| StoreError::WriterResponseDropped)?
     }
 
+    pub async fn begin_import(
+        &self,
+        input: BeginImportRun,
+    ) -> Result<ImportWorkerLease, StoreError> {
+        validate_begin_import(&input)?;
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::BeginImport { input, reply })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    pub async fn resume_import(
+        &self,
+        input: ResumeImportRun,
+    ) -> Result<ImportWorkerLease, StoreError> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::ResumeImport { input, reply })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    pub async fn import_batch(
+        &self,
+        run_id: Uuid,
+        generation: u64,
+        candidates: Vec<StoreImportCandidate>,
+    ) -> Result<ImportBatchOutcome, StoreError> {
+        if candidates.len() > IMPORT_BATCH_SIZE {
+            return Err(StoreError::ImportBatchTooLarge);
+        }
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::ImportBatch {
+                run_id,
+                generation,
+                candidates,
+                reply,
+            })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    pub async fn finish_import(
+        &self,
+        run_id: Uuid,
+        generation: u64,
+    ) -> Result<StoreImportRunStatus, StoreError> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::FinishImport {
+                run_id,
+                generation,
+                reply,
+            })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    pub async fn fail_import(
+        &self,
+        run_id: Uuid,
+        generation: u64,
+        error_code: &str,
+    ) -> Result<(), StoreError> {
+        if !valid_reason_code(error_code) {
+            return Err(StoreError::InvalidImportInput);
+        }
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::FailImport {
+                run_id,
+                generation,
+                error_code: error_code.to_owned(),
+                reply,
+            })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    pub fn import_status(&self, run_id: Uuid) -> Result<StoreImportRunStatus, StoreError> {
+        let connection = open_reader_connection(&self.config)?;
+        read_import_status(&connection, run_id)
+    }
+
     pub fn stats(&self) -> Result<StoreStats, StoreError> {
         self.with_reader(|connection| {
             Ok(StoreStats {
@@ -182,6 +407,41 @@ fn handle_command(connection: &mut Connection, cas: &CasStore, command: WriteCom
         WriteCommand::DeleteEvent { event_id, reply } => {
             let _ = reply.send(delete_event(connection, event_id));
         }
+        WriteCommand::BeginImport { input, reply } => {
+            let _ = reply.send(begin_import(connection, &input));
+        }
+        WriteCommand::ResumeImport { input, reply } => {
+            let _ = reply.send(resume_import(connection, &input));
+        }
+        WriteCommand::ImportBatch {
+            run_id,
+            generation,
+            candidates,
+            reply,
+        } => {
+            let _ = reply.send(import_batch(
+                connection,
+                cas,
+                run_id,
+                generation,
+                &candidates,
+            ));
+        }
+        WriteCommand::FinishImport {
+            run_id,
+            generation,
+            reply,
+        } => {
+            let _ = reply.send(finish_import(connection, run_id, generation));
+        }
+        WriteCommand::FailImport {
+            run_id,
+            generation,
+            error_code,
+            reply,
+        } => {
+            let _ = reply.send(fail_import(connection, run_id, generation, &error_code));
+        }
     }
 }
 
@@ -190,100 +450,316 @@ fn ingest(
     cas: &CasStore,
     input: &CaptureInput,
 ) -> Result<IngestOutcome, StoreError> {
-    let primary_payload = input
-        .representations
-        .first()
-        .and_then(|representation| representation.bytes.as_deref())
-        .ok_or(StoreError::PayloadStorageUnavailable)?;
-    let representations = stored_representations(input, cas)?;
-    let content_hash = content_hash(input.kind, &input.primary_mime, primary_payload);
-
+    let prepared = prepare_ingest(input, cas)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let normalized_text = normalized_text(input, primary_payload);
+    let outcome = write_ingest(&transaction, input, &prepared, None, None)?;
+    transaction.commit()?;
+    Ok(outcome)
+}
+
+fn begin_import(
+    connection: &mut Connection,
+    input: &BeginImportRun,
+) -> Result<ImportWorkerLease, StoreError> {
+    validate_begin_import(input)?;
+    let run_id = Uuid::now_v7();
+    let initial_failed = input
+        .initial_failures
+        .iter()
+        .try_fold(0_u64, |sum, failure| sum.checked_add(failure.count))
+        .ok_or(StoreError::InvalidImportInput)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute(
-        "INSERT INTO content (content_hash, kind, primary_mime, byte_size, flags, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(content_hash) DO NOTHING",
+        "INSERT INTO import_run
+           (external_id, source_kind, source_fingerprint, status, worker_generation, total_records,
+            candidate_records, next_candidate_offset, imported_records,
+            already_present_records, skipped_records, failed_records, started_at_ms)
+         VALUES (?1, ?2, ?3, 'running', 1, ?4, ?5, 0, 0, 0, 0, ?6, ?7)",
         params![
-            content_hash.as_slice(),
-            input.kind.as_str(),
-            input.primary_mime,
-            primary_payload.len() as i64,
-            i64::from(input.content_flags.bits()),
-            input.captured_at_ms,
+            run_id.as_bytes().as_slice(),
+            input.source_kind.as_str(),
+            input.source_fingerprint.as_slice(),
+            sql_count(input.total_records)?,
+            sql_count(input.candidate_records)?,
+            sql_count(initial_failed)?,
+            now_ms(),
         ],
     )?;
-    let content_id = transaction.query_row(
-        "SELECT content_id FROM content WHERE content_hash = ?1",
-        [content_hash.as_slice()],
-        |row| row.get::<_, i64>(0),
-    )?;
-    transaction.execute(
-        "UPDATE content SET flags = flags | ?1 WHERE content_id = ?2",
-        params![i64::from(input.content_flags.bits()), content_id],
-    )?;
-    let merged_content_flags = transaction.query_row(
-        "SELECT flags FROM content WHERE content_id = ?1",
-        [content_id],
-        |row| row.get::<_, i64>(0),
-    )?;
-
-    for representation in representations {
-        let (storage_kind, inline_payload, blob_relpath, missing_ref, stored_byte_size) =
-            representation.storage_values();
+    let import_run_id = transaction.last_insert_rowid();
+    for failure in &input.initial_failures {
         transaction.execute(
-            "INSERT INTO content_representation
-               (content_id, format_id, storage_kind, inline_payload, blob_relpath, missing_ref,
-                original_byte_size, stored_byte_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(content_id, format_id) DO NOTHING",
+            "INSERT INTO import_failure_reason(import_run_id, reason_code, count)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(import_run_id, reason_code)
+             DO UPDATE SET count = count + excluded.count",
             params![
-                content_id,
-                representation.format_id,
-                storage_kind,
-                inline_payload,
-                blob_relpath,
-                missing_ref,
-                representation.original_byte_size as i64,
-                stored_byte_size as i64,
+                import_run_id,
+                failure.reason_code,
+                sql_count(failure.count)?
             ],
         )?;
     }
+    transaction.commit()?;
+    Ok(ImportWorkerLease {
+        run_id,
+        generation: 1,
+        next_candidate_offset: 0,
+    })
+}
 
-    if merged_content_flags & i64::from(ContentFlags::DO_NOT_INDEX.bits()) != 0 {
-        transaction.execute("DELETE FROM search_doc WHERE content_id = ?1", [content_id])?;
-    } else if let Some(normalized_text) = normalized_text {
-        transaction.execute(
-            "INSERT INTO search_doc(content_id, normalized_text) VALUES (?1, ?2)
-             ON CONFLICT(content_id) DO NOTHING",
-            params![content_id, normalized_text],
-        )?;
+fn resume_import(
+    connection: &mut Connection,
+    input: &ResumeImportRun,
+) -> Result<ImportWorkerLease, StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let persisted = transaction
+        .query_row(
+            "SELECT import_run_id, source_kind, source_fingerprint, total_records,
+                    candidate_records, status, worker_generation, next_candidate_offset
+             FROM import_run WHERE external_id = ?1",
+            [input.run_id.as_bytes().as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            },
+        )
+        .map_err(map_run_query_error)?;
+    if persisted.1 != input.source_kind.as_str()
+        || persisted.2.as_slice() != input.source_fingerprint
+        || persisted.3 != sql_count(input.total_records)?
+        || persisted.4 != sql_count(input.candidate_records)?
+    {
+        return Err(StoreError::ImportSourceMismatch);
     }
+    if persisted.5 != "running" {
+        return Err(StoreError::ImportRunNotResumable);
+    }
+    let generation = persisted
+        .6
+        .checked_add(1)
+        .ok_or(StoreError::ImportInvariant)?;
+    let updated = transaction.execute(
+        "UPDATE import_run SET worker_generation = ?1
+         WHERE import_run_id = ?2 AND worker_generation = ?3 AND status = 'running'",
+        params![generation, persisted.0, persisted.6],
+    )?;
+    if updated != 1 {
+        return Err(StoreError::ImportWorkerSuperseded);
+    }
+    transaction.commit()?;
+    Ok(ImportWorkerLease {
+        run_id: input.run_id,
+        generation: rust_count(generation)?,
+        next_candidate_offset: rust_count(persisted.7)?,
+    })
+}
 
-    transaction.execute(
-        "INSERT INTO history_event
-           (global_id, content_id, captured_at_ms, source_app_id, source_app_name,
-            source_confidence, pinned, occurrence_count, flags)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+fn import_batch(
+    connection: &mut Connection,
+    cas: &CasStore,
+    run_id: Uuid,
+    generation: u64,
+    candidates: &[StoreImportCandidate],
+) -> Result<ImportBatchOutcome, StoreError> {
+    if candidates.len() > IMPORT_BATCH_SIZE {
+        return Err(StoreError::ImportBatchTooLarge);
+    }
+    let mut processed_candidates = 0_u64;
+    for candidate in candidates {
+        match prepare_ingest(&candidate.capture, cas) {
+            Ok(prepared) => {
+                commit_import_candidate(connection, run_id, generation, candidate, &prepared)?;
+            }
+            Err(error) => {
+                record_import_candidate_failure(
+                    connection,
+                    run_id,
+                    generation,
+                    candidate.candidate_offset,
+                    candidate_failure_reason(&error),
+                )?;
+            }
+        }
+        processed_candidates += 1;
+    }
+    Ok(ImportBatchOutcome {
+        processed_candidates,
+    })
+}
+
+fn commit_import_candidate(
+    connection: &mut Connection,
+    run_id: Uuid,
+    generation: u64,
+    candidate: &StoreImportCandidate,
+    prepared: &PreparedIngest<'_>,
+) -> Result<(), StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let checkpoint = import_checkpoint(&transaction, run_id, generation)?;
+    if checkpoint.next_candidate_offset != sql_count(candidate.candidate_offset)? {
+        return Err(StoreError::ImportCheckpointMismatch);
+    }
+    let inserted = transaction.execute(
+        "INSERT INTO import_record
+           (import_run_id, source_kind, record_fingerprint, event_id, created_at_ms)
+         VALUES (?1, ?2, ?3, NULL, ?4)
+         ON CONFLICT(source_kind, record_fingerprint) DO NOTHING",
         params![
-            Uuid::now_v7().as_bytes().as_slice(),
-            content_id,
-            input.captured_at_ms,
-            input.source_app_id,
-            input.source_app_name,
-            source_confidence(input.source_confidence),
-            i64::from(input.pinned),
-            i64::from(input.occurrence_count),
-            i64::from(input.event_flags.bits()),
+            checkpoint.import_run_id,
+            checkpoint.source_kind,
+            candidate.record_fingerprint.as_slice(),
+            now_ms(),
         ],
     )?;
-    let event_id = transaction.last_insert_rowid();
+    if inserted == 0 {
+        advance_import_counter(&transaction, &checkpoint, ImportCounter::AlreadyPresent)?;
+        transaction.commit()?;
+        return Ok(());
+    }
+    let import_record_id = transaction.last_insert_rowid();
+    let outcome = write_ingest(
+        &transaction,
+        &candidate.capture,
+        prepared,
+        Some(candidate.search_text.as_deref()),
+        candidate.source_app_original.as_deref(),
+    )?;
+    transaction.execute(
+        "UPDATE import_record SET event_id = ?1 WHERE import_record_id = ?2",
+        params![outcome.event_id, import_record_id],
+    )?;
+    advance_import_counter(&transaction, &checkpoint, ImportCounter::Imported)?;
     transaction.commit()?;
+    Ok(())
+}
 
-    Ok(IngestOutcome {
-        content_id,
-        event_id,
-    })
+fn record_import_candidate_failure(
+    connection: &mut Connection,
+    run_id: Uuid,
+    generation: u64,
+    candidate_offset: u64,
+    reason_code: &'static str,
+) -> Result<(), StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let checkpoint = import_checkpoint(&transaction, run_id, generation)?;
+    if checkpoint.next_candidate_offset != sql_count(candidate_offset)? {
+        return Err(StoreError::ImportCheckpointMismatch);
+    }
+    advance_import_counter(&transaction, &checkpoint, ImportCounter::Failed)?;
+    transaction.execute(
+        "INSERT INTO import_failure_reason(import_run_id, reason_code, count)
+         VALUES (?1, ?2, 1)
+         ON CONFLICT(import_run_id, reason_code)
+         DO UPDATE SET count = count + 1",
+        params![checkpoint.import_run_id, reason_code],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn finish_import(
+    connection: &mut Connection,
+    run_id: Uuid,
+    generation: u64,
+) -> Result<StoreImportRunStatus, StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let values = transaction
+        .query_row(
+            "SELECT candidate_records, next_candidate_offset, total_records,
+                    imported_records, already_present_records, skipped_records, failed_records,
+                    status, worker_generation
+             FROM import_run WHERE external_id = ?1",
+            [run_id.as_bytes().as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            },
+        )
+        .map_err(map_run_query_error)?;
+    if values.8 != sql_count(generation)? {
+        return Err(StoreError::ImportWorkerSuperseded);
+    }
+    if values.7 != "running" {
+        return Err(StoreError::ImportRunNotResumable);
+    }
+    let processed = values
+        .3
+        .checked_add(values.4)
+        .and_then(|count| count.checked_add(values.5))
+        .and_then(|count| count.checked_add(values.6))
+        .ok_or(StoreError::ImportInvariant)?;
+    if values.0 != values.1 || values.2 != processed {
+        return Err(StoreError::ImportInvariant);
+    }
+    transaction.execute(
+        "UPDATE import_run
+         SET status = 'completed', finished_at_ms = ?1, error_code = NULL
+         WHERE external_id = ?2 AND worker_generation = ?3",
+        params![
+            now_ms(),
+            run_id.as_bytes().as_slice(),
+            sql_count(generation)?
+        ],
+    )?;
+    transaction.commit()?;
+    read_import_status(connection, run_id)
+}
+
+fn fail_import(
+    connection: &mut Connection,
+    run_id: Uuid,
+    generation: u64,
+    error_code: &str,
+) -> Result<(), StoreError> {
+    if !valid_reason_code(error_code) {
+        return Err(StoreError::InvalidImportInput);
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let updated = transaction.execute(
+        "UPDATE import_run
+         SET status = 'failed', finished_at_ms = ?1, error_code = ?2
+         WHERE external_id = ?3 AND worker_generation = ?4 AND status = 'running'",
+        params![
+            now_ms(),
+            error_code,
+            run_id.as_bytes().as_slice(),
+            sql_count(generation)?
+        ],
+    )?;
+    if updated == 0 {
+        let persisted = transaction.query_row(
+            "SELECT status, worker_generation FROM import_run WHERE external_id = ?1",
+            [run_id.as_bytes().as_slice()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        );
+        return match persisted {
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(StoreError::ImportRunNotFound),
+            Err(error) => Err(StoreError::Database(error)),
+            Ok((_, persisted_generation)) if persisted_generation != sql_count(generation)? => {
+                Err(StoreError::ImportWorkerSuperseded)
+            }
+            Ok(_) => Err(StoreError::ImportRunNotResumable),
+        };
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 fn set_pinned(connection: &mut Connection, event_id: i64, pinned: bool) -> Result<(), StoreError> {
@@ -301,6 +777,136 @@ fn delete_event(connection: &mut Connection, event_id: i64) -> Result<(), StoreE
     transaction.execute("DELETE FROM history_event WHERE event_id = ?1", [event_id])?;
     transaction.commit()?;
     Ok(())
+}
+
+struct PreparedIngest<'a> {
+    content_hash: ContentHash,
+    byte_size: u64,
+    primary_payload: Option<&'a [u8]>,
+    representations: Vec<StoredRepresentation<'a>>,
+}
+
+fn prepare_ingest<'a>(
+    input: &'a CaptureInput,
+    cas: &CasStore,
+) -> Result<PreparedIngest<'a>, StoreError> {
+    let primary = input
+        .representations
+        .first()
+        .ok_or(StoreError::PayloadStorageUnavailable)?;
+    let (content_hash, byte_size, primary_payload) =
+        match (primary.bytes.as_deref(), primary.missing_ref.as_deref()) {
+            (Some(bytes), None) => (
+                content_hash(input.kind, &input.primary_mime, bytes),
+                bytes.len() as u64,
+                Some(bytes),
+            ),
+            (None, Some(missing_ref)) => (
+                missing_content_hash(input.kind, &input.primary_mime, missing_ref),
+                0,
+                None,
+            ),
+            _ => return Err(StoreError::PayloadStorageUnavailable),
+        };
+    Ok(PreparedIngest {
+        content_hash,
+        byte_size,
+        primary_payload,
+        representations: stored_representations(input, cas)?,
+    })
+}
+
+fn write_ingest(
+    transaction: &Transaction<'_>,
+    input: &CaptureInput,
+    prepared: &PreparedIngest<'_>,
+    search_override: Option<Option<&str>>,
+    source_app_original: Option<&str>,
+) -> Result<IngestOutcome, StoreError> {
+    let normalized_text = normalized_text(input, prepared.primary_payload, search_override);
+    transaction.execute(
+        "INSERT INTO content (content_hash, kind, primary_mime, byte_size, flags, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(content_hash) DO NOTHING",
+        params![
+            prepared.content_hash.as_slice(),
+            input.kind.as_str(),
+            input.primary_mime,
+            sql_count(prepared.byte_size)?,
+            i64::from(input.content_flags.bits()),
+            input.captured_at_ms,
+        ],
+    )?;
+    let content_id = transaction.query_row(
+        "SELECT content_id FROM content WHERE content_hash = ?1",
+        [prepared.content_hash.as_slice()],
+        |row| row.get::<_, i64>(0),
+    )?;
+    transaction.execute(
+        "UPDATE content SET flags = flags | ?1 WHERE content_id = ?2",
+        params![i64::from(input.content_flags.bits()), content_id],
+    )?;
+    let merged_content_flags = transaction.query_row(
+        "SELECT flags FROM content WHERE content_id = ?1",
+        [content_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+
+    for representation in &prepared.representations {
+        let (storage_kind, inline_payload, blob_relpath, missing_ref, stored_byte_size) =
+            representation.storage_values();
+        transaction.execute(
+            "INSERT INTO content_representation
+               (content_id, format_id, storage_kind, inline_payload, blob_relpath, missing_ref,
+                original_byte_size, stored_byte_size)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(content_id, format_id) DO NOTHING",
+            params![
+                content_id,
+                representation.format_id,
+                storage_kind,
+                inline_payload,
+                blob_relpath,
+                missing_ref,
+                sql_count(representation.original_byte_size)?,
+                sql_count(stored_byte_size)?,
+            ],
+        )?;
+    }
+
+    if merged_content_flags & i64::from(ContentFlags::DO_NOT_INDEX.bits()) != 0 {
+        transaction.execute("DELETE FROM search_doc WHERE content_id = ?1", [content_id])?;
+    } else if let Some(normalized_text) = normalized_text {
+        transaction.execute(
+            "INSERT INTO search_doc(content_id, normalized_text) VALUES (?1, ?2)
+             ON CONFLICT(content_id) DO UPDATE
+             SET normalized_text = excluded.normalized_text",
+            params![content_id, normalized_text],
+        )?;
+    }
+
+    transaction.execute(
+        "INSERT INTO history_event
+           (global_id, content_id, captured_at_ms, source_app_id, source_app_name,
+            source_app_original, source_confidence, pinned, occurrence_count, flags)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            Uuid::now_v7().as_bytes().as_slice(),
+            content_id,
+            input.captured_at_ms,
+            input.source_app_id,
+            input.source_app_name,
+            source_app_original,
+            source_confidence(input.source_confidence),
+            i64::from(input.pinned),
+            i64::from(input.occurrence_count),
+            i64::from(input.event_flags.bits()),
+        ],
+    )?;
+    Ok(IngestOutcome {
+        content_id,
+        event_id: transaction.last_insert_rowid(),
+    })
 }
 
 struct StoredRepresentation<'a> {
@@ -343,6 +949,9 @@ fn stored_representations<'a>(
         .iter()
         .map(|representation| {
             if let Some(bytes) = representation.bytes.as_deref() {
+                if representation.missing_ref.is_some() {
+                    return Err(StoreError::PayloadStorageUnavailable);
+                }
                 return Ok(StoredRepresentation {
                     format_id: representation.format_id.as_str(),
                     original_byte_size: bytes.len() as u64,
@@ -384,14 +993,235 @@ pub fn classify_payload(
     Ok(StoredPayload::Inline(bytes.to_vec()))
 }
 
-fn normalized_text(input: &CaptureInput, primary_payload: &[u8]) -> Option<String> {
-    if input.kind.is_textual() && !input.content_flags.contains(ContentFlags::DO_NOT_INDEX) {
-        std::str::from_utf8(primary_payload)
-            .ok()
-            .map(normalize_search_text)
-    } else {
-        None
+fn normalized_text(
+    input: &CaptureInput,
+    primary_payload: Option<&[u8]>,
+    search_override: Option<Option<&str>>,
+) -> Option<String> {
+    if input.content_flags.contains(ContentFlags::DO_NOT_INDEX) {
+        return None;
     }
+    if let Some(search_override) = search_override {
+        return search_override.map(normalize_search_text);
+    }
+    if !input.kind.is_textual() {
+        return None;
+    }
+    primary_payload
+        .and_then(|payload| std::str::from_utf8(payload).ok())
+        .map(normalize_search_text)
+}
+
+fn missing_content_hash(kind: ContentKind, primary_mime: &str, missing_ref: &str) -> ContentHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"clipboard-store.missing-primary-v1");
+    for component in [
+        kind.as_str().as_bytes(),
+        primary_mime.as_bytes(),
+        missing_ref.as_bytes(),
+    ] {
+        hasher.update(&(component.len() as u64).to_be_bytes());
+        hasher.update(component);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+struct ImportCheckpoint {
+    import_run_id: i64,
+    source_kind: String,
+    next_candidate_offset: i64,
+    candidate_records: i64,
+}
+
+fn import_checkpoint(
+    transaction: &Transaction<'_>,
+    run_id: Uuid,
+    generation: u64,
+) -> Result<ImportCheckpoint, StoreError> {
+    let checkpoint = transaction
+        .query_row(
+            "SELECT import_run_id, source_kind, next_candidate_offset, candidate_records, status,
+                    worker_generation
+             FROM import_run WHERE external_id = ?1",
+            [run_id.as_bytes().as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .map_err(map_run_query_error)?;
+    if checkpoint.5 != sql_count(generation)? {
+        return Err(StoreError::ImportWorkerSuperseded);
+    }
+    if checkpoint.4 != "running" {
+        return Err(StoreError::ImportRunNotResumable);
+    }
+    if checkpoint.2 >= checkpoint.3 {
+        return Err(StoreError::ImportCheckpointMismatch);
+    }
+    Ok(ImportCheckpoint {
+        import_run_id: checkpoint.0,
+        source_kind: checkpoint.1,
+        next_candidate_offset: checkpoint.2,
+        candidate_records: checkpoint.3,
+    })
+}
+
+enum ImportCounter {
+    Imported,
+    AlreadyPresent,
+    Failed,
+}
+
+fn advance_import_counter(
+    transaction: &Transaction<'_>,
+    checkpoint: &ImportCheckpoint,
+    counter: ImportCounter,
+) -> Result<(), StoreError> {
+    if checkpoint.next_candidate_offset >= checkpoint.candidate_records {
+        return Err(StoreError::ImportCheckpointMismatch);
+    }
+    let sql = match counter {
+        ImportCounter::Imported => {
+            "UPDATE import_run
+             SET imported_records = imported_records + 1,
+                 next_candidate_offset = next_candidate_offset + 1
+             WHERE import_run_id = ?1 AND next_candidate_offset = ?2 AND status = 'running'"
+        }
+        ImportCounter::AlreadyPresent => {
+            "UPDATE import_run
+             SET already_present_records = already_present_records + 1,
+                 next_candidate_offset = next_candidate_offset + 1
+             WHERE import_run_id = ?1 AND next_candidate_offset = ?2 AND status = 'running'"
+        }
+        ImportCounter::Failed => {
+            "UPDATE import_run
+             SET failed_records = failed_records + 1,
+                 next_candidate_offset = next_candidate_offset + 1
+             WHERE import_run_id = ?1 AND next_candidate_offset = ?2 AND status = 'running'"
+        }
+    };
+    let updated = transaction.execute(
+        sql,
+        params![checkpoint.import_run_id, checkpoint.next_candidate_offset],
+    )?;
+    if updated != 1 {
+        return Err(StoreError::ImportCheckpointMismatch);
+    }
+    Ok(())
+}
+
+fn read_import_status(
+    connection: &Connection,
+    run_id: Uuid,
+) -> Result<StoreImportRunStatus, StoreError> {
+    let values = connection
+        .query_row(
+            "SELECT status, total_records, candidate_records, next_candidate_offset,
+                    imported_records, already_present_records, skipped_records, failed_records,
+                    error_code
+             FROM import_run WHERE external_id = ?1",
+            [run_id.as_bytes().as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            },
+        )
+        .map_err(map_run_query_error)?;
+    let state = match values.0.as_str() {
+        "running" => StoreImportRunState::Running,
+        "completed" => StoreImportRunState::Completed,
+        "failed" => StoreImportRunState::Failed,
+        _ => return Err(StoreError::ImportInvariant),
+    };
+    Ok(StoreImportRunStatus {
+        run_id,
+        state,
+        total_records: rust_count(values.1)?,
+        candidate_records: rust_count(values.2)?,
+        next_candidate_offset: rust_count(values.3)?,
+        imported_records: rust_count(values.4)?,
+        already_present_records: rust_count(values.5)?,
+        skipped_records: rust_count(values.6)?,
+        failed_records: rust_count(values.7)?,
+        error_code: values.8,
+    })
+}
+
+fn validate_begin_import(input: &BeginImportRun) -> Result<(), StoreError> {
+    if input.candidate_records > input.total_records {
+        return Err(StoreError::InvalidImportInput);
+    }
+    let initial_failed = input
+        .initial_failures
+        .iter()
+        .try_fold(0_u64, |sum, failure| {
+            if failure.count == 0 || !valid_reason_code(&failure.reason_code) {
+                return None;
+            }
+            sum.checked_add(failure.count)
+        })
+        .ok_or(StoreError::InvalidImportInput)?;
+    if input.candidate_records.checked_add(initial_failed) != Some(input.total_records) {
+        return Err(StoreError::InvalidImportInput);
+    }
+    sql_count(input.total_records)?;
+    sql_count(input.candidate_records)?;
+    Ok(())
+}
+
+fn valid_reason_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn candidate_failure_reason(error: &StoreError) -> &'static str {
+    match error {
+        StoreError::PayloadStorageUnavailable => "invalid_candidate",
+        StoreError::Cas(_) | StoreError::PayloadCompression(_) => "payload_storage_failed",
+        _ => "candidate_storage_failed",
+    }
+}
+
+fn map_run_query_error(error: rusqlite::Error) -> StoreError {
+    match error {
+        rusqlite::Error::QueryReturnedNoRows => StoreError::ImportRunNotFound,
+        other => StoreError::Database(other),
+    }
+}
+
+fn sql_count(value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::InvalidImportInput)
+}
+
+fn rust_count(value: i64) -> Result<u64, StoreError> {
+    u64::try_from(value).map_err(|_| StoreError::ImportInvariant)
+}
+
+fn now_ms() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
 fn source_confidence(value: SourceConfidence) -> &'static str {

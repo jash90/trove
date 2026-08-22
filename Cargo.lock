@@ -177,11 +177,14 @@ dependencies = [
  "cap-std",
  "chrono",
  "clipboard-core",
+ "clipboard-store",
  "csv",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

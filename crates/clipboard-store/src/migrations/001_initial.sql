@@ -43,6 +43,7 @@ CREATE TABLE history_event (
   captured_at_ms INTEGER NOT NULL,
   source_app_id TEXT,
   source_app_name TEXT,
+  source_app_original TEXT,
   source_confidence TEXT NOT NULL DEFAULT 'unknown',
   pinned INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0, 1)),
   occurrence_count INTEGER NOT NULL DEFAULT 1 CHECK(occurrence_count > 0),
@@ -93,22 +94,44 @@ CREATE TABLE artifact (
 
 CREATE TABLE import_run (
   import_run_id INTEGER PRIMARY KEY,
+  external_id BLOB NOT NULL UNIQUE CHECK(length(external_id) = 16),
   source_kind TEXT NOT NULL,
-  source_fingerprint BLOB NOT NULL,
-  status TEXT NOT NULL,
+  source_fingerprint BLOB NOT NULL CHECK(length(source_fingerprint) = 32),
+  status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
+  worker_generation INTEGER NOT NULL DEFAULT 1 CHECK(worker_generation > 0),
   total_records INTEGER NOT NULL DEFAULT 0 CHECK(total_records >= 0),
+  candidate_records INTEGER NOT NULL DEFAULT 0 CHECK(candidate_records >= 0),
+  next_candidate_offset INTEGER NOT NULL DEFAULT 0 CHECK(next_candidate_offset >= 0),
   imported_records INTEGER NOT NULL DEFAULT 0 CHECK(imported_records >= 0),
   already_present_records INTEGER NOT NULL DEFAULT 0 CHECK(already_present_records >= 0),
   skipped_records INTEGER NOT NULL DEFAULT 0 CHECK(skipped_records >= 0),
   failed_records INTEGER NOT NULL DEFAULT 0 CHECK(failed_records >= 0),
   started_at_ms INTEGER NOT NULL,
   finished_at_ms INTEGER,
-  error_code TEXT
+  error_code TEXT,
+  CHECK(candidate_records <= total_records),
+  CHECK(next_candidate_offset <= candidate_records),
+  CHECK(
+    imported_records + already_present_records + skipped_records + failed_records
+      <= total_records
+  ),
+  CHECK(
+    status != 'completed'
+      OR imported_records + already_present_records + skipped_records + failed_records
+        = total_records
+  )
+);
+
+CREATE TABLE import_failure_reason (
+  import_run_id INTEGER NOT NULL REFERENCES import_run(import_run_id) ON DELETE CASCADE,
+  reason_code TEXT NOT NULL,
+  count INTEGER NOT NULL CHECK(count > 0),
+  PRIMARY KEY(import_run_id, reason_code)
 );
 
 CREATE TABLE import_record (
   import_record_id INTEGER PRIMARY KEY,
-  import_run_id INTEGER REFERENCES import_run(import_run_id) ON DELETE CASCADE,
+  import_run_id INTEGER NOT NULL REFERENCES import_run(import_run_id) ON DELETE CASCADE,
   source_kind TEXT NOT NULL,
   record_fingerprint BLOB NOT NULL,
   event_id INTEGER REFERENCES history_event(event_id) ON DELETE SET NULL,

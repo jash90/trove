@@ -10,6 +10,8 @@ pub use cas::{CasBlob, CasError, CasStore};
 pub use config::StoreConfig;
 pub use migrations::migrations;
 pub use writer::{
-    IngestOutcome, StoreError, StoreHandle, StoreStats, StoredPayload, WRITER_QUEUE_CAPACITY,
-    classify_payload,
+    BeginImportRun, IMPORT_BATCH_SIZE, ImportBatchOutcome, ImportFailureCount, ImportSourceKind,
+    ImportWorkerLease, IngestOutcome, ResumeImportRun, StoreError, StoreHandle,
+    StoreImportCandidate, StoreImportRunState, StoreImportRunStatus, StoreStats, StoredPayload,
+    WRITER_QUEUE_CAPACITY, classify_payload,
 };

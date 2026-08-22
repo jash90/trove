@@ -2,6 +2,7 @@
 
 mod detect;
 mod raycast;
+mod service;
 mod supercmd;
 
 use std::{collections::HashMap, fmt, fs, path::Path};
@@ -12,6 +13,10 @@ use thiserror::Error;
 
 pub use detect::{DetectedExport, detect_export};
 pub use raycast::{parse_raycast, parse_raycast_report};
+pub use service::{
+    IMPORT_BATCH_SIZE, ImportAnalysis, ImportProgress, ImportRunHandle, ImportRunState,
+    ImportService, ImportSummary, ImportWorkerPolicy,
+};
 pub use supercmd::{parse_supercmd, parse_supercmd_report};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -121,6 +126,8 @@ pub enum ImportError {
         record: usize,
         reason: &'static str,
     },
+    #[error("import service: {reason}")]
+    Service { reason: &'static str },
 }
 
 impl ImportError {
@@ -137,6 +144,10 @@ impl ImportError {
             record: failure.record,
             reason: failure.reason,
         }
+    }
+
+    pub(crate) fn service(reason: &'static str) -> Self {
+        Self::Service { reason }
     }
 }
 
