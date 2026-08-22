@@ -4,7 +4,10 @@ use std::{
 };
 
 use clipboard_core::{ContentFlags, ContentKind};
-use clipboard_import::{ImportSource, detect_export, parse_export, parse_raycast, parse_supercmd};
+use clipboard_import::{
+    ImportSource, detect_export, parse_export, parse_export_report, parse_raycast,
+    parse_raycast_report, parse_supercmd, parse_supercmd_report,
+};
 use tempfile::TempDir;
 
 fn fixture(path: &str) -> PathBuf {
@@ -22,6 +25,36 @@ fn maps_raycast_copy_count_and_missing_image() {
         records
             .iter()
             .any(|record| { record.capture.kind == ContentKind::Image && record.missing_payload })
+    );
+}
+
+#[test]
+fn preserves_the_exact_synthetic_raycast_application_path_for_task_six() {
+    let records = parse_raycast(fixture("raycast/clipboard.json")).unwrap();
+
+    assert_eq!(
+        records[0].source_application_path.as_deref(),
+        Some("/Applications/Synthetic.app")
+    );
+}
+
+#[test]
+fn raycast_report_rejects_zero_copy_count_and_keeps_later_records() {
+    let report = parse_raycast_report(fixture("raycast/invalid-copy-count.json")).unwrap();
+
+    assert_eq!(report.total, 3);
+    assert_eq!(report.candidates.len(), 2);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].record, 2);
+    assert_eq!(report.failures[0].reason, "invalid_copy_count");
+    assert_eq!(report.candidates[1].capture.occurrence_count, 4);
+    let strict_error = match parse_raycast(fixture("raycast/invalid-copy-count.json")) {
+        Ok(_) => panic!("the strict parser must reject the invalid record"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        strict_error.to_string(),
+        "raycast record 2: invalid_copy_count"
     );
 }
 
@@ -237,10 +270,139 @@ fn parse_errors_are_sanitized_and_numbered() {
       \"copied_at\": \"not-a-timestamp-secret-value\", \"type\": \"text\", \"text\": \"private-field-content\"
     }]");
 
-    let error = parse_supercmd(dir.path(), path).unwrap_err().to_string();
+    let error = match parse_supercmd(dir.path(), path) {
+        Ok(_) => panic!("the strict parser must reject the invalid record"),
+        Err(error) => error.to_string(),
+    };
     assert!(error.contains("supercmd record 1: invalid_timestamp"));
     assert!(!error.contains("secret-value"));
     assert!(!error.contains("private-field-content"));
+}
+
+#[test]
+fn supercmd_json_report_keeps_good_records_after_a_bad_record() {
+    let root = TempDir::new().unwrap();
+    let path = write_export(
+        root.path(),
+        "[
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"text\",\"text\":\"first\"},
+      {\"copied_at\":\"invalid-private-value\",\"type\":\"text\",\"text\":\"bad\"},
+      {\"copied_at\":\"2026-01-02T03:06:05Z\",\"type\":\"text\",\"text\":\"later\"}
+    ]",
+    );
+
+    let report = parse_supercmd_report(root.path(), path).unwrap();
+    assert_eq!(report.total, 3);
+    assert_eq!(report.candidates.len(), 2);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].record, 2);
+    assert_eq!(report.failures[0].reason, "invalid_timestamp");
+    assert_eq!(report.candidates[1].primary_text.as_deref(), Some("later"));
+}
+
+#[test]
+fn supercmd_csv_report_keeps_good_records_after_a_bad_row() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("clipboard.csv");
+    fs::write(&path, "copied_at,type,source_app,bundle_id,pinned,file_url,text,ocr_text,has_image\n2026-01-02T03:04:05Z,text,,,false,,first,,false\ninvalid-private-value,text,,,false,,bad,,false\n2026-01-02T03:06:05Z,text,,,false,,later,,false\n").unwrap();
+
+    let report = parse_export_report(path).unwrap();
+    assert_eq!(report.total, 3);
+    assert_eq!(report.candidates.len(), 2);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].record, 2);
+    assert_eq!(report.failures[0].reason, "invalid_timestamp");
+    assert_eq!(report.candidates[1].primary_text.as_deref(), Some("later"));
+}
+
+#[test]
+fn fingerprints_distinguish_absent_and_empty_optional_fields() {
+    let root = TempDir::new().unwrap();
+    let path = write_export(root.path(), "[
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"text\",\"text\":\"same\"},
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"text\",\"source_app\":\"\",\"text\":\"same\"}
+    ]");
+
+    let records = parse_supercmd(root.path(), path).unwrap();
+    assert_ne!(records[0].record_fingerprint, records[1].record_fingerprint);
+}
+
+#[test]
+fn raycast_missing_identities_distinguish_full_paths_with_one_basename() {
+    let root = TempDir::new().unwrap();
+    let path = write_export(root.path(), "[
+      {\"createdAt\":\"2026-01-02T03:04:05Z\",\"modifiedAt\":\"2026-01-02T03:04:05Z\",\"category\":\"image\",\"filePath\":\"/one/shared.png\",\"imageHash\":\"same\"},
+      {\"createdAt\":\"2026-01-02T03:04:05Z\",\"modifiedAt\":\"2026-01-02T03:04:05Z\",\"category\":\"image\",\"filePath\":\"/two/shared.png\",\"imageHash\":\"same\"}
+    ]");
+
+    let records = parse_raycast(path).unwrap();
+    assert_ne!(records[0].record_fingerprint, records[1].record_fingerprint);
+    assert_ne!(
+        records[0].capture.representations[0].missing_ref,
+        records[1].capture.representations[0].missing_ref
+    );
+}
+
+#[test]
+fn fingerprints_distinguish_embedded_nul_field_boundaries() {
+    let root = TempDir::new().unwrap();
+    let path = write_export(root.path(), "[
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"text\",\"bundle_id\":\"alpha\\u0000beta\",\"source_app\":\"gamma\",\"text\":\"same\"},
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"text\",\"bundle_id\":\"alpha\",\"source_app\":\"beta\\u0000gamma\",\"text\":\"same\"}
+    ]");
+
+    let records = parse_supercmd(root.path(), path).unwrap();
+    assert_ne!(records[0].record_fingerprint, records[1].record_fingerprint);
+}
+
+#[test]
+fn fingerprints_use_canonical_timestamps_not_their_source_spelling() {
+    let root = TempDir::new().unwrap();
+    let path = write_export(root.path(), "[
+      {\"createdAt\":\"2026-01-02T03:04:05Z\",\"modifiedAt\":\"2026-01-02T03:04:05Z\",\"category\":\"text\",\"text\":\"same\"},
+      {\"createdAt\":\"2026-01-02T03:04:05+00:00\",\"modifiedAt\":\"2026-01-02T03:04:05+00:00\",\"category\":\"text\",\"text\":\"same\"}
+    ]");
+
+    let records = parse_raycast(path).unwrap();
+    assert_eq!(records[0].record_fingerprint, records[1].record_fingerprint);
+}
+
+#[test]
+fn image_fingerprint_hashes_owned_primary_bytes() {
+    let root = TempDir::new().unwrap();
+    fs::create_dir(root.path().join("images")).unwrap();
+    let image = root.path().join("images/sample.png");
+    fs::write(&image, b"first-owned-image").unwrap();
+    let path = write_export(root.path(), "[
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"image\",\"file_url\":\"images/sample.png\",\"has_image\":true}
+    ]");
+
+    let first = parse_supercmd(root.path(), &path).unwrap().remove(0);
+    fs::write(&image, b"second-owned-image").unwrap();
+    let second = parse_supercmd(root.path(), path).unwrap().remove(0);
+    assert_ne!(first.record_fingerprint, second.record_fingerprint);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_a_final_component_symlink_even_when_its_target_is_in_root() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().unwrap();
+    fs::create_dir(root.path().join("images")).unwrap();
+    fs::write(root.path().join("images/owned.png"), b"owned-image").unwrap();
+    symlink(
+        root.path().join("images/owned.png"),
+        root.path().join("images/linked.png"),
+    )
+    .unwrap();
+    let path = write_export(root.path(), "[
+      {\"copied_at\":\"2026-01-02T03:04:05Z\",\"type\":\"image\",\"file_url\":\"images/linked.png\",\"has_image\":true}
+    ]");
+
+    let record = parse_supercmd(root.path(), path).unwrap().remove(0);
+    assert!(record.missing_payload);
+    assert!(record.capture.representations[0].bytes.is_none());
 }
 
 fn write_export(root: &Path, contents: &str) -> PathBuf {

@@ -7,8 +7,8 @@ use clipboard_core::{
 use serde::Deserialize;
 
 use crate::{
-    ImportCandidate, ImportError, ImportSource, canonical_fingerprint, json_records,
-    source_metadata,
+    FramedHasher, ImportCandidate, ImportError, ImportParseReport, ImportRecordFailure,
+    ImportSource, canonical_fingerprint, json_records, record_failure, source_metadata,
 };
 
 #[derive(Deserialize)]
@@ -29,21 +29,31 @@ struct RaycastRecord {
 }
 
 pub fn parse_raycast(path: impl AsRef<Path>) -> Result<Vec<ImportCandidate>, ImportError> {
-    json_records(path.as_ref(), ImportSource::Raycast)?
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let record: RaycastRecord = serde_json::from_value(value).map_err(|_| {
-                ImportError::record(ImportSource::Raycast, index + 1, "invalid_record")
-            })?;
-            map_record(record, index + 1)
-        })
-        .collect()
+    parse_raycast_report(path)?.into_strict()
 }
 
-fn map_record(record: RaycastRecord, index: usize) -> Result<ImportCandidate, ImportError> {
+pub fn parse_raycast_report(path: impl AsRef<Path>) -> Result<ImportParseReport, ImportError> {
+    let records = json_records(path.as_ref(), ImportSource::Raycast)?;
+    let mut report = ImportParseReport::new(records.len());
+    for (index, value) in records.into_iter().enumerate() {
+        let result = serde_json::from_value(value)
+            .map_err(|_| record_failure(ImportSource::Raycast, index + 1, "invalid_record"))
+            .and_then(|record| map_record(record, index + 1));
+        report.push(result);
+    }
+    Ok(report)
+}
+
+fn map_record(record: RaycastRecord, index: usize) -> Result<ImportCandidate, ImportRecordFailure> {
     let captured_at_ms = parse_timestamp(&record.created_at, index)?;
-    parse_timestamp(&record.modified_at, index)?;
+    let modified_at_ms = parse_timestamp(&record.modified_at, index)?;
+    if record.copy_count == 0 {
+        return Err(record_failure(
+            ImportSource::Raycast,
+            index,
+            "invalid_copy_count",
+        ));
+    }
     let kind = content_kind(&record.category, index)?;
     let (source_app_id, source_app_name) = source_metadata(record.application_path.as_deref());
     let primary_text = kind.is_textual().then(|| {
@@ -64,16 +74,23 @@ fn map_record(record: RaycastRecord, index: usize) -> Result<ImportCandidate, Im
     if missing_payload {
         content_flags.insert(ContentFlags::MISSING_PAYLOAD);
     }
-    let stable_reference = stable_reference(
-        record.file_path.as_deref(),
-        record.image_hash.as_deref(),
-        &record.category,
+    let stable_reference = missing_reference(
+        &record,
+        captured_at_ms,
+        modified_at_ms,
+        kind,
+        primary_text.as_deref(),
     );
+    let primary_fingerprint_bytes = if missing_payload {
+        stable_reference.as_bytes()
+    } else {
+        primary_text.as_deref().unwrap_or_default().as_bytes()
+    };
     let representations = if missing_payload {
         vec![RepresentationInput {
             format_id: primary_mime(kind).to_owned(),
             bytes: None,
-            missing_ref: Some(format!("raycast-missing:{}", stable_reference)),
+            missing_ref: Some(format!("raycast-missing:{stable_reference}")),
         }]
     } else {
         let text = primary_text.clone().unwrap_or_default();
@@ -82,7 +99,7 @@ fn map_record(record: RaycastRecord, index: usize) -> Result<ImportCandidate, Im
             bytes: Some(text.into_bytes()),
             missing_ref: None,
         }];
-        if let Some(rich_text) = record.rich_text.filter(|value| !value.is_empty()) {
+        if let Some(rich_text) = record.rich_text.clone().filter(|value| !value.is_empty()) {
             representations.push(RepresentationInput {
                 format_id: "text/html".to_owned(),
                 bytes: Some(rich_text.into_bytes()),
@@ -91,16 +108,24 @@ fn map_record(record: RaycastRecord, index: usize) -> Result<ImportCandidate, Im
         }
         representations
     };
+    let copy_count = record.copy_count.to_string();
+    let modified_at_ms = modified_at_ms.to_string();
     let fingerprint = canonical_fingerprint(
         ImportSource::Raycast,
         captured_at_ms,
         kind,
         [
-            source_app_id.as_deref(),
-            source_app_name.as_deref(),
-            stable_reference.as_str().into(),
+            Some(modified_at_ms.as_str()),
+            Some(record.category.as_str()),
+            Some(copy_count.as_str()),
+            record.application_path.as_deref(),
+            Some(record.text.as_str()),
+            record.text_content.as_deref(),
+            record.file_path.as_deref(),
+            record.image_hash.as_deref(),
+            record.rich_text.as_deref(),
         ],
-        primary_text.as_deref().unwrap_or_default().as_bytes(),
+        primary_fingerprint_bytes,
     );
 
     Ok(ImportCandidate {
@@ -122,6 +147,7 @@ fn map_record(record: RaycastRecord, index: usize) -> Result<ImportCandidate, Im
         primary_text,
         search_ocr: None,
         missing_payload,
+        source_application_path: record.application_path,
     })
 }
 
@@ -129,13 +155,13 @@ fn one() -> u32 {
     1
 }
 
-fn parse_timestamp(value: &str, index: usize) -> Result<i64, ImportError> {
+fn parse_timestamp(value: &str, index: usize) -> Result<i64, ImportRecordFailure> {
     DateTime::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.with_timezone(&Utc).timestamp_millis())
-        .map_err(|_| ImportError::record(ImportSource::Raycast, index, "invalid_timestamp"))
+        .map_err(|_| record_failure(ImportSource::Raycast, index, "invalid_timestamp"))
 }
 
-fn content_kind(category: &str, index: usize) -> Result<ContentKind, ImportError> {
+fn content_kind(category: &str, index: usize) -> Result<ContentKind, ImportRecordFailure> {
     match category.to_ascii_lowercase().as_str() {
         "text" => Ok(ContentKind::Text),
         "link" | "url" => Ok(ContentKind::Link),
@@ -144,7 +170,7 @@ fn content_kind(category: &str, index: usize) -> Result<ContentKind, ImportError
         "color" => Ok(ContentKind::Color),
         "code" => Ok(ContentKind::Code),
         "html" => Ok(ContentKind::Html),
-        _ => Err(ImportError::record(
+        _ => Err(record_failure(
             ImportSource::Raycast,
             index,
             "invalid_category",
@@ -162,18 +188,43 @@ fn primary_mime(kind: ContentKind) -> &'static str {
     }
 }
 
-fn stable_reference(file_path: Option<&str>, image_hash: Option<&str>, category: &str) -> String {
-    let mut hasher = blake3::Hasher::new();
-    for value in [
-        category,
-        file_path
-            .and_then(|path| Path::new(path).file_name())
-            .and_then(|name| name.to_str())
-            .unwrap_or_default(),
-        image_hash.unwrap_or_default(),
+fn missing_reference(
+    record: &RaycastRecord,
+    captured_at_ms: i64,
+    modified_at_ms: i64,
+    kind: ContentKind,
+    primary_text: Option<&str>,
+) -> String {
+    let copy_count = record.copy_count.to_string();
+    let captured_at_ms = captured_at_ms.to_string();
+    let modified_at_ms = modified_at_ms.to_string();
+    let mut hasher = FramedHasher::new();
+    for field in [
+        Some(ImportSource::Raycast.as_str()),
+        Some(captured_at_ms.as_str()),
+        Some(kind.as_str()),
+        Some(modified_at_ms.as_str()),
+        Some(record.category.as_str()),
+        Some(copy_count.as_str()),
+        record.application_path.as_deref(),
+        Some(record.text.as_str()),
+        record.text_content.as_deref(),
+        record.file_path.as_deref(),
+        record.image_hash.as_deref(),
+        record.rich_text.as_deref(),
+        primary_text,
     ] {
-        hasher.update(value.as_bytes());
-        hasher.update(&[0]);
+        hasher.add_optional(field.map(str::as_bytes));
     }
-    hasher.finalize().to_hex().to_string()
+    hex_string(hasher.finish())
+}
+
+fn hex_string(bytes: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }

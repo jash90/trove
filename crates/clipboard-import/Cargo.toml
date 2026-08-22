@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 blake3.workspace = true
+cap-fs-ext.workspace = true
+cap-std.workspace = true
 chrono.workspace = true
 clipboard-core = { path = "../clipboard-core" }
 csv.workspace = true
