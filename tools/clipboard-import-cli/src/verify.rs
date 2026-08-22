@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
     thread,
@@ -429,6 +429,21 @@ enum BackupStep {
     Failed,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FtsScratchError {
+    Verification,
+    Cleanup,
+}
+
+struct FtsScratchContext<'a> {
+    source: &'a Connection,
+    policy: FtsScratchPolicy,
+    started: Instant,
+    page_size: u64,
+    page_count: u64,
+    selected_data_dir: PathBuf,
+}
+
 fn fts_is_coherent(connection: &Connection, _document_count: i64) -> bool {
     fts_is_coherent_with_policy(
         connection,
@@ -454,43 +469,79 @@ fn fts_scratch_check(
     source: &Connection,
     policy: FtsScratchPolicy,
     observe: &mut impl FnMut(ScratchEvent<'_>),
-) -> Result<(), ()> {
-    let started = Instant::now();
-    if policy.pages_per_step <= 0
-        || policy.max_image_bytes == 0
-        || policy.cache_kib <= 0
-        || policy.initial_backoff.is_zero()
-        || policy.max_backoff < policy.initial_backoff
-        || policy.deadline.is_zero()
-        || !source.is_readonly(MAIN_DB).map_err(|_| ())?
-        || !source
-            .query_row("PRAGMA query_only", [], |row| row.get::<_, bool>(0))
-            .map_err(|_| ())?
-    {
-        return Err(());
-    }
-    source.busy_timeout(Duration::ZERO).map_err(|_| ())?;
-    let page_size = source
-        .query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))
-        .map_err(|_| ())?;
-    let page_count = source
-        .query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))
-        .map_err(|_| ())?;
-    let page_size = valid_page_size(page_size)?;
-    let page_count = u64::try_from(page_count).map_err(|_| ())?;
-    let source_image_bytes = page_count.checked_mul(page_size).ok_or(())?;
-    if source_image_bytes > policy.max_image_bytes || started.elapsed() >= policy.deadline {
-        return Err(());
-    }
+) -> Result<(), FtsScratchError> {
+    fts_scratch_check_with_cleanup(source, policy, observe, tempfile::TempDir::close)
+}
 
-    let selected_data_dir = source_data_directory(source)?;
+fn fts_scratch_check_with_cleanup(
+    source: &Connection,
+    policy: FtsScratchPolicy,
+    observe: &mut impl FnMut(ScratchEvent<'_>),
+    close_scratch: impl FnOnce(tempfile::TempDir) -> io::Result<()>,
+) -> Result<(), FtsScratchError> {
+    let started = Instant::now();
+    let preflight = (|| -> Result<(u64, u64, PathBuf), ()> {
+        if policy.pages_per_step <= 0
+            || policy.max_image_bytes == 0
+            || policy.cache_kib <= 0
+            || policy.initial_backoff.is_zero()
+            || policy.max_backoff < policy.initial_backoff
+            || policy.deadline.is_zero()
+            || !source.is_readonly(MAIN_DB).map_err(|_| ())?
+            || !source
+                .query_row("PRAGMA query_only", [], |row| row.get::<_, bool>(0))
+                .map_err(|_| ())?
+        {
+            return Err(());
+        }
+        source.busy_timeout(Duration::ZERO).map_err(|_| ())?;
+        let page_size = source
+            .query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))
+            .map_err(|_| ())?;
+        let page_count = source
+            .query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))
+            .map_err(|_| ())?;
+        let page_size = valid_page_size(page_size)?;
+        let page_count = u64::try_from(page_count).map_err(|_| ())?;
+        let source_image_bytes = page_count.checked_mul(page_size).ok_or(())?;
+        if source_image_bytes > policy.max_image_bytes || started.elapsed() >= policy.deadline {
+            return Err(());
+        }
+        Ok((page_size, page_count, source_data_directory(source)?))
+    })()
+    .map_err(|_| FtsScratchError::Verification)?;
+    let (page_size, page_count, selected_data_dir) = preflight;
+    let context = FtsScratchContext {
+        source,
+        policy,
+        started,
+        page_size,
+        page_count,
+        selected_data_dir,
+    };
     let scratch_directory = tempfile::Builder::new()
         .prefix("clipboard-fts-check-")
         .tempdir()
-        .map_err(|_| ())?;
-    restrict_scratch_permissions(scratch_directory.path())?;
-    let canonical_scratch = fs::canonicalize(scratch_directory.path()).map_err(|_| ())?;
-    if canonical_scratch.starts_with(&selected_data_dir) || started.elapsed() >= policy.deadline {
+        .map_err(|_| FtsScratchError::Verification)?;
+    let verification_result = run_fts_scratch_work(&context, scratch_directory.path(), observe)
+        .map_err(|_| FtsScratchError::Verification);
+    let cleanup_result = close_scratch(scratch_directory);
+    if cleanup_result.is_err() {
+        return Err(FtsScratchError::Cleanup);
+    }
+    verification_result
+}
+
+fn run_fts_scratch_work(
+    context: &FtsScratchContext<'_>,
+    scratch_directory: &Path,
+    observe: &mut impl FnMut(ScratchEvent<'_>),
+) -> Result<(), ()> {
+    restrict_scratch_permissions(scratch_directory)?;
+    let canonical_scratch = fs::canonicalize(scratch_directory).map_err(|_| ())?;
+    if canonical_scratch.starts_with(&context.selected_data_dir)
+        || context.started.elapsed() >= context.policy.deadline
+    {
         return Err(());
     }
     observe(ScratchEvent::ScratchCreated(&canonical_scratch));
@@ -503,6 +554,19 @@ fn fts_scratch_check(
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|_| ())?;
+    let verification_result = run_fts_scratch_database_work(context, &mut scratch, observe);
+    drop(scratch);
+    verification_result
+}
+
+fn run_fts_scratch_database_work(
+    context: &FtsScratchContext<'_>,
+    scratch: &mut Connection,
+    observe: &mut impl FnMut(ScratchEvent<'_>),
+) -> Result<(), ()> {
+    let policy = context.policy;
+    let page_size = context.page_size;
+    let page_count = context.page_count;
     scratch.busy_timeout(Duration::ZERO).map_err(|_| ())?;
     scratch
         .pragma_update(None, "page_size", i64::try_from(page_size).map_err(|_| ())?)
@@ -537,44 +601,44 @@ fn fts_scratch_check(
     let configured_cache = scratch
         .query_row("PRAGMA cache_size", [], |row| row.get::<_, i64>(0))
         .map_err(|_| ())?;
-    if configured_cache != cache_size || started.elapsed() >= policy.deadline {
+    if configured_cache != cache_size || context.started.elapsed() >= policy.deadline {
         return Err(());
     }
 
-    {
-        let backup = Backup::new(source, &mut scratch).map_err(|_| ())?;
-        observe(ScratchEvent::BackupStarted);
-        run_backup_loop(
-            policy,
-            page_size,
-            || {
-                let step = match backup.step(policy.pages_per_step) {
-                    Ok(StepResult::Done) => BackupStep::Done,
-                    Ok(StepResult::More) => BackupStep::More,
-                    Ok(StepResult::Busy) => BackupStep::Busy,
-                    Ok(StepResult::Locked) => BackupStep::Locked,
-                    Ok(_) | Err(_) => BackupStep::Failed,
-                };
-                let progress = backup.progress();
-                let Ok(remaining) = u64::try_from(progress.remaining) else {
-                    return Err(());
-                };
-                let Ok(page_count) = u64::try_from(progress.pagecount) else {
-                    return Err(());
-                };
-                Ok((
-                    step,
-                    BackupProgress {
-                        remaining,
-                        page_count,
-                    },
-                ))
-            },
-            || started.elapsed(),
-            thread::sleep,
-        )?;
-    }
-    if started.elapsed() >= policy.deadline {
+    let backup = Backup::new(context.source, scratch).map_err(|_| ())?;
+    observe(ScratchEvent::BackupStarted);
+    let backup_result = run_backup_loop(
+        policy,
+        page_size,
+        || {
+            let step = match backup.step(policy.pages_per_step) {
+                Ok(StepResult::Done) => BackupStep::Done,
+                Ok(StepResult::More) => BackupStep::More,
+                Ok(StepResult::Busy) => BackupStep::Busy,
+                Ok(StepResult::Locked) => BackupStep::Locked,
+                Ok(_) | Err(_) => BackupStep::Failed,
+            };
+            let progress = backup.progress();
+            let Ok(remaining) = u64::try_from(progress.remaining) else {
+                return Err(());
+            };
+            let Ok(page_count) = u64::try_from(progress.pagecount) else {
+                return Err(());
+            };
+            Ok((
+                step,
+                BackupProgress {
+                    remaining,
+                    page_count,
+                },
+            ))
+        },
+        || context.started.elapsed(),
+        thread::sleep,
+    );
+    drop(backup);
+    backup_result?;
+    if context.started.elapsed() >= policy.deadline {
         return Err(());
     }
     scratch
@@ -583,11 +647,9 @@ fn fts_scratch_check(
             [],
         )
         .map_err(|_| ())?;
-    if started.elapsed() >= policy.deadline {
+    if context.started.elapsed() >= policy.deadline {
         return Err(());
     }
-    drop(scratch);
-    drop(scratch_directory);
     Ok(())
 }
 
@@ -861,7 +923,7 @@ fn checked_count(value: i64) -> Result<u64, CliFailure> {
 mod tests {
     use std::{
         cell::{Cell, RefCell},
-        fs,
+        fs, io,
         path::{Path, PathBuf},
         time::Duration,
     };
@@ -869,11 +931,18 @@ mod tests {
     use rusqlite::{Connection, OpenFlags};
 
     use super::{
-        BackupProgress, BackupStep, FtsScratchPolicy, ScratchEvent, fts_is_coherent_with_policy,
-        run_backup_loop,
+        BackupProgress, BackupStep, FtsScratchError, FtsScratchPolicy, ScratchEvent,
+        fts_is_coherent_with_policy, fts_scratch_check_with_cleanup, run_backup_loop,
     };
 
     fn read_only_fixture(data_dir: &Path) -> Connection {
+        read_only_fixture_with_unindexed_document(data_dir, false)
+    }
+
+    fn read_only_fixture_with_unindexed_document(
+        data_dir: &Path,
+        with_unindexed_document: bool,
+    ) -> Connection {
         fs::create_dir_all(data_dir).unwrap();
         let database_path = data_dir.join("synthetic.db");
         let writer = Connection::open(&database_path).unwrap();
@@ -890,6 +959,14 @@ mod tests {
                  );",
             )
             .unwrap();
+        if with_unindexed_document {
+            writer
+                .execute(
+                    "INSERT INTO search_doc(content_id, normalized_text) VALUES(1, 'synthetic')",
+                    [],
+                )
+                .unwrap();
+        }
         drop(writer);
         let reader = Connection::open_with_flags(
             fs::canonicalize(database_path).unwrap(),
@@ -908,6 +985,8 @@ mod tests {
         entries.sort();
         entries
     }
+
+    fn ignore_scratch_event(_: ScratchEvent<'_>) {}
 
     #[test]
     fn oversized_source_image_is_rejected_before_scratch_creation() {
@@ -945,6 +1024,52 @@ mod tests {
         assert!(coherent);
         assert_eq!(entry_names(selected.path()), before);
         assert!(!observed_scratch.borrow().as_ref().unwrap().exists());
+    }
+
+    #[test]
+    fn injected_cleanup_failure_fails_an_otherwise_healthy_check_without_path_data() {
+        let selected = tempfile::tempdir().unwrap();
+        let reader = read_only_fixture(selected.path());
+
+        let result = fts_scratch_check_with_cleanup(
+            &reader,
+            FtsScratchPolicy::production(),
+            &mut ignore_scratch_event,
+            |directory| {
+                directory.close()?;
+                Err(io::Error::other("synthetic cleanup failure"))
+            },
+        );
+
+        assert!(matches!(result, Err(FtsScratchError::Cleanup)));
+    }
+
+    #[test]
+    fn cleanup_failure_takes_precedence_over_an_integrity_failure() {
+        let selected = tempfile::tempdir().unwrap();
+        let reader = read_only_fixture_with_unindexed_document(selected.path(), true);
+        let verification_failure = fts_scratch_check_with_cleanup(
+            &reader,
+            FtsScratchPolicy::production(),
+            &mut ignore_scratch_event,
+            tempfile::TempDir::close,
+        );
+        assert!(matches!(
+            verification_failure,
+            Err(FtsScratchError::Verification)
+        ));
+
+        let result = fts_scratch_check_with_cleanup(
+            &reader,
+            FtsScratchPolicy::production(),
+            &mut ignore_scratch_event,
+            |directory| {
+                directory.close()?;
+                Err(io::Error::other("synthetic cleanup failure"))
+            },
+        );
+
+        assert!(matches!(result, Err(FtsScratchError::Cleanup)));
     }
 
     #[test]
