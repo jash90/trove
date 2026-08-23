@@ -85,6 +85,36 @@ fn file_capture(reference_uri: &str, captured_at_ms: i64) -> clipboard_core::Cap
 }
 
 #[test]
+fn a_saved_shortcut_is_parsed_back_into_the_one_that_will_be_registered() {
+    use clipboard_history_app::hotkey;
+
+    // The settings screen stores the shortcut as text; registering it means
+    // parsing that text back. A round trip that silently failed would leave
+    // the screen showing one shortcut while another answered.
+    let parsed = hotkey::parse_shortcut("CommandOrControl+Shift+Space")
+        .expect("the default must survive the round trip");
+    assert_eq!(parsed, hotkey::default_shortcut());
+
+    assert!(hotkey::parse_shortcut("Control+Alt+7").is_some());
+    // Nonsense yields nothing rather than the default: quietly registering a
+    // different shortcut leaves the user pressing keys that do nothing.
+    assert!(hotkey::parse_shortcut("nie-skrót").is_none());
+    assert!(hotkey::parse_shortcut("").is_none());
+}
+
+#[test]
+fn the_active_shortcut_remembers_what_to_take_down_on_a_rebind() {
+    use clipboard_history_app::hotkey;
+
+    let active = hotkey::ActiveShortcut::default();
+    assert_eq!(active.get(), hotkey::default_shortcut());
+
+    let next = hotkey::parse_shortcut("Control+Alt+7").unwrap();
+    active.set(next);
+    assert_eq!(active.get(), next);
+}
+
+#[test]
 fn the_summoning_shortcut_is_command_shift_space() {
     use tauri_plugin_global_shortcut::{Code, Modifiers};
 

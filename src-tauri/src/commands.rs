@@ -695,6 +695,31 @@ fn get_settings_blocking(store: &StoreHandle) -> Result<AppSettingsDto, String> 
     Ok(settings)
 }
 
+/// Persists settings and applies the parts that live outside the database.
+///
+/// The shortcut is registered with the system, not stored in a row, so saving
+/// has to rebind it. Doing that only on the next launch means the settings
+/// screen shows one shortcut while another one answers.
+pub async fn save_settings_with_app<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    settings: AppSettingsDto,
+) -> Result<AppSettingsDto, String> {
+    let stored = save_settings_service(state, settings).await?;
+    if let (Some(active), Some(next)) = (
+        app.try_state::<crate::hotkey::ActiveShortcut>(),
+        crate::hotkey::parse_shortcut(&stored.hotkey),
+    ) {
+        let previous = active.get();
+        // A shortcut another application already holds leaves the previous one
+        // answering, which is better than leaving none.
+        if crate::hotkey::rebind(app, previous, next).is_ok() {
+            active.set(next);
+        }
+    }
+    Ok(stored)
+}
+
 pub async fn save_settings_service(
     state: &AppState,
     settings: AppSettingsDto,
@@ -715,11 +740,12 @@ pub async fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppSettin
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn save_settings(
+pub async fn save_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     settings: AppSettingsDto,
 ) -> Result<AppSettingsDto, String> {
-    save_settings_service(state.inner(), settings).await
+    save_settings_with_app(&app, state.inner(), settings).await
 }
 
 async fn run_blocking<T>(

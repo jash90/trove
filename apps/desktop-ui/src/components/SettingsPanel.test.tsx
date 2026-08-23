@@ -309,7 +309,9 @@ describe('Settings dialog and storage semantics', () => {
     const dialog = screen.getByRole('dialog', { name: 'Ustawienia' });
     expect(dialog).toHaveAttribute('aria-modal', 'true');
     expect(dialog).toHaveAccessibleDescription(/ustawienia pozostają lokalne/i);
-    expect(screen.getByText(/aktywny skrót systemowy nie zmieni się na tym ekranie/i)).toBeVisible();
+    // Saving now rebinds the shortcut with the system, so the screen must say
+    // that rather than promising it takes effect on the next launch.
+    expect(screen.getByText(/zapisanie zmienia aktywny skrót od razu/i)).toBeVisible();
     expect(hotkey).toHaveFocus();
 
     const close = screen.getByRole('button', { name: 'Zamknij ustawienia' });

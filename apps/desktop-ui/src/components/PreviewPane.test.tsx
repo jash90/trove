@@ -131,6 +131,18 @@ const settleInitialSearch = async (): Promise<void> => {
   await screen.findByRole('listbox', { name: 'Wyniki historii schowka' });
 };
 
+/// The list selects its first row on its own, one effect after the listbox
+/// appears. A test that clicks another row before that lands is racing the
+/// selection it is trying to replace, and passes or fails by machine load.
+const settleFirstSelection = async (): Promise<void> => {
+  await waitFor(() => {
+    expect(screen.getByRole('option', { name: /Synthetic item 1/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+  });
+};
+
 describe('safe preview rendering', () => {
   it('renders imported HTML as literal text instead of executable markup', () => {
     const malicious = '<img src=x onerror=alert(1)><script>window.pwned=true</script>';
@@ -218,6 +230,7 @@ describe('selected preview sequencing', () => {
     });
     render(<App gateway={gateway} />);
     await settleInitialSearch();
+    await settleFirstSelection();
 
     await act(async () => {
       screen.getByRole('option', { name: /Synthetic item 2/ }).click();
@@ -249,6 +262,7 @@ describe('selected preview sequencing', () => {
     });
     render(<App gateway={gateway} />);
     await settleInitialSearch();
+    await settleFirstSelection();
 
     await act(async () => {
       screen.getByRole('option', { name: /Synthetic item 2/ }).click();

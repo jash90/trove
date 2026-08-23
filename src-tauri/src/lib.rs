@@ -27,6 +27,7 @@ pub fn run() {
                 eprintln!("clipboard-history: global shortcut unavailable");
             }
             app.manage(hotkey::PasteTarget::new());
+            app.manage(hotkey::ActiveShortcut::default());
             let control = monitor::MonitorControl::new();
             app.manage(control.clone());
             // The window spends most of its life hidden, so the menu bar is
@@ -37,6 +38,14 @@ pub fn run() {
             }
             monitor::start(app.handle(), control);
             maintenance::start(app.handle());
+            // A window that never becomes key is never composited: launched
+            // without being activated, the palette stayed a blank rectangle
+            // until something brought it forward. Asking for focus once at
+            // startup is what a manually launched application does anyway.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
             Ok(())
         })
         .on_window_event(|window, event| {

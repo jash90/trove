@@ -322,8 +322,8 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
               </label>
               <p className="settings-help">
                 Aplikację przywołuje <kbd>⌘⇧Space</kbd>; ponowne wciśnięcie ją
-                chowa. Aktywny skrót systemowy nie zmieni się na tym ekranie —
-                zapisana wartość zacznie obowiązywać po ponownym uruchomieniu.
+                chowa. Zapisanie zmienia aktywny skrót od razu. Jeśli nowy jest
+                już zajęty przez inną aplikację, obowiązuje dalej poprzedni.
               </p>
               <label className="settings-toggle" htmlFor="settings-autostart">
                 <input

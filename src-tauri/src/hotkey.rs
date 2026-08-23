@@ -55,7 +55,37 @@ pub fn default_shortcut() -> Shortcut {
 /// the caller reports the degraded state rather than refusing to start. The
 /// most common cause is another application holding the same combination.
 pub fn install<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri_plugin_global_shortcut::Error> {
-    let shortcut = default_shortcut();
+    register(app, default_shortcut())
+}
+
+/// Parses a shortcut written the way the settings screen stores it.
+///
+/// Returns nothing for anything unparseable rather than falling back to the
+/// default: silently registering a different shortcut than the one saved would
+/// leave the user pressing keys that do nothing, with no way to tell why.
+pub fn parse_shortcut(value: &str) -> Option<Shortcut> {
+    value.parse::<Shortcut>().ok()
+}
+
+/// Replaces the registered shortcut with another one.
+///
+/// The old registration goes first: leaving it in place would keep answering
+/// keys the user has already changed away from.
+pub fn rebind<R: Runtime>(
+    app: &AppHandle<R>,
+    previous: Shortcut,
+    next: Shortcut,
+) -> Result<(), tauri_plugin_global_shortcut::Error> {
+    if previous != next {
+        let _ = app.global_shortcut().unregister(previous);
+    }
+    register(app, next)
+}
+
+fn register<R: Runtime>(
+    app: &AppHandle<R>,
+    shortcut: Shortcut,
+) -> Result<(), tauri_plugin_global_shortcut::Error> {
     app.global_shortcut()
         .on_shortcut(shortcut, move |app, _shortcut, event| {
             // Act on press only: acting on release too would toggle twice per
@@ -64,6 +94,39 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri_plugin_global
                 toggle_palette(app);
             }
         })
+}
+
+/// The shortcut currently answering, so a rebind knows what to take down.
+#[derive(Clone, Debug)]
+pub struct ActiveShortcut {
+    current: Arc<std::sync::Mutex<Shortcut>>,
+}
+
+impl ActiveShortcut {
+    pub fn new(shortcut: Shortcut) -> Self {
+        Self {
+            current: Arc::new(std::sync::Mutex::new(shortcut)),
+        }
+    }
+
+    pub fn get(&self) -> Shortcut {
+        self.current
+            .lock()
+            .map(|current| *current)
+            .unwrap_or_else(|_| default_shortcut())
+    }
+
+    pub fn set(&self, shortcut: Shortcut) {
+        if let Ok(mut current) = self.current.lock() {
+            *current = shortcut;
+        }
+    }
+}
+
+impl Default for ActiveShortcut {
+    fn default() -> Self {
+        Self::new(default_shortcut())
+    }
 }
 
 /// Shows and focuses the palette, or hides it when it already has focus.
