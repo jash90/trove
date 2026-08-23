@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+  "src-tauri",
+  "crates/clipboard-core",
+  "crates/clipboard-store",
+  "crates/clipboard-search",
+  "crates/clipboard-images",
+  "crates/clipboard-import",
+  "crates/platform-macos",
+  "crates/platform-linux",
+  "crates/platform-windows",
+  "crates/clipboard-zstd-bound",
+  "tools/clipboard-bench",
+  "tools/clipboard-import-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0"
+allocation-counter = "=0.8.1"
+base64 = "0.23.1"
+bitflags = { version = "2.13.1", features = ["serde"] }
+blake3 = "1.8.7"
+cap-fs-ext = "=4.0.2"
+cap-std = "=4.0.2"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.6", features = ["derive"] }
+csv = "1.4.0"
+csv-core = "=0.1.13"
+directories = "6.0.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+rusqlite = { version = "0.40.2", features = ["backup", "bundled", "cache"] }
+rusqlite_migration = "2.6.0"
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.151"
+tempfile = "3.27.0"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+unicode-normalization = "0.1.25"
+uuid = { version = "1.24.1", features = ["v7", "serde"] }
+zstd = "=0.13.3"
+zstd-sys = { version = "=2.0.16", default-features = false }

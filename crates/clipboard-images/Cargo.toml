@@ -1,0 +1,9 @@
+[package]
+name = "clipboard-images"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+image.workspace = true
+thiserror.workspace = true

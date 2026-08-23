@@ -1,0 +1,33 @@
+[
+  {
+    "copied_at": "2026-01-02T03:04:05Z",
+    "type": "text",
+    "source_app": "Synthetic App",
+    "bundle_id": "com.example.synthetic",
+    "pinned": true,
+    "text": "original caption",
+    "ocr_text": "invoice 2026",
+    "has_image": false,
+    "extra_metadata": "forward-compatible"
+  },
+  {
+    "copied_at": "2026-01-02T03:05:05Z",
+    "type": "image",
+    "source_app": "Synthetic App",
+    "bundle_id": "com.example.synthetic",
+    "pinned": false,
+    "file_url": "images/sample.png",
+    "text": "",
+    "has_image": true
+  },
+  {
+    "copied_at": "2026-01-02T03:06:05Z",
+    "type": "image",
+    "source_app": "Synthetic App",
+    "bundle_id": "com.example.synthetic",
+    "pinned": false,
+    "file_url": "../outside.png",
+    "text": "",
+    "has_image": true
+  }
+]

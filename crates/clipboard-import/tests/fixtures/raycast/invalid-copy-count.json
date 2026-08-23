@@ -1,0 +1,26 @@
+[
+  {
+    "createdAt": "2026-01-02T03:04:05Z",
+    "modifiedAt": "2026-01-02T03:04:05Z",
+    "category": "text",
+    "copyCount": 2,
+    "applicationPath": "/Applications/Synthetic.app",
+    "text": "first synthetic item"
+  },
+  {
+    "createdAt": "2026-01-02T03:05:05Z",
+    "modifiedAt": "2026-01-02T03:05:05Z",
+    "category": "text",
+    "copyCount": 0,
+    "applicationPath": "/Applications/Synthetic.app",
+    "text": "invalid synthetic item"
+  },
+  {
+    "createdAt": "2026-01-02T03:06:05Z",
+    "modifiedAt": "2026-01-02T03:06:05Z",
+    "category": "text",
+    "copyCount": 4,
+    "applicationPath": "/Applications/Synthetic.app",
+    "text": "later synthetic item"
+  }
+]

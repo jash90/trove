@@ -1,0 +1,15 @@
+[package]
+name = "clipboard-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bitflags.workspace = true
+blake3.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+allocation-counter.workspace = true
