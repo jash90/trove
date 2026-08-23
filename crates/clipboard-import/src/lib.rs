@@ -5,18 +5,24 @@ mod raycast;
 mod service;
 mod supercmd;
 
-use std::{collections::HashMap, fmt, fs, io::Read, path::Path};
+use std::{
+    collections::HashMap,
+    fmt, fs,
+    io::{BufReader, Read},
+    mem::size_of,
+    path::Path,
+};
 
 use clipboard_core::{CaptureInput, ContentKind, canonical_bytes};
-use serde_json::Value;
 use thiserror::Error;
 
 pub use detect::{DetectedExport, MAX_MANIFEST_DISCOVERY_ENTRIES, detect_export};
 pub use raycast::{parse_raycast, parse_raycast_report};
 pub use service::{
     IMPORT_BATCH_SIZE, ImportAdmissionLimits, ImportAnalysis, ImportProgress, ImportRunHandle,
-    ImportRunState, ImportService, ImportSummary, ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES,
-    MAX_IMPORT_MANIFEST_BYTES, MAX_PREPARED_CACHE_BYTES, MAX_PREPARED_SOURCE_BYTES,
+    ImportRunState, ImportRuntime, ImportService, ImportSummary, ImportWorkerPolicy,
+    MAX_IMPORT_AUXILIARY_BYTES, MAX_IMPORT_BATCH_BYTES, MAX_IMPORT_MANIFEST_BYTES,
+    MAX_IMPORT_RECORD_BYTES, MAX_PREPARED_CACHE_BYTES, MAX_PREPARED_SOURCE_BYTES,
     PREPARED_SESSION_CAPACITY, PREPARED_SESSION_TTL,
 };
 pub use supercmd::{
@@ -76,6 +82,7 @@ pub struct ImportParseReport {
     pub candidates: Vec<ImportCandidate>,
     pub failures: Vec<ImportRecordFailure>,
     encounter_ordinals: HashMap<[u8; 32], u64>,
+    retained_bytes: usize,
 }
 
 impl ImportParseReport {
@@ -85,21 +92,46 @@ impl ImportParseReport {
             candidates: Vec::new(),
             failures: Vec::new(),
             encounter_ordinals: HashMap::new(),
+            retained_bytes: size_of::<Self>(),
         }
     }
 
-    pub(crate) fn push(&mut self, result: Result<ImportCandidate, ImportRecordFailure>) {
+    pub(crate) fn ensure_transient_capacity(
+        &self,
+        transient_bytes: usize,
+    ) -> Result<(), ImportError> {
+        if self.retained_bytes.saturating_add(transient_bytes) > MAX_PREPARED_SOURCE_BYTES {
+            return Err(ImportError::service("analysis_too_large"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        result: Result<ImportCandidate, ImportRecordFailure>,
+    ) -> Result<(), ImportError> {
         match result {
             Ok(mut candidate) => {
                 let base_fingerprint = candidate.record_fingerprint;
+                let additional = candidate_retained_bytes(&candidate).saturating_add(
+                    usize::from(!self.encounter_ordinals.contains_key(&base_fingerprint)) * 64,
+                );
+                self.ensure_transient_capacity(additional)?;
                 let ordinal = self.encounter_ordinals.entry(base_fingerprint).or_insert(0);
                 candidate.record_fingerprint =
                     duplicate_event_fingerprint(base_fingerprint, *ordinal);
                 *ordinal += 1;
                 self.candidates.push(candidate);
+                self.retained_bytes = self.retained_bytes.saturating_add(additional);
             }
-            Err(failure) => self.failures.push(failure),
+            Err(failure) => {
+                let additional = size_of::<ImportRecordFailure>();
+                self.ensure_transient_capacity(additional)?;
+                self.failures.push(failure);
+                self.retained_bytes = self.retained_bytes.saturating_add(additional);
+            }
         }
+        Ok(())
     }
 
     pub(crate) fn into_strict(self) -> Result<Vec<ImportCandidate>, ImportError> {
@@ -108,6 +140,34 @@ impl ImportParseReport {
             None => Ok(self.candidates),
         }
     }
+}
+
+fn candidate_retained_bytes(candidate: &ImportCandidate) -> usize {
+    let capture = &candidate.capture;
+    let mut bytes = size_of::<ImportCandidate>()
+        .saturating_add(capture.primary_mime.capacity())
+        .saturating_add(
+            capture
+                .representations
+                .capacity()
+                .saturating_mul(size_of::<clipboard_core::RepresentationInput>()),
+        )
+        .saturating_add(option_string_bytes(&capture.source_app_id))
+        .saturating_add(option_string_bytes(&capture.source_app_name))
+        .saturating_add(option_string_bytes(&candidate.primary_text))
+        .saturating_add(option_string_bytes(&candidate.search_ocr))
+        .saturating_add(option_string_bytes(&candidate.source_application_path));
+    for representation in &capture.representations {
+        bytes = bytes
+            .saturating_add(representation.format_id.capacity())
+            .saturating_add(representation.bytes.as_ref().map_or(0, Vec::capacity))
+            .saturating_add(option_string_bytes(&representation.missing_ref));
+    }
+    bytes
+}
+
+fn option_string_bytes(value: &Option<String>) -> usize {
+    value.as_ref().map_or(0, String::capacity)
 }
 
 fn duplicate_event_fingerprint(base_fingerprint: [u8; 32], ordinal: u64) -> [u8; 32] {
@@ -195,20 +255,11 @@ pub(crate) fn record_failure(
     }
 }
 
-pub(crate) fn json_records(path: &Path, source: ImportSource) -> Result<Vec<Value>, ImportError> {
-    let bytes = bounded_manifest_bytes(path, source.as_str())?;
-    let document: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| ImportError::export(source.as_str(), "invalid_document"))?;
-    document
-        .as_array()
-        .cloned()
-        .ok_or_else(|| ImportError::export(source.as_str(), "invalid_document"))
-}
-
-pub(crate) fn bounded_manifest_bytes(
+pub(crate) fn stream_json_records(
     path: &Path,
     source_kind: &'static str,
-) -> Result<Vec<u8>, ImportError> {
+    mut record: impl FnMut(usize, &[u8]) -> Result<bool, ImportError>,
+) -> Result<usize, ImportError> {
     let metadata =
         fs::metadata(path).map_err(|_| ImportError::export(source_kind, "unreadable_export"))?;
     if metadata.len() > MAX_IMPORT_MANIFEST_BYTES as u64 {
@@ -216,18 +267,125 @@ pub(crate) fn bounded_manifest_bytes(
     }
     let file =
         fs::File::open(path).map_err(|_| ImportError::export(source_kind, "unreadable_export"))?;
-    let mut bytes = Vec::with_capacity(
-        usize::try_from(metadata.len())
-            .unwrap_or(MAX_IMPORT_MANIFEST_BYTES)
-            .min(MAX_IMPORT_MANIFEST_BYTES),
-    );
-    file.take((MAX_IMPORT_MANIFEST_BYTES as u64) + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| ImportError::export(source_kind, "unreadable_export"))?;
-    if bytes.len() > MAX_IMPORT_MANIFEST_BYTES {
-        return Err(ImportError::service("analysis_too_large"));
+    let mut reader = BoundedJsonReader {
+        reader: BufReader::new(file),
+        bytes_read: 0,
+        source_kind,
+    };
+    if reader.next_non_whitespace()? != Some(b'[') {
+        return Err(ImportError::export(source_kind, "invalid_document"));
     }
-    Ok(bytes)
+    let Some(mut first) = reader.next_non_whitespace()? else {
+        return Err(ImportError::export(source_kind, "invalid_document"));
+    };
+    if first == b']' {
+        reader.require_end()?;
+        return Ok(0);
+    }
+
+    let mut total = 0_usize;
+    loop {
+        if first != b'{' {
+            return Err(ImportError::export(source_kind, "invalid_document"));
+        }
+        let mut bytes = Vec::with_capacity(4 * 1024);
+        bytes.push(first);
+        let mut depth = 1_usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        while depth != 0 {
+            let byte = reader
+                .next_byte()?
+                .ok_or_else(|| ImportError::export(source_kind, "invalid_document"))?;
+            if bytes.len() == MAX_IMPORT_RECORD_BYTES {
+                return Err(ImportError::service("record_too_large"));
+            }
+            bytes.push(byte);
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match byte {
+                b'"' => in_string = true,
+                b'{' | b'[' => {
+                    depth = depth
+                        .checked_add(1)
+                        .ok_or_else(|| ImportError::service("record_too_large"))?;
+                }
+                b'}' | b']' => depth -= 1,
+                _ => {}
+            }
+        }
+        total = total
+            .checked_add(1)
+            .ok_or_else(|| ImportError::service("source_too_large"))?;
+        if !record(total, &bytes)? {
+            return Ok(total);
+        }
+        match reader.next_non_whitespace()? {
+            Some(b']') => {
+                reader.require_end()?;
+                return Ok(total);
+            }
+            Some(b',') => {
+                first = reader
+                    .next_non_whitespace()?
+                    .ok_or_else(|| ImportError::export(source_kind, "invalid_document"))?;
+                if first == b']' {
+                    return Err(ImportError::export(source_kind, "invalid_document"));
+                }
+            }
+            _ => return Err(ImportError::export(source_kind, "invalid_document")),
+        }
+    }
+}
+
+struct BoundedJsonReader {
+    reader: BufReader<fs::File>,
+    bytes_read: usize,
+    source_kind: &'static str,
+}
+
+impl BoundedJsonReader {
+    fn next_byte(&mut self) -> Result<Option<u8>, ImportError> {
+        let mut byte = [0_u8; 1];
+        match self.reader.read(&mut byte) {
+            Ok(0) => Ok(None),
+            Ok(_) => {
+                self.bytes_read = self
+                    .bytes_read
+                    .checked_add(1)
+                    .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+                if self.bytes_read > MAX_IMPORT_MANIFEST_BYTES {
+                    return Err(ImportError::service("analysis_too_large"));
+                }
+                Ok(Some(byte[0]))
+            }
+            Err(_) => Err(ImportError::export(self.source_kind, "unreadable_export")),
+        }
+    }
+
+    fn next_non_whitespace(&mut self) -> Result<Option<u8>, ImportError> {
+        loop {
+            match self.next_byte()? {
+                Some(byte) if byte.is_ascii_whitespace() => {}
+                byte => return Ok(byte),
+            }
+        }
+    }
+
+    fn require_end(&mut self) -> Result<(), ImportError> {
+        match self.next_non_whitespace()? {
+            None => Ok(()),
+            Some(_) => Err(ImportError::export(self.source_kind, "invalid_document")),
+        }
+    }
 }
 
 pub(crate) fn canonical_fingerprint<'a>(

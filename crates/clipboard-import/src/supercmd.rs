@@ -21,8 +21,8 @@ use serde::{
 
 use crate::{
     FramedHasher, ImportCandidate, ImportError, ImportParseReport, ImportRecordFailure,
-    ImportSource, MAX_IMPORT_AUXILIARY_BYTES, MAX_PREPARED_SOURCE_BYTES, bounded_manifest_bytes,
-    canonical_fingerprint, json_records, record_failure,
+    ImportSource, MAX_IMPORT_AUXILIARY_BYTES, MAX_IMPORT_RECORD_BYTES, MAX_PREPARED_SOURCE_BYTES,
+    canonical_fingerprint, record_failure, stream_json_records,
 };
 
 /// The auxiliary image search is intentionally finite even for adversarial directory trees.
@@ -154,50 +154,87 @@ fn parse_supercmd_report_with_limits(
     traversal_limits: TraversalLimits,
 ) -> Result<ImportParseReport, ImportError> {
     let root = open_export_root(export_root.as_ref())?;
-    let records = json_records(path.as_ref(), ImportSource::SuperCmd)?;
     let mut auxiliary_bytes_remaining = auxiliary_budget(path.as_ref())?;
-    let mut report = ImportParseReport::new(records.len());
-    for (index, value) in records.into_iter().enumerate() {
-        let result = serde_json::from_value(value)
-            .map_err(|_| record_failure(ImportSource::SuperCmd, index + 1, "invalid_record"))
-            .and_then(|record| {
-                map_record(
-                    &root,
-                    record,
-                    index + 1,
-                    &mut auxiliary_bytes_remaining,
-                    traversal_limits,
-                )
-            });
-        report.push(result);
-    }
+    let mut report = ImportParseReport::new(0);
+    stream_json_records(
+        path.as_ref(),
+        ImportSource::SuperCmd.as_str(),
+        |record, bytes| {
+            report.total = record;
+            report.ensure_transient_capacity(
+                bytes.len().saturating_add(MAX_IMPORT_AUXILIARY_BYTES),
+            )?;
+            let result = serde_json::from_slice(bytes)
+                .map_err(|_| record_failure(ImportSource::SuperCmd, record, "invalid_record"))
+                .and_then(|record_value| {
+                    map_record(
+                        &root,
+                        record_value,
+                        record,
+                        &mut auxiliary_bytes_remaining,
+                        traversal_limits,
+                    )
+                });
+            report.push(result)?;
+            Ok(true)
+        },
+    )?;
     Ok(report)
 }
 
 pub(crate) fn parse_supercmd_csv_report(path: &Path) -> Result<ImportParseReport, ImportError> {
     let root_path = path.parent().unwrap_or_else(|| Path::new("."));
     let root = open_export_root(root_path)?;
-    let bytes = bounded_manifest_bytes(path, ImportSource::SuperCmd.as_str())?;
-    let mut auxiliary_bytes_remaining = MAX_PREPARED_SOURCE_BYTES.saturating_sub(bytes.len());
+    let file = std::fs::File::open(path)
+        .map_err(|_| ImportError::export(ImportSource::SuperCmd.as_str(), "unreadable_export"))?;
+    let mut auxiliary_bytes_remaining = auxiliary_budget(path)?;
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(false)
-        .from_reader(bytes.as_slice());
+        .from_reader(file);
+    let headers = reader
+        .byte_headers()
+        .map_err(|_| ImportError::export(ImportSource::SuperCmd.as_str(), "invalid_document"))?
+        .clone();
     let mut report = ImportParseReport::new(0);
-    for (index, result) in reader.deserialize().enumerate() {
+    for (index, result) in reader.byte_records().enumerate() {
         report.total += 1;
-        let result = result
-            .map_err(|_| record_failure(ImportSource::SuperCmd, index + 1, "invalid_record"))
-            .and_then(|record| {
-                map_record(
-                    &root,
-                    record,
-                    index + 1,
-                    &mut auxiliary_bytes_remaining,
-                    TraversalLimits::default(),
-                )
-            });
-        report.push(result);
+        let result = match result {
+            Ok(record) => {
+                let record_bytes = record.iter().map(<[u8]>::len).sum::<usize>();
+                if record_bytes > MAX_IMPORT_RECORD_BYTES {
+                    Err(record_failure(
+                        ImportSource::SuperCmd,
+                        index + 1,
+                        "record_too_large",
+                    ))
+                } else {
+                    report.ensure_transient_capacity(
+                        record_bytes.saturating_add(MAX_IMPORT_AUXILIARY_BYTES),
+                    )?;
+                    record
+                        .deserialize(Some(&headers))
+                        .map_err(|_| {
+                            record_failure(ImportSource::SuperCmd, index + 1, "invalid_record")
+                        })
+                        .and_then(|record| {
+                            map_record(
+                                &root,
+                                record,
+                                index + 1,
+                                &mut auxiliary_bytes_remaining,
+                                TraversalLimits::default(),
+                            )
+                        })
+                }
+            }
+            Err(_) => Err(record_failure(
+                ImportSource::SuperCmd,
+                index + 1,
+                "invalid_record",
+            )),
+        };
+        report.push(result)?;
     }
     Ok(report)
 }

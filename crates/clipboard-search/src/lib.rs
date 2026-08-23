@@ -13,10 +13,12 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub use clipboard_store::MAX_PREVIEW_BYTES;
-pub use query::{ParsedQuery, QueryError, SearchFilters, parse_query};
+pub use query::{
+    MAX_APP_FILTER_BYTES, MAX_FTS_MATCH_BYTES, MAX_RAW_QUERY_BYTES, MAX_SEARCH_TERM_BYTES,
+    MAX_SEARCH_TERMS, ParsedQuery, QueryError, SearchFilters, build_fts_match_expression,
+    parse_query,
+};
 pub use ranking::{RankingSignals, RankingWeights, rank_score};
-
-use query::fts_match_expression;
 
 pub const MAX_RANKED_CANDIDATES: usize = 200;
 pub const MAX_SEARCH_RESULTS: u32 = 100;
@@ -30,6 +32,7 @@ const RANKED_SEARCH_SQL: &str = "WITH matched_candidates AS MATERIALIZED (
        JOIN content c ON c.content_id = search_fts.rowid
        JOIN history_event he ON he.content_id = c.content_id
        WHERE search_fts MATCH ?1
+         AND (c.flags & ?6) = 0
          AND (?2 IS NULL OR c.kind = ?2)
          AND (?3 IS NULL
               OR he.source_app_id COLLATE NOCASE = ?3 COLLATE NOCASE
@@ -85,6 +88,8 @@ pub struct SearchRequest {
     pub query: String,
     pub limit: u32,
     pub cursor: Option<HistoryCursor>,
+    #[serde(default)]
+    pub include_do_not_index: bool,
 }
 
 impl SearchRequest {
@@ -93,6 +98,7 @@ impl SearchRequest {
             query: query.into(),
             limit: DEFAULT_SEARCH_RESULTS,
             cursor: None,
+            include_do_not_index: false,
         }
     }
 }
@@ -174,9 +180,15 @@ impl SearchStoreExt for StoreHandle {
             return Err(SearchError::InvalidLimit);
         }
         let parsed = parse_query(&request.query)?;
-        let match_expression = fts_match_expression(&parsed.text);
+        let match_expression = build_fts_match_expression(&parsed.text)?;
         if match_expression.is_empty() {
-            return recent_search(self, request.limit, request.cursor, &parsed.filters);
+            return recent_search(
+                self,
+                request.limit,
+                request.cursor,
+                &parsed.filters,
+                request.include_do_not_index,
+            );
         }
         if request.cursor.is_some() {
             return Err(SearchError::RankedCursorUnsupported);
@@ -197,6 +209,7 @@ fn recent_search(
     limit: u32,
     cursor: Option<HistoryCursor>,
     filters: &SearchFilters,
+    include_do_not_index: bool,
 ) -> Result<HistoryPage, SearchError> {
     let kind = filters.kind.map(ContentKind::as_str);
     let app = filters.app.as_deref();
@@ -204,6 +217,7 @@ fn recent_search(
     let cursor_time = cursor.map(|value| value.captured_at_ms);
     let cursor_event = cursor.map(|value| value.event_id);
     let fetch_limit = i64::from(limit) + 1;
+    let do_not_index_mask = i64::from(ContentFlags::DO_NOT_INDEX.bits());
     let raw_items = store.with_reader(|connection| {
         let mut statement = connection.prepare(
             "SELECT he.event_id, he.global_id, c.kind, he.captured_at_ms, he.source_app_name,
@@ -220,12 +234,22 @@ fn recent_search(
                     OR he.source_app_name COLLATE NOCASE = ?2 COLLATE NOCASE)
                AND (?3 IS NULL OR he.pinned = ?3)
                AND (?4 IS NULL OR (he.captured_at_ms, he.event_id) < (?4, ?5))
+               AND (?6 = 1 OR (c.flags & ?7) = 0)
              ORDER BY he.captured_at_ms DESC, he.event_id DESC
-             LIMIT ?6",
+             LIMIT ?8",
         )?;
         statement
             .query_map(
-                params![kind, app, pinned, cursor_time, cursor_event, fetch_limit],
+                params![
+                    kind,
+                    app,
+                    pinned,
+                    cursor_time,
+                    cursor_event,
+                    i64::from(include_do_not_index),
+                    do_not_index_mask,
+                    fetch_limit
+                ],
                 raw_history_item,
             )?
             .collect::<Result<Vec<_>, _>>()
@@ -264,11 +288,19 @@ fn ranked_search(
     let pinned = filters.pinned.map(i64::from);
     let candidate_limit =
         i64::try_from(MAX_RANKED_CANDIDATES).map_err(|_| SearchError::InvalidStoreData)?;
+    let do_not_index_mask = i64::from(ContentFlags::DO_NOT_INDEX.bits());
     let (raw_candidates, ranked_truncated) = store.with_reader(|connection| {
         let mut statement = connection.prepare(RANKED_SEARCH_SQL)?;
         let rows = statement
             .query_map(
-                params![match_expression, kind, app, pinned, candidate_limit],
+                params![
+                    match_expression,
+                    kind,
+                    app,
+                    pinned,
+                    candidate_limit,
+                    do_not_index_mask
+                ],
                 |row| Ok((raw_ranked_item(row)?, row.get::<_, bool>(13)?)),
             )?
             .collect::<Result<Vec<_>, _>>()?;
@@ -443,7 +475,8 @@ mod sql_plan_tests {
                             Option::<&str>::None,
                             Option::<&str>::None,
                             Option::<i64>::None,
-                            i64::try_from(MAX_RANKED_CANDIDATES).unwrap()
+                            i64::try_from(MAX_RANKED_CANDIDATES).unwrap(),
+                            i64::from(clipboard_core::ContentFlags::DO_NOT_INDEX.bits())
                         ],
                         |row| row.get::<_, String>(3),
                     )?

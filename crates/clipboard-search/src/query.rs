@@ -1,6 +1,12 @@
 use clipboard_core::{ContentKind, normalize_search_text};
 use thiserror::Error;
 
+pub const MAX_RAW_QUERY_BYTES: usize = 8 * 1024;
+pub const MAX_APP_FILTER_BYTES: usize = 512;
+pub const MAX_SEARCH_TERMS: usize = 32;
+pub const MAX_SEARCH_TERM_BYTES: usize = 240;
+pub const MAX_FTS_MATCH_BYTES: usize = 8 * 1024;
+
 pub struct SearchFilters {
     pub kind: Option<ContentKind>,
     pub app: Option<String>,
@@ -14,6 +20,16 @@ pub struct ParsedQuery {
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum QueryError {
+    #[error("query_too_long")]
+    QueryTooLong,
+    #[error("app_filter_too_long")]
+    AppFilterTooLong,
+    #[error("too_many_search_terms")]
+    TooManySearchTerms,
+    #[error("search_term_too_long")]
+    SearchTermTooLong,
+    #[error("query_too_long")]
+    MatchExpressionTooLong,
     #[error("invalid type filter")]
     InvalidTypeFilter,
     #[error("duplicate type filter")]
@@ -31,6 +47,10 @@ pub enum QueryError {
 impl QueryError {
     pub const fn code(self) -> &'static str {
         match self {
+            Self::QueryTooLong | Self::MatchExpressionTooLong => "query_too_long",
+            Self::AppFilterTooLong => "app_filter_too_long",
+            Self::TooManySearchTerms => "too_many_search_terms",
+            Self::SearchTermTooLong => "search_term_too_long",
             Self::InvalidTypeFilter => "invalid_type_filter",
             Self::DuplicateTypeFilter => "duplicate_type_filter",
             Self::InvalidAppFilter => "invalid_app_filter",
@@ -42,6 +62,9 @@ impl QueryError {
 }
 
 pub fn parse_query(query: &str) -> Result<ParsedQuery, QueryError> {
+    if query.len() > MAX_RAW_QUERY_BYTES {
+        return Err(QueryError::QueryTooLong);
+    }
     let mut filters = SearchFilters {
         kind: None,
         app: None,
@@ -93,13 +116,42 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery, QueryError> {
     })
 }
 
-pub(crate) fn fts_match_expression(normalized_text: &str) -> String {
-    normalized_text
+pub fn build_fts_match_expression(normalized_text: &str) -> Result<String, QueryError> {
+    let mut expression = String::with_capacity(normalized_text.len().min(MAX_FTS_MATCH_BYTES));
+    let mut term_count = 0_usize;
+    for term in normalized_text
         .split(|character: char| !character.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(|token| format!("\"{token}\""))
-        .collect::<Vec<_>>()
-        .join(" AND ")
+        .filter(|term| !term.is_empty())
+    {
+        if term.len() > MAX_SEARCH_TERM_BYTES {
+            return Err(QueryError::SearchTermTooLong);
+        }
+        term_count += 1;
+        if term_count > MAX_SEARCH_TERMS {
+            return Err(QueryError::TooManySearchTerms);
+        }
+        let separator_bytes = if expression.is_empty() {
+            0
+        } else {
+            " AND ".len()
+        };
+        let required = expression
+            .len()
+            .checked_add(separator_bytes)
+            .and_then(|length| length.checked_add(term.len()))
+            .and_then(|length| length.checked_add(2))
+            .ok_or(QueryError::MatchExpressionTooLong)?;
+        if required > MAX_FTS_MATCH_BYTES {
+            return Err(QueryError::MatchExpressionTooLong);
+        }
+        if separator_bytes != 0 {
+            expression.push_str(" AND ");
+        }
+        expression.push('"');
+        expression.push_str(term);
+        expression.push('"');
+    }
+    Ok(expression)
 }
 
 fn skip_whitespace(value: &str, mut offset: usize) -> usize {
@@ -142,12 +194,18 @@ fn parse_app_value(query: &str, start: usize) -> Result<(String, usize), QueryEr
         {
             return Err(QueryError::InvalidAppFilter);
         }
+        if content_end - content_start > MAX_APP_FILTER_BYTES {
+            return Err(QueryError::AppFilterTooLong);
+        }
         return Ok((query[content_start..content_end].to_owned(), next));
     }
 
     let end = token_end(query, value_start);
     if end == value_start {
         return Err(QueryError::InvalidAppFilter);
+    }
+    if end - value_start > MAX_APP_FILTER_BYTES {
+        return Err(QueryError::AppFilterTooLong);
     }
     Ok((query[value_start..end].to_owned(), end))
 }

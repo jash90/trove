@@ -1,6 +1,9 @@
 use std::io::Cursor;
 
-use clipboard_images::{ImageError, MAX_IMAGE_INPUT_BYTES, make_thumbnail};
+use clipboard_images::{
+    ImageError, MAX_IMAGE_INPUT_BYTES, MAX_THUMBNAIL_DIMENSION, MAX_THUMBNAIL_PIXELS,
+    make_thumbnail,
+};
 
 const ONE_PIXEL_PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -22,11 +25,21 @@ fn thumbnail_rejects_oversized_input_before_decode() {
 
 #[test]
 fn thumbnail_is_a_320_pixel_png() {
-    let thumbnail = make_thumbnail(ONE_PIXEL_PNG, 320).unwrap();
+    assert_eq!(MAX_THUMBNAIL_DIMENSION, 320);
+    assert_eq!(MAX_THUMBNAIL_PIXELS, 320 * 320);
+    let thumbnail = make_thumbnail(ONE_PIXEL_PNG, MAX_THUMBNAIL_DIMENSION).unwrap();
 
     assert_eq!(&thumbnail[..8], b"\x89PNG\r\n\x1a\n");
     assert_eq!(&thumbnail[16..20], 320_u32.to_be_bytes());
     assert_eq!(&thumbnail[20..24], 320_u32.to_be_bytes());
+}
+
+#[test]
+fn thumbnail_rejects_321_before_probing_invalid_input() {
+    let error = make_thumbnail(b"not an image", MAX_THUMBNAIL_DIMENSION + 1).unwrap_err();
+
+    assert!(matches!(error, ImageError::OutputTooLarge));
+    assert_eq!(error.to_string(), "thumbnail_output_too_large");
 }
 
 #[test]

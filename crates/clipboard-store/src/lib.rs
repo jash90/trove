@@ -8,14 +8,18 @@ mod reader;
 mod writer;
 
 pub use boundary::{StorageBoundaryError, StorageBoundaryLease};
-pub use cas::{CasBlob, CasError, CasStore};
+pub use cas::{
+    CAS_VERIFY_BUFFER_BYTES, CasBlob, CasError, CasGcSession, CasStore, GcStep, GcStepBudget,
+    MAX_CAS_OBJECT_BYTES,
+};
 pub use config::StoreConfig;
 pub use migrations::migrations;
 pub use reader::ReadOnlyStore;
 pub use writer::{
     BeginImportRun, IMPORT_BATCH_SIZE, ImportBatchOutcome, ImportFailureCount, ImportSourceKind,
-    ImportWorkerLease, IngestOutcome, MAX_PREVIEW_BYTES, MAX_SEARCH_DERIVATION_BYTES,
-    MAX_SEARCH_DERIVATIONS_PER_CONTENT, MAX_SEARCH_DOCUMENT_BYTES, ResumeImportRun, StoreError,
-    StoreHandle, StoreImportCandidate, StoreImportRunState, StoreImportRunStatus, StoreStats,
-    StoredPayload, WRITER_QUEUE_CAPACITY, classify_payload,
+    ImportWorkerLease, IngestOutcome, MAX_IMPORT_BATCH_BYTES, MAX_PREVIEW_BYTES,
+    MAX_SEARCH_DERIVATION_BYTES, MAX_SEARCH_DERIVATIONS_PER_CONTENT, MAX_SEARCH_DOCUMENT_BYTES,
+    MAX_STORE_READERS, ResumeImportRun, StoreError, StoreHandle, StoreImportCandidate,
+    StoreImportRunState, StoreImportRunStatus, StoreStats, StoredPayload, WRITER_QUEUE_CAPACITY,
+    classify_payload,
 };

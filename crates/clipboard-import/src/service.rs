@@ -3,7 +3,7 @@ use std::{
     mem::size_of,
     path::Path,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -23,6 +23,8 @@ use crate::{
 
 pub const IMPORT_BATCH_SIZE: usize = clipboard_store::IMPORT_BATCH_SIZE;
 pub const MAX_IMPORT_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_IMPORT_RECORD_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_IMPORT_BATCH_BYTES: usize = clipboard_store::MAX_IMPORT_BATCH_BYTES;
 pub const MAX_IMPORT_AUXILIARY_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_PREPARED_SOURCE_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_PREPARED_CACHE_BYTES: usize = 256 * 1024 * 1024;
@@ -67,6 +69,29 @@ impl Default for ImportAdmissionLimits {
             MAX_PREPARED_SOURCE_BYTES,
             MAX_PREPARED_CACHE_BYTES,
         )
+    }
+}
+
+#[derive(Clone)]
+pub struct ImportRuntime {
+    admission_budget: AdmissionBudget,
+    analysis_gate: Arc<Mutex<()>>,
+}
+
+impl ImportRuntime {
+    fn process_wide() -> Self {
+        static RUNTIME: OnceLock<ImportRuntime> = OnceLock::new();
+        RUNTIME
+            .get_or_init(|| Self::with_limits(ImportAdmissionLimits::default()))
+            .clone()
+    }
+
+    #[doc(hidden)]
+    pub fn with_limits(limits: ImportAdmissionLimits) -> Self {
+        Self {
+            admission_budget: AdmissionBudget::new(limits),
+            analysis_gate: Arc::new(Mutex::new(())),
+        }
     }
 }
 
@@ -217,18 +242,26 @@ pub struct ImportService {
     store: StoreHandle,
     worker_policy: Arc<ImportWorkerPolicy>,
     prepared_sessions: Arc<Mutex<PreparedSessions>>,
-    admission_budget: AdmissionBudget,
-    analysis_gate: Arc<Mutex<()>>,
+    runtime: ImportRuntime,
 }
 
 impl ImportService {
     pub fn new(store: StoreHandle) -> Self {
-        Self::with_worker_policy(store, ImportWorkerPolicy::default())
+        Self::with_runtime_and_policy(
+            store,
+            ImportRuntime::process_wide(),
+            ImportWorkerPolicy::default(),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn with_runtime(store: StoreHandle, runtime: ImportRuntime) -> Self {
+        Self::with_runtime_and_policy(store, runtime, ImportWorkerPolicy::default())
     }
 
     #[doc(hidden)]
     pub fn with_worker_policy(store: StoreHandle, worker_policy: ImportWorkerPolicy) -> Self {
-        Self::with_worker_policy_and_limits(store, worker_policy, ImportAdmissionLimits::default())
+        Self::with_runtime_and_policy(store, ImportRuntime::process_wide(), worker_policy)
     }
 
     #[doc(hidden)]
@@ -237,12 +270,23 @@ impl ImportService {
         worker_policy: ImportWorkerPolicy,
         admission_limits: ImportAdmissionLimits,
     ) -> Self {
+        Self::with_runtime_and_policy(
+            store,
+            ImportRuntime::with_limits(admission_limits),
+            worker_policy,
+        )
+    }
+
+    fn with_runtime_and_policy(
+        store: StoreHandle,
+        runtime: ImportRuntime,
+        worker_policy: ImportWorkerPolicy,
+    ) -> Self {
         Self {
             store,
             worker_policy: Arc::new(worker_policy),
             prepared_sessions: Arc::new(Mutex::new(PreparedSessions::default())),
-            admission_budget: AdmissionBudget::new(admission_limits),
-            analysis_gate: Arc::new(Mutex::new(())),
+            runtime,
         }
     }
 
@@ -384,6 +428,7 @@ impl ImportService {
 
     fn prepare(&self, path: &Path) -> Result<PreparedSourceEnvelope, ImportError> {
         let _analysis_permit = self
+            .runtime
             .analysis_gate
             .lock()
             .map_err(|_| ImportError::service("analysis_unavailable"))?;
@@ -402,7 +447,7 @@ impl ImportService {
             .map_err(|_| ImportError::service("analysis_unavailable"))?
             .evict_expired(Instant::now());
         loop {
-            if let Some(reservation) = self.admission_budget.try_reserve()? {
+            if let Some(reservation) = self.runtime.admission_budget.try_reserve()? {
                 return Ok(reservation);
             }
             let evicted = self
@@ -514,21 +559,40 @@ impl ImportService {
         if let Some(start_gate) = &self.worker_policy.start_gate {
             start_gate.notified().await;
         }
-        let mut remaining = source
-            .candidates
-            .into_iter()
-            .skip(offset)
-            .enumerate()
-            .map(|(relative_offset, candidate)| {
+        let mut remaining = source.candidates.into_iter().skip(offset).enumerate().map(
+            |(relative_offset, candidate)| {
                 store_candidate((offset + relative_offset) as u64, candidate)
-            })
-            .peekable();
+            },
+        );
+        let mut pending = None;
         let mut completed_batches = 0_usize;
-        while remaining.peek().is_some() {
-            let batch = remaining
-                .by_ref()
-                .take(IMPORT_BATCH_SIZE)
-                .collect::<Vec<_>>();
+        loop {
+            let mut batch = Vec::with_capacity(IMPORT_BATCH_SIZE);
+            let mut batch_bytes = 0_usize;
+            while batch.len() < IMPORT_BATCH_SIZE {
+                let Some(candidate) = pending.take().or_else(|| remaining.next()) else {
+                    break;
+                };
+                let candidate_bytes = store_candidate_retained_bytes(&candidate);
+                if candidate_bytes > MAX_IMPORT_BATCH_BYTES {
+                    let _ = self
+                        .store
+                        .fail_import(run_id, generation, "batch_too_large")
+                        .await;
+                    return Err(ImportError::service("batch_too_large"));
+                }
+                if !batch.is_empty()
+                    && batch_bytes.saturating_add(candidate_bytes) > MAX_IMPORT_BATCH_BYTES
+                {
+                    pending = Some(candidate);
+                    break;
+                }
+                batch_bytes = batch_bytes.saturating_add(candidate_bytes);
+                batch.push(candidate);
+            }
+            if batch.is_empty() {
+                break;
+            }
             let expected = batch.len() as u64;
             let outcome = match self.store.import_batch(run_id, generation, batch).await {
                 Ok(outcome) => outcome,
@@ -551,7 +615,7 @@ impl ImportService {
                 return Err(ImportError::service("checkpoint_failure"));
             }
             completed_batches += 1;
-            if remaining.peek().is_some()
+            if (pending.is_some() || remaining.size_hint().0 != 0)
                 && self
                     .worker_policy
                     .interrupt_after_batches
@@ -1069,6 +1133,29 @@ fn store_candidate(candidate_offset: u64, candidate: ImportCandidate) -> StoreIm
         search_text,
         source_app_original: candidate.source_application_path,
     }
+}
+
+fn store_candidate_retained_bytes(candidate: &StoreImportCandidate) -> usize {
+    let capture = &candidate.capture;
+    let mut bytes = size_of::<StoreImportCandidate>()
+        .saturating_add(capture.primary_mime.len())
+        .saturating_add(capture.source_app_id.as_ref().map_or(0, String::len))
+        .saturating_add(capture.source_app_name.as_ref().map_or(0, String::len))
+        .saturating_add(candidate.search_text.as_ref().map_or(0, String::len))
+        .saturating_add(
+            candidate
+                .source_app_original
+                .as_ref()
+                .map_or(0, String::len),
+        );
+    for representation in &capture.representations {
+        bytes = bytes
+            .saturating_add(size_of::<clipboard_core::RepresentationInput>())
+            .saturating_add(representation.format_id.len())
+            .saturating_add(representation.bytes.as_ref().map_or(0, Vec::len))
+            .saturating_add(representation.missing_ref.as_ref().map_or(0, String::len));
+    }
+    bytes
 }
 
 fn combined_search_text(primary_text: Option<&str>, search_ocr: Option<&str>) -> Option<String> {

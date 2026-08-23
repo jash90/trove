@@ -5,7 +5,8 @@ use clipboard_core::{
 };
 use clipboard_import::{
     IMPORT_BATCH_SIZE, ImportAdmissionLimits, ImportError, ImportRunHandle, ImportRunState,
-    ImportService, ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES, MAX_IMPORT_MANIFEST_BYTES,
+    ImportRuntime, ImportService, ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES,
+    MAX_IMPORT_BATCH_BYTES, MAX_IMPORT_MANIFEST_BYTES, MAX_IMPORT_RECORD_BYTES,
 };
 use clipboard_store::{StoreConfig, StoreHandle};
 use serde_json::{Value, json};
@@ -213,7 +214,7 @@ async fn begin_consumes_the_exact_prepared_snapshot_once_without_reparsing() {
     let stored_relpath = store
         .with_reader(|connection| {
             connection.query_row(
-                "SELECT blob_relpath FROM content_representation WHERE storage_kind = 'cas'",
+                "SELECT blob_relpath FROM raw_payload WHERE storage_kind = 'cas'",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -474,6 +475,60 @@ async fn active_worker_reservation_blocks_every_preparation_entry_point_until_re
     service.discard_analysis(admitted.analysis_id).unwrap();
 }
 
+#[test]
+fn independent_services_share_one_injected_runtime_admission_envelope() {
+    let first_export = tempfile::tempdir().unwrap();
+    let second_export = tempfile::tempdir().unwrap();
+    let first_database = tempfile::tempdir().unwrap();
+    let second_database = tempfile::tempdir().unwrap();
+    write_raycast_export(&first_export, &[raycast_record(0)]);
+    write_raycast_export(&second_export, &[raycast_record(1)]);
+    let runtime = ImportRuntime::with_limits(ImportAdmissionLimits::new(1, 64 * 1024, 64 * 1024));
+    let first = ImportService::with_runtime(open_store(&first_database), runtime.clone());
+    let second = ImportService::with_runtime(open_store(&second_database), runtime);
+
+    let held = first.analyze(first_export.path()).unwrap();
+    let error = second.analyze(second_export.path()).unwrap_err();
+    assert!(matches!(
+        error,
+        ImportError::Service {
+            reason: "analysis_capacity_full"
+        }
+    ));
+
+    first.discard_analysis(held.analysis_id).unwrap();
+    let admitted = second.analyze(second_export.path()).unwrap();
+    second.discard_analysis(admitted.analysis_id).unwrap();
+}
+
+#[test]
+fn streaming_json_rejects_one_oversized_record_with_a_stable_error() {
+    assert!(std::hint::black_box(MAX_IMPORT_BATCH_BYTES) < 256 * 1024 * 1024);
+    let export = tempfile::tempdir().unwrap();
+    let manifest = export.path().join("clipboard.json");
+    let mut record = raycast_record(0);
+    record["text"] = json!("x".repeat(MAX_IMPORT_RECORD_BYTES + 1));
+    write_json(&manifest, &[record]);
+    let database = tempfile::tempdir().unwrap();
+    let service = ImportService::with_runtime(
+        open_store(&database),
+        ImportRuntime::with_limits(ImportAdmissionLimits::new(
+            1,
+            2 * MAX_IMPORT_RECORD_BYTES,
+            2 * MAX_IMPORT_RECORD_BYTES,
+        )),
+    );
+
+    let error = service.analyze(export.path()).unwrap_err();
+    assert!(matches!(
+        error,
+        ImportError::Service {
+            reason: "record_too_large"
+        }
+    ));
+    assert!(!error.to_string().contains("clipboard.json"));
+}
+
 #[tokio::test]
 async fn oversized_sources_are_rejected_for_resume_and_cli_without_persisting_runs() {
     let export = tempfile::tempdir().unwrap();
@@ -576,7 +631,11 @@ async fn oversized_auxiliary_payload_becomes_a_missing_representation_without_ab
     let (storage_kind, byte_size) = store
         .with_reader(|connection| {
             connection.query_row(
-                "SELECT storage_kind, original_byte_size FROM content_representation",
+                "SELECT CASE WHEN er.raw_payload_id IS NULL THEN 'missing' ELSE rp.storage_kind END,
+                        COALESCE(rp.original_byte_size, 0)
+                 FROM event_representation er
+                 LEFT JOIN raw_payload rp ON rp.raw_payload_id = er.raw_payload_id
+                 WHERE er.ordinal = 0",
                 [],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
@@ -947,14 +1006,17 @@ async fn missing_raycast_and_supercmd_payloads_are_preserved_as_missing_content(
         .with_reader(|connection| {
             Ok((
                 connection.query_row(
-                    "SELECT count(*) FROM content_representation WHERE storage_kind = 'missing'",
+                    "SELECT count(*) FROM event_representation
+                     WHERE raw_payload_id IS NULL AND missing_ref IS NOT NULL",
                     [],
                     |row| row.get::<_, i64>(0),
                 )?,
                 connection.query_row(
-                    "SELECT count(*) FROM content_representation
-                     WHERE storage_kind = 'missing' AND original_byte_size = 0
-                       AND stored_byte_size = 0 AND inline_payload IS NULL",
+                    "SELECT count(*) FROM event_representation er
+                     JOIN history_event he ON he.event_id = er.event_id
+                     JOIN content c ON c.content_id = he.content_id
+                     WHERE er.raw_payload_id IS NULL AND er.missing_ref IS NOT NULL
+                       AND er.ordinal = 0 AND c.byte_size = 0",
                     [],
                     |row| row.get::<_, i64>(0),
                 )?,
@@ -1024,9 +1086,11 @@ async fn ocr_is_search_only_and_combines_with_primary_text_without_replacing_pay
                     |row| row.get::<_, i64>(0),
                 )?,
                 connection.query_row(
-                    "SELECT inline_payload FROM content_representation
-                     JOIN content USING(content_id)
-                     WHERE content.kind = 'text' AND format_id = 'text/plain'",
+                    "SELECT rp.inline_payload FROM raw_payload rp
+                     JOIN event_representation er ON er.raw_payload_id = rp.raw_payload_id
+                     JOIN history_event he ON he.event_id = er.event_id
+                     JOIN content c ON c.content_id = he.content_id
+                     WHERE c.kind = 'text' AND er.format_id = 'text/plain' AND er.ordinal = 0",
                     [],
                     |row| row.get::<_, Vec<u8>>(0),
                 )?,
@@ -1086,7 +1150,7 @@ async fn equal_primary_payloads_accumulate_distinct_ocr_derivations() {
                     row.get::<_, i64>(0)
                 })?,
                 connection.query_row(
-                    "SELECT inline_payload FROM content_representation",
+                    "SELECT inline_payload FROM raw_payload WHERE storage_kind = 'inline'",
                     [],
                     |row| row.get::<_, Vec<u8>>(0),
                 )?,

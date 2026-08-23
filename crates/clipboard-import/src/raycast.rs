@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::{
     FramedHasher, ImportCandidate, ImportError, ImportParseReport, ImportRecordFailure,
-    ImportSource, canonical_fingerprint, json_records, record_failure, source_metadata,
+    ImportSource, canonical_fingerprint, record_failure, source_metadata, stream_json_records,
 };
 
 #[derive(Deserialize)]
@@ -33,14 +33,20 @@ pub fn parse_raycast(path: impl AsRef<Path>) -> Result<Vec<ImportCandidate>, Imp
 }
 
 pub fn parse_raycast_report(path: impl AsRef<Path>) -> Result<ImportParseReport, ImportError> {
-    let records = json_records(path.as_ref(), ImportSource::Raycast)?;
-    let mut report = ImportParseReport::new(records.len());
-    for (index, value) in records.into_iter().enumerate() {
-        let result = serde_json::from_value(value)
-            .map_err(|_| record_failure(ImportSource::Raycast, index + 1, "invalid_record"))
-            .and_then(|record| map_record(record, index + 1));
-        report.push(result);
-    }
+    let mut report = ImportParseReport::new(0);
+    stream_json_records(
+        path.as_ref(),
+        ImportSource::Raycast.as_str(),
+        |record, bytes| {
+            report.total = record;
+            report.ensure_transient_capacity(bytes.len())?;
+            let result = serde_json::from_slice(bytes)
+                .map_err(|_| record_failure(ImportSource::Raycast, record, "invalid_record"))
+                .and_then(|record_value| map_record(record_value, record));
+            report.push(result)?;
+            Ok(true)
+        },
+    )?;
     Ok(report)
 }
 

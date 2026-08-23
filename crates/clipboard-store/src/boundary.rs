@@ -17,9 +17,11 @@ use crate::StoreConfig;
 pub enum StorageBoundaryError {
     #[error("storage boundary changed")]
     Changed,
+    #[error("private_storage_unavailable")]
+    PrivateStorageUnavailable,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 struct FileIdentity {
     device: u64,
     inode: u64,
@@ -60,36 +62,63 @@ impl fmt::Debug for StorageBoundaryLease {
 
 impl StorageBoundaryLease {
     pub fn create_writer(config: &StoreConfig) -> Result<Self, StorageBoundaryError> {
-        Self::open(config, true)
+        Self::open(config, true, true)
     }
 
     pub fn open_read_only(config: &StoreConfig) -> Result<Self, StorageBoundaryError> {
-        Self::open(config, false)
+        Self::open(config, false, true)
+    }
+
+    pub(crate) fn create_writer_preflight(
+        config: &StoreConfig,
+    ) -> Result<Self, StorageBoundaryError> {
+        Self::open(config, true, false)
+    }
+
+    pub(crate) fn open_read_only_preflight(
+        config: &StoreConfig,
+    ) -> Result<Self, StorageBoundaryError> {
+        Self::open(config, false, false)
     }
 
     pub fn validate(&self) -> Result<(), StorageBoundaryError> {
-        self.validate_configuration_paths(&self.database_path, &self.blob_path)?;
-        validate_directory_chain(&self.ancestor_chain)?;
-        validate_std_directory(&self.data_path, self.data_identity)?;
-        validate_cap_directory(&self.data_directory, self.data_identity)?;
-        validate_std_directory(&self.blob_path, self.blob_identity)?;
-        validate_cap_directory(&self.blob_directory, self.blob_identity)?;
-        let reopened_blob = self
-            .data_directory
-            .open_dir_nofollow(&self.blob_name)
-            .map_err(|_| StorageBoundaryError::Changed)?;
-        validate_cap_directory(&reopened_blob, self.blob_identity)?;
-        validate_std_file(&self.database_path, self.database_identity)?;
-        let reopened_database = open_existing_file(&self.data_directory, &self.database_name)?;
-        validate_cap_file(&reopened_database, self.database_identity)?;
-        self.validate_optional_sidecar("-wal")?;
-        self.validate_optional_sidecar("-shm")?;
-        self.validate_optional_sidecar("-journal")?;
-        validate_directory_chain(&self.ancestor_chain)?;
-        validate_std_directory(&self.blob_path, self.blob_identity)?;
-        validate_cap_directory(&self.blob_directory, self.blob_identity)?;
-        validate_std_file(&self.database_path, self.database_identity)?;
-        validate_cap_file(&self.database_file, self.database_identity)
+        #[cfg(not(unix))]
+        return Err(StorageBoundaryError::PrivateStorageUnavailable);
+        #[cfg(unix)]
+        {
+            self.validate_preflight()?;
+            self.validate_optional_sidecar("-wal")?;
+            self.validate_optional_sidecar("-shm")?;
+            self.validate_optional_sidecar("-journal")?;
+            self.validate_preflight()
+        }
+    }
+
+    fn validate_preflight(&self) -> Result<(), StorageBoundaryError> {
+        #[cfg(not(unix))]
+        return Err(StorageBoundaryError::PrivateStorageUnavailable);
+        #[cfg(unix)]
+        {
+            self.validate_configuration_paths(&self.database_path, &self.blob_path)?;
+            validate_directory_chain(&self.ancestor_chain)?;
+            validate_private_std_directory(&self.data_path, self.data_identity)?;
+            validate_private_cap_directory(&self.data_directory, self.data_identity)?;
+            validate_private_std_directory(&self.blob_path, self.blob_identity)?;
+            validate_private_cap_directory(&self.blob_directory, self.blob_identity)?;
+            let reopened_blob = self
+                .data_directory
+                .open_dir_nofollow(&self.blob_name)
+                .map_err(|_| StorageBoundaryError::Changed)?;
+            validate_private_cap_directory(&reopened_blob, self.blob_identity)?;
+            validate_private_std_file(&self.database_path, self.database_identity)?;
+            let reopened_database = open_existing_file(&self.data_directory, &self.database_name)?;
+            validate_private_cap_file(&reopened_database, self.database_identity)?;
+            validate_directory_chain(&self.ancestor_chain)?;
+            validate_private_std_directory(&self.blob_path, self.blob_identity)?;
+            validate_private_cap_directory(&self.blob_directory, self.blob_identity)?;
+            validate_private_std_file(&self.database_path, self.database_identity)?;
+            validate_private_cap_file(&self.database_file, self.database_identity)
+        }
     }
 
     pub(crate) fn database_path(&self) -> &Path {
@@ -98,6 +127,14 @@ impl StorageBoundaryLease {
 
     pub(crate) fn blob_path(&self) -> &Path {
         &self.blob_path
+    }
+
+    pub(crate) fn database_identity_key(&self) -> (u64, u64) {
+        (self.database_identity.device, self.database_identity.inode)
+    }
+
+    pub(crate) fn blob_identity_key(&self) -> (u64, u64) {
+        (self.blob_identity.device, self.blob_identity.inode)
     }
 
     pub(crate) fn validate_for_config(
@@ -110,6 +147,18 @@ impl StorageBoundaryLease {
         }
         self.validate_configuration_paths(config.database_path(), config.blob_root())?;
         self.validate()
+    }
+
+    pub(crate) fn validate_preflight_for_config(
+        &self,
+        config: &StoreConfig,
+        require_writer: bool,
+    ) -> Result<(), StorageBoundaryError> {
+        if require_writer && !self.writer {
+            return Err(StorageBoundaryError::Changed);
+        }
+        self.validate_configuration_paths(config.database_path(), config.blob_root())?;
+        self.validate_preflight()
     }
 
     pub(crate) fn validate_for_cas(&self, blob_root: &Path) -> Result<(), StorageBoundaryError> {
@@ -126,7 +175,28 @@ impl StorageBoundaryLease {
             .map_err(|_| StorageBoundaryError::Changed)
     }
 
-    fn open(config: &StoreConfig, writer: bool) -> Result<Self, StorageBoundaryError> {
+    fn open(
+        config: &StoreConfig,
+        writer: bool,
+        validate_sidecars: bool,
+    ) -> Result<Self, StorageBoundaryError> {
+        #[cfg(not(unix))]
+        {
+            let _ = (config, writer, validate_sidecars);
+            return Err(StorageBoundaryError::PrivateStorageUnavailable);
+        }
+        #[cfg(unix)]
+        {
+            Self::open_unix(config, writer, validate_sidecars)
+        }
+    }
+
+    #[cfg(unix)]
+    fn open_unix(
+        config: &StoreConfig,
+        writer: bool,
+        validate_sidecars: bool,
+    ) -> Result<Self, StorageBoundaryError> {
         let configured_database_path = config.database_path().to_path_buf();
         let configured_blob_path = config.blob_root().to_path_buf();
         let configured_data_path = configured_database_path
@@ -142,6 +212,9 @@ impl StorageBoundaryLease {
         if configured_metadata.file_type().is_symlink() || !configured_metadata.is_dir() {
             return Err(StorageBoundaryError::Changed);
         }
+        if writer && !configured_database_path.exists() && !configured_blob_path.exists() {
+            harden_fresh_empty_data_directory(&configured_data_path)?;
+        }
         let data_path = fs::canonicalize(&configured_data_path).map_err(changed)?;
         let database_path = data_path.join(&database_name);
         let blob_path = data_path.join(&blob_name);
@@ -155,7 +228,9 @@ impl StorageBoundaryLease {
         validate_cap_directory(&data_directory, data_identity)?;
 
         if writer {
-            match data_directory.create_dir(&blob_name) {
+            let mut builder = cap_std::fs::DirBuilder::new();
+            cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            match data_directory.create_dir_with(&blob_name, &builder) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(_) => return Err(StorageBoundaryError::Changed),
@@ -195,8 +270,51 @@ impl StorageBoundaryLease {
             database_identity,
             writer,
         };
-        lease.validate()?;
+        if validate_sidecars {
+            lease.validate()?;
+        } else {
+            lease.validate_preflight()?;
+        }
         Ok(lease)
+    }
+
+    pub(crate) fn harden_sqlite_sidecars(&self) -> Result<(), StorageBoundaryError> {
+        if !self.writer {
+            return Err(StorageBoundaryError::PrivateStorageUnavailable);
+        }
+        #[cfg(not(unix))]
+        return Err(StorageBoundaryError::PrivateStorageUnavailable);
+        #[cfg(unix)]
+        {
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let mut name = self.database_name.clone();
+                name.push(suffix);
+                match self.data_directory.symlink_metadata(&name) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(_) => return Err(StorageBoundaryError::PrivateStorageUnavailable),
+                    Ok(metadata) => {
+                        let identity = cap_identity(&metadata);
+                        if metadata.file_type().is_symlink()
+                            || !metadata.is_file()
+                            || MetadataExt::nlink(&metadata) != 1
+                        {
+                            return Err(StorageBoundaryError::PrivateStorageUnavailable);
+                        }
+                        use cap_std::fs::MetadataExt as _;
+                        if metadata.uid() != rustix::process::geteuid().as_raw() {
+                            return Err(StorageBoundaryError::PrivateStorageUnavailable);
+                        }
+                        let file = open_existing_file(&self.data_directory, &name)?;
+                        validate_cap_file(&file, identity)?;
+                        use cap_std::fs::PermissionsExt;
+                        file.set_permissions(cap_std::fs::Permissions::from_mode(0o600))
+                            .map_err(|_| StorageBoundaryError::PrivateStorageUnavailable)?;
+                        validate_private_cap_file(&file, identity)?;
+                    }
+                }
+            }
+            self.validate()
+        }
     }
 
     fn validate_configuration_paths(
@@ -234,14 +352,8 @@ fn validate_optional_cap_sidecar(
     match metadata {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(StorageBoundaryError::Changed),
-        Ok(metadata)
-            if !metadata.file_type().is_symlink()
-                && metadata.is_file()
-                && MetadataExt::nlink(&metadata) == 1 =>
-        {
-            Ok(())
-        }
-        Ok(_) => Err(StorageBoundaryError::Changed),
+        Ok(metadata) if private_cap_file_metadata_is_valid(&metadata) => Ok(()),
+        Ok(_) => Err(StorageBoundaryError::PrivateStorageUnavailable),
     }
 }
 
@@ -251,15 +363,39 @@ fn validate_optional_std_sidecar(
     match metadata {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(StorageBoundaryError::Changed),
-        Ok(metadata)
-            if !metadata.file_type().is_symlink()
-                && metadata.is_file()
-                && MetadataExt::nlink(&metadata) == 1 =>
-        {
-            Ok(())
-        }
-        Ok(_) => Err(StorageBoundaryError::Changed),
+        Ok(metadata) if private_std_file_metadata_is_valid(&metadata) => Ok(()),
+        Ok(_) => Err(StorageBoundaryError::PrivateStorageUnavailable),
     }
+}
+
+#[cfg(unix)]
+fn private_cap_file_metadata_is_valid(metadata: &cap_std::fs::Metadata) -> bool {
+    use cap_std::fs::MetadataExt as _;
+    !metadata.file_type().is_symlink()
+        && metadata.is_file()
+        && MetadataExt::nlink(metadata) == 1
+        && metadata.uid() == rustix::process::geteuid().as_raw()
+        && metadata.mode() & 0o777 == 0o600
+}
+
+#[cfg(not(unix))]
+fn private_cap_file_metadata_is_valid(_: &cap_std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn private_std_file_metadata_is_valid(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    !metadata.file_type().is_symlink()
+        && metadata.is_file()
+        && MetadataExt::nlink(metadata) == 1
+        && metadata.uid() == rustix::process::geteuid().as_raw()
+        && metadata.mode() & 0o777 == 0o600
+}
+
+#[cfg(not(unix))]
+fn private_std_file_metadata_is_valid(_: &fs::Metadata) -> bool {
+    false
 }
 
 fn direct_child_name(parent: &Path, child: &Path) -> Result<OsString, StorageBoundaryError> {
@@ -273,6 +409,42 @@ fn direct_child_name(parent: &Path, child: &Path) -> Result<OsString, StorageBou
         .ok_or(StorageBoundaryError::Changed)
 }
 
+#[cfg(unix)]
+fn harden_fresh_empty_data_directory(path: &Path) -> Result<(), StorageBoundaryError> {
+    use cap_std::fs::{MetadataExt as _, PermissionsExt};
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| StorageBoundaryError::PrivateStorageUnavailable)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+    {
+        return Err(StorageBoundaryError::PrivateStorageUnavailable);
+    }
+    let identity = std_identity(&metadata);
+    let directory = Dir::open_ambient_dir(path, ambient_authority())
+        .map_err(|_| StorageBoundaryError::PrivateStorageUnavailable)?;
+    validate_cap_directory(&directory, identity)?;
+    let capability_metadata = directory
+        .dir_metadata()
+        .map_err(|_| StorageBoundaryError::PrivateStorageUnavailable)?;
+    if capability_metadata.uid() != rustix::process::geteuid().as_raw()
+        || directory
+            .entries()
+            .map_err(|_| StorageBoundaryError::PrivateStorageUnavailable)?
+            .next()
+            .is_some()
+    {
+        return Err(StorageBoundaryError::PrivateStorageUnavailable);
+    }
+    directory
+        .set_permissions(".", cap_std::fs::Permissions::from_mode(0o700))
+        .map_err(|_| StorageBoundaryError::PrivateStorageUnavailable)?;
+    validate_private_cap_directory(&directory, identity)?;
+    validate_private_std_directory(path, identity)
+}
+
 fn open_or_create_file(directory: &Dir, name: &OsStr) -> Result<File, StorageBoundaryError> {
     let mut options = OpenOptions::new();
     options
@@ -280,6 +452,8 @@ fn open_or_create_file(directory: &Dir, name: &OsStr) -> Result<File, StorageBou
         .write(true)
         .create(true)
         .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    cap_std::fs::OpenOptionsExt::mode(&mut options, 0o600);
     directory
         .open_with(name, &options)
         .map_err(|_| StorageBoundaryError::Changed)
@@ -304,6 +478,22 @@ fn validate_std_directory(path: &Path, expected: FileIdentity) -> Result<(), Sto
     Ok(())
 }
 
+#[cfg(unix)]
+fn validate_private_std_directory(
+    path: &Path,
+    expected: FileIdentity,
+) -> Result<(), StorageBoundaryError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    validate_std_directory(path, expected)?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| StorageBoundaryError::PrivateStorageUnavailable)?;
+    if metadata.uid() != rustix::process::geteuid().as_raw() || metadata.mode() & 0o777 != 0o700 {
+        return Err(StorageBoundaryError::PrivateStorageUnavailable);
+    }
+    Ok(())
+}
+
 fn validate_std_file(path: &Path, expected: FileIdentity) -> Result<(), StorageBoundaryError> {
     let metadata = fs::symlink_metadata(path).map_err(changed)?;
     if metadata.file_type().is_symlink()
@@ -311,6 +501,22 @@ fn validate_std_file(path: &Path, expected: FileIdentity) -> Result<(), StorageB
         || !std_identity(&metadata).same_single_link_file(expected)
     {
         return Err(StorageBoundaryError::Changed);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_private_std_file(
+    path: &Path,
+    expected: FileIdentity,
+) -> Result<(), StorageBoundaryError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    validate_std_file(path, expected)?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| StorageBoundaryError::PrivateStorageUnavailable)?;
+    if metadata.uid() != rustix::process::geteuid().as_raw() || metadata.mode() & 0o777 != 0o600 {
+        return Err(StorageBoundaryError::PrivateStorageUnavailable);
     }
     Ok(())
 }
@@ -332,6 +538,51 @@ fn validate_cap_file(file: &File, expected: FileIdentity) -> Result<(), StorageB
     let metadata = file.metadata().map_err(|_| StorageBoundaryError::Changed)?;
     if !metadata.is_file() || !cap_identity(&metadata).same_single_link_file(expected) {
         return Err(StorageBoundaryError::Changed);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_private_cap_directory(
+    directory: &Dir,
+    expected: FileIdentity,
+) -> Result<(), StorageBoundaryError> {
+    use cap_std::fs::MetadataExt as _;
+
+    validate_cap_directory(directory, expected)?;
+    let metadata = directory
+        .dir_metadata()
+        .map_err(|_| StorageBoundaryError::PrivateStorageUnavailable)?;
+    if metadata.uid() != rustix::process::geteuid().as_raw() || metadata.mode() & 0o777 != 0o700 {
+        return Err(StorageBoundaryError::PrivateStorageUnavailable);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_private_cap_file(
+    file: &File,
+    expected: FileIdentity,
+) -> Result<(), StorageBoundaryError> {
+    let metadata = file
+        .metadata()
+        .map_err(|_| StorageBoundaryError::PrivateStorageUnavailable)?;
+    validate_private_cap_file_metadata(&metadata, expected)
+}
+
+#[cfg(unix)]
+fn validate_private_cap_file_metadata(
+    metadata: &cap_std::fs::Metadata,
+    expected: FileIdentity,
+) -> Result<(), StorageBoundaryError> {
+    use cap_std::fs::MetadataExt as _;
+
+    if !metadata.is_file()
+        || !cap_identity(metadata).same_single_link_file(expected)
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(StorageBoundaryError::PrivateStorageUnavailable);
     }
     Ok(())
 }
@@ -444,6 +695,9 @@ fn changed(_: io::Error) -> StorageBoundaryError {
 mod tests {
     use std::fs;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use crate::StoreConfig;
 
     use super::StorageBoundaryLease;
@@ -456,11 +710,15 @@ mod tests {
         let sidecar = lease.data_path.join("synthetic.db-wal");
         let retained = lease.data_path.join("retained-sidecar");
         fs::write(&sidecar, b"old").unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
 
         lease
             .validate_optional_sidecar_with_hook("-wal", || {
                 fs::rename(&sidecar, &retained).unwrap();
                 fs::write(&sidecar, b"new").unwrap();
+                #[cfg(unix)]
+                fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
             })
             .unwrap();
     }

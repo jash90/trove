@@ -281,6 +281,7 @@ dependencies = [
 name = "clipboard-import-cli"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cap-fs-ext",
  "cap-std",
  "clap",
@@ -293,6 +294,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "zstd",
 ]
 
 [[package]]
@@ -319,6 +321,7 @@ dependencies = [
  "cap-std",
  "clipboard-core",
  "rusqlite",
+ "rustix",
  "tempfile",
  "thiserror",
  "tokio",

@@ -4,8 +4,9 @@ use clipboard_core::{
     CaptureInput, ContentFlags, ContentKind, EventFlags, RepresentationInput, SourceConfidence,
 };
 use clipboard_search::{
-    HistoryCursor, MAX_PREVIEW_BYTES, MAX_RANKED_CANDIDATES, RankingSignals, RankingWeights,
-    SearchRequest, SearchStoreExt, parse_query, rank_score,
+    HistoryCursor, MAX_APP_FILTER_BYTES, MAX_FTS_MATCH_BYTES, MAX_PREVIEW_BYTES,
+    MAX_RANKED_CANDIDATES, MAX_RAW_QUERY_BYTES, MAX_SEARCH_TERM_BYTES, MAX_SEARCH_TERMS,
+    RankingSignals, RankingWeights, SearchRequest, SearchStoreExt, parse_query, rank_score,
 };
 use clipboard_store::{StoreConfig, StoreHandle};
 
@@ -41,7 +42,138 @@ fn request(query: &str, limit: u32, cursor: Option<HistoryCursor>) -> SearchRequ
         query: query.to_owned(),
         limit,
         cursor,
+        include_do_not_index: false,
     }
+}
+
+#[test]
+fn query_limits_fail_before_secondary_search_allocations_with_stable_codes() {
+    assert!(parse_query(&" ".repeat(MAX_RAW_QUERY_BYTES)).is_ok());
+    let raw_error = match parse_query(&" ".repeat(MAX_RAW_QUERY_BYTES + 1)) {
+        Ok(_) => panic!("oversized raw query unexpectedly parsed"),
+        Err(error) => error,
+    };
+    assert_eq!(raw_error.code(), "query_too_long");
+
+    let app_at_limit = format!("app:{}", "ą".repeat(MAX_APP_FILTER_BYTES / 2));
+    assert_eq!(
+        parse_query(&app_at_limit)
+            .unwrap()
+            .filters
+            .app
+            .unwrap()
+            .len(),
+        MAX_APP_FILTER_BYTES
+    );
+    let app_over_limit = format!("app:{}", "ą".repeat(MAX_APP_FILTER_BYTES / 2 + 1));
+    let app_error = match parse_query(&app_over_limit) {
+        Ok(_) => panic!("oversized app filter unexpectedly parsed"),
+        Err(error) => error,
+    };
+    assert_eq!(app_error.code(), "app_filter_too_long");
+
+    let term_at_limit = "ą".repeat(MAX_SEARCH_TERM_BYTES / 2);
+    assert!(
+        clipboard_search::build_fts_match_expression(&term_at_limit)
+            .unwrap()
+            .len()
+            <= MAX_FTS_MATCH_BYTES
+    );
+    let term_over_limit = "ą".repeat(MAX_SEARCH_TERM_BYTES / 2 + 1);
+    assert_eq!(
+        clipboard_search::build_fts_match_expression(&term_over_limit)
+            .unwrap_err()
+            .code(),
+        "search_term_too_long"
+    );
+
+    let maximum_terms = std::iter::repeat_n("a", MAX_SEARCH_TERMS)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(clipboard_search::build_fts_match_expression(&maximum_terms).is_ok());
+    let too_many_terms = format!("{maximum_terms} a");
+    assert_eq!(
+        clipboard_search::build_fts_match_expression(&too_many_terms)
+            .unwrap_err()
+            .code(),
+        "too_many_search_terms"
+    );
+}
+
+#[test]
+fn serde_defaults_diagnostic_history_capability_to_false() {
+    let defaulted: SearchRequest = serde_json::from_value(serde_json::json!({
+        "query": "",
+        "limit": 10,
+        "cursor": null
+    }))
+    .unwrap();
+    assert!(!defaulted.include_do_not_index);
+
+    let enabled: SearchRequest = serde_json::from_value(serde_json::json!({
+        "query": "",
+        "limit": 10,
+        "cursor": null,
+        "includeDoNotIndex": true
+    }))
+    .unwrap();
+    assert!(enabled.include_do_not_index);
+}
+
+#[tokio::test]
+async fn non_indexable_content_is_hidden_from_default_history_but_available_diagnostically() {
+    let (_directory, store) = open_store();
+    let mut hidden = text_capture(
+        "synthetic diagnostic entry",
+        2_000,
+        "com.example.editor",
+        "Example Editor",
+        false,
+        1,
+    );
+    hidden.content_flags = ContentFlags::DO_NOT_INDEX;
+    store.ingest(hidden).await.unwrap();
+    store
+        .ingest(text_capture(
+            "synthetic visible entry",
+            1_000,
+            "com.example.editor",
+            "Example Editor",
+            false,
+            1,
+        ))
+        .await
+        .unwrap();
+
+    let recent = store.search(request("", 10, None)).unwrap();
+    assert_eq!(recent.items.len(), 1);
+    assert_eq!(recent.items[0].preview, "synthetic visible entry");
+
+    let mut diagnostic = request("type:text", 10, None);
+    diagnostic.include_do_not_index = true;
+    let diagnostic = store.search(diagnostic).unwrap();
+    assert_eq!(diagnostic.items.len(), 2);
+
+    let mut lexical = request("diagnostic", 10, None);
+    lexical.include_do_not_index = true;
+    assert!(store.search(lexical).unwrap().items.is_empty());
+}
+
+#[test]
+fn serde_entry_path_applies_query_and_filter_limits_before_search() {
+    let (_directory, store) = open_store();
+    let request: SearchRequest = serde_json::from_value(serde_json::json!({
+        "query": " ".repeat(MAX_RAW_QUERY_BYTES + 1),
+        "limit": 10,
+        "cursor": null
+    }))
+    .unwrap();
+    let error = match store.search(request) {
+        Ok(_) => panic!("oversized serde query unexpectedly searched"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "query_too_long");
+    assert!(!error.to_string().contains(&"x".repeat(32)));
 }
 
 fn open_store() -> (tempfile::TempDir, StoreHandle) {
@@ -396,7 +528,11 @@ async fn list_preview_is_bounded_original_text_and_does_not_read_cas() {
     let blob_relpath = store
         .with_reader(|connection| {
             connection.query_row(
-                "SELECT blob_relpath FROM content_representation WHERE content_id = ?1",
+                "SELECT rp.blob_relpath
+                 FROM raw_payload rp
+                 JOIN event_representation er ON er.raw_payload_id = rp.raw_payload_id
+                 JOIN history_event he ON he.event_id = er.event_id
+                 WHERE he.content_id = ?1 AND er.ordinal = 0",
                 [outcome.content_id],
                 |row| row.get::<_, String>(0),
             )

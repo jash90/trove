@@ -4,7 +4,9 @@ use image::{ImageFormat, ImageReader, Limits, imageops::FilterType};
 use thiserror::Error;
 
 pub const MAX_IMAGE_INPUT_BYTES: usize = 32 * 1024 * 1024;
-const MAX_IMAGE_DIMENSION: u32 = 16_384;
+pub const MAX_THUMBNAIL_DIMENSION: u32 = 320;
+pub const MAX_THUMBNAIL_PIXELS: u32 = MAX_THUMBNAIL_DIMENSION * MAX_THUMBNAIL_DIMENSION;
+pub const MAX_IMAGE_DIMENSION: u32 = 16_384;
 const MAX_IMAGE_ALLOCATION_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, Error)]
@@ -13,6 +15,8 @@ pub enum ImageError {
     InputTooLarge { actual: usize, max: usize },
     #[error("thumbnail size must be non-zero")]
     InvalidThumbnailSize,
+    #[error("thumbnail_output_too_large")]
+    OutputTooLarge,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -20,16 +24,18 @@ pub enum ImageError {
 }
 
 pub fn make_thumbnail(bytes: &[u8], size: u32) -> Result<Vec<u8>, ImageError> {
+    if size == 0 {
+        return Err(ImageError::InvalidThumbnailSize);
+    }
+    if size > MAX_THUMBNAIL_DIMENSION || size.saturating_mul(size) > MAX_THUMBNAIL_PIXELS {
+        return Err(ImageError::OutputTooLarge);
+    }
     if bytes.len() > MAX_IMAGE_INPUT_BYTES {
         return Err(ImageError::InputTooLarge {
             actual: bytes.len(),
             max: MAX_IMAGE_INPUT_BYTES,
         });
     }
-    if size == 0 {
-        return Err(ImageError::InvalidThumbnailSize);
-    }
-
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_IMAGE_DIMENSION);

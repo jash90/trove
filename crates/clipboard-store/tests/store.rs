@@ -8,7 +8,22 @@ use clipboard_store::{
     WRITER_QUEUE_CAPACITY, migrations,
 };
 
-use std::{fs, sync::Arc};
+use std::{
+    fs,
+    sync::{Arc, Barrier},
+    thread,
+};
+
+#[cfg(unix)]
+fn secure_existing_database(data_root: &std::path::Path, database: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(data_root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(database, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[cfg(not(unix))]
+fn secure_existing_database(_: &std::path::Path, _: &std::path::Path) {}
 
 fn text_capture(value: &str, captured_at_ms: i64) -> CaptureInput {
     CaptureInput {
@@ -107,6 +122,7 @@ fn exact_prior_pre_release_v1_schema_is_rejected_with_a_stable_error() {
         .unwrap();
     connection.pragma_update(None, "user_version", 1).unwrap();
     drop(connection);
+    secure_existing_database(directory.path(), &database_path);
 
     let error = match StoreHandle::open(StoreConfig::new(&database_path)) {
         Ok(_) => panic!("the prior pre-release schema unexpectedly opened"),
@@ -132,6 +148,7 @@ fn immediately_prior_pre_release_schema_revision_is_rejected() {
         .unwrap();
     connection.pragma_update(None, "user_version", 1).unwrap();
     drop(connection);
+    secure_existing_database(directory.path(), &database_path);
 
     let error = match StoreHandle::open(StoreConfig::new(&database_path)) {
         Ok(_) => panic!("the immediately prior pre-release schema unexpectedly opened"),
@@ -153,6 +170,7 @@ fn exact_c2be0c9_pre_release_schema_revision_is_rejected() {
         .unwrap();
     connection.pragma_update(None, "user_version", 1).unwrap();
     drop(connection);
+    secure_existing_database(directory.path(), &database_path);
 
     let error = match StoreHandle::open(StoreConfig::new(&database_path)) {
         Ok(_) => panic!("the c2be0c9 pre-release schema unexpectedly opened"),
@@ -166,6 +184,65 @@ fn exact_c2be0c9_pre_release_schema_revision_is_rejected() {
     );
     assert!(!error.to_string().contains("history.sqlite"));
     assert!(!error.to_string().contains("revision"));
+}
+
+#[test]
+fn exact_revision_four_schema_is_rejected_by_writer_and_read_only_opens() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("history.sqlite");
+    let blob_root = database_path.with_extension("blobs");
+    std::fs::create_dir(&blob_root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&blob_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(include_str!("fixtures/001_9021c70.sql"))
+        .unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+    secure_existing_database(directory.path(), &database_path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&database_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let database_path = Arc::new(database_path);
+    let release = Arc::new(Barrier::new(5));
+    let mut openers = Vec::new();
+    for _ in 0..4 {
+        let database_path = Arc::clone(&database_path);
+        let release = Arc::clone(&release);
+        openers.push(thread::spawn(move || {
+            release.wait();
+            match StoreHandle::open(StoreConfig::new(database_path.as_path())) {
+                Ok(_) => panic!("revision four unexpectedly opened for writing"),
+                Err(error) => error,
+            }
+        }));
+    }
+    release.wait();
+    let writer_errors = openers
+        .into_iter()
+        .map(|opener| opener.join().unwrap())
+        .collect::<Vec<_>>();
+    let reader_error = match ReadOnlyStore::open_existing(StoreConfig::new(database_path.as_path()))
+    {
+        Ok(_) => panic!("revision four unexpectedly opened read-only"),
+        Err(error) => error,
+    };
+    for error in writer_errors.into_iter().chain([reader_error]) {
+        assert!(matches!(error, StoreError::IncompatibleSchema));
+        assert_eq!(
+            error.to_string(),
+            "database schema is incompatible; development reset required"
+        );
+        assert!(!error.to_string().contains("history.sqlite"));
+        assert!(!error.to_string().contains("revision"));
+    }
 }
 
 #[test]
@@ -326,7 +403,12 @@ async fn ingest_uses_inline_zstd_for_a_moderately_incompressible_payload() {
         .with_reader(|connection| {
             let (storage_kind, original_size, stored_size, compressed) = connection.query_row(
                 "SELECT storage_kind, original_byte_size, stored_byte_size, inline_payload
-                 FROM content_representation WHERE content_id = ?1",
+                 FROM history_event he
+                 JOIN event_representation er
+                   ON er.event_id = he.event_id AND er.ordinal = 0
+                 JOIN raw_payload rp ON rp.raw_payload_id = er.raw_payload_id
+                 WHERE he.content_id = ?1
+                 ORDER BY he.event_id DESC LIMIT 1",
                 [outcome.content_id],
                 |row| {
                     Ok::<_, rusqlite::Error>((
@@ -714,30 +796,33 @@ async fn ingest_persists_a_missing_primary_without_inventing_payload_bytes() {
     let (byte_size, storage_kind, inline_payload, original_size, stored_size) = store
         .with_reader(|connection| {
             connection.query_row(
-                "SELECT content.byte_size, content_representation.storage_kind,
-                        content_representation.inline_payload,
-                        content_representation.original_byte_size,
-                        content_representation.stored_byte_size
-                 FROM content JOIN content_representation USING(content_id)
-                 WHERE content.content_id = ?1",
+                "SELECT c.byte_size, rp.storage_kind, rp.inline_payload,
+                        rp.original_byte_size, rp.stored_byte_size
+                 FROM content c
+                 JOIN history_event he ON he.content_id = c.content_id
+                 JOIN event_representation er
+                   ON er.event_id = he.event_id AND er.ordinal = 0
+                 LEFT JOIN raw_payload rp ON rp.raw_payload_id = er.raw_payload_id
+                 WHERE c.content_id = ?1
+                 ORDER BY he.event_id DESC LIMIT 1",
                 [first.content_id],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(1)?,
                         row.get::<_, Option<Vec<u8>>>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
                     ))
                 },
             )
         })
         .unwrap();
     assert_eq!(byte_size, 0);
-    assert_eq!(storage_kind, "missing");
+    assert_eq!(storage_kind, None);
     assert_eq!(inline_payload, None);
-    assert_eq!(original_size, 0);
-    assert_eq!(stored_size, 0);
+    assert_eq!(original_size, None);
+    assert_eq!(stored_size, None);
 }
 
 #[tokio::test]

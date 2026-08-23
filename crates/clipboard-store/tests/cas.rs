@@ -1,12 +1,13 @@
 use std::{
-    collections::BTreeSet,
     fs,
     sync::{Arc, Barrier},
     thread,
 };
 
 use clipboard_core::ContentKind;
-use clipboard_store::{CasBlob, CasError, CasStore, StoreConfig, StoreError, classify_payload};
+use clipboard_store::{
+    CasBlob, CasError, CasStore, GcStepBudget, StoreConfig, StoreError, classify_payload,
+};
 
 fn test_cas() -> (tempfile::TempDir, CasStore) {
     let directory = tempfile::tempdir().unwrap();
@@ -119,27 +120,38 @@ fn concurrent_puts_are_idempotent() {
 }
 
 #[test]
-fn remove_orphans_only_removes_unreferenced_valid_blobs() {
+fn gc_session_only_removes_unreferenced_valid_blobs() {
     let (_directory, cas) = test_cas();
     let live = cas.put(b"live").unwrap();
     let orphan = cas.put(b"orphan").unwrap();
 
-    let live_paths = BTreeSet::from([live.relpath.clone(), "../not-a-blob".to_owned()]);
-    cas.remove_orphans(&live_paths).unwrap();
+    let mut session = cas.start_gc().unwrap();
+    loop {
+        let step = session
+            .step(GcStepBudget::new(2), |relpath| Ok(relpath == live.relpath))
+            .unwrap();
+        if step.complete {
+            break;
+        }
+    }
 
     assert_eq!(cas.read(&live.relpath).unwrap(), b"live");
     assert!(cas.read(&orphan.relpath).is_err());
 }
 
 #[test]
-fn remove_orphans_rejects_corrupt_blobs() {
+fn gc_session_preserves_uncertain_corrupt_blobs() {
     let (_directory, cas) = test_cas();
     let blob = cas.put(b"orphan").unwrap();
     fs::write(cas.root().join(&blob.relpath), b"corrupt").unwrap();
 
-    let error = cas.remove_orphans(&BTreeSet::new()).unwrap_err();
-
-    assert_eq!(error.to_string(), "CAS blob integrity check failed");
+    let mut session = cas.start_gc().unwrap();
+    while !session
+        .step(GcStepBudget::new(2), |_| Ok(false))
+        .unwrap()
+        .complete
+    {}
+    assert!(cas.root().join(blob.relpath).exists());
 }
 
 #[test]
@@ -163,7 +175,12 @@ fn payload_classifier_uses_the_three_storage_tiers() {
 
 #[cfg(unix)]
 mod unix_symlink_tests {
-    use std::{fs, os::unix::fs::symlink};
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt, symlink},
+    };
+
+    use clipboard_store::GcStepBudget;
 
     use super::test_cas;
 
@@ -184,6 +201,7 @@ mod unix_symlink_tests {
     fn put_rejects_a_symlinked_temporary_directory() {
         let (directory, cas) = test_cas();
         fs::create_dir_all(cas.root()).unwrap();
+        fs::set_permissions(cas.root(), fs::Permissions::from_mode(0o700)).unwrap();
         let external = directory.path().join("external");
         fs::create_dir(&external).unwrap();
         symlink(&external, cas.root().join(".tmp")).unwrap();
@@ -199,6 +217,7 @@ mod unix_symlink_tests {
         let (directory, cas) = test_cas();
         let hash = blake3::hash(b"payload").to_hex().to_string();
         fs::create_dir_all(cas.root()).unwrap();
+        fs::set_permissions(cas.root(), fs::Permissions::from_mode(0o700)).unwrap();
         let external = directory.path().join("external");
         fs::create_dir(&external).unwrap();
         symlink(&external, cas.root().join(&hash[..2])).unwrap();
@@ -234,9 +253,12 @@ mod unix_symlink_tests {
         fs::write(&external, b"must remain").unwrap();
         symlink(&external, cas.root().join(&blob.relpath)).unwrap();
 
-        let error = cas.remove_orphans(&Default::default()).unwrap_err();
-
-        assert_eq!(error.to_string(), "CAS filesystem boundary is invalid");
+        let mut session = cas.start_gc().unwrap();
+        while !session
+            .step(GcStepBudget::new(2), |_| Ok(false))
+            .unwrap()
+            .complete
+        {}
         assert_eq!(fs::read(external).unwrap(), b"must remain");
     }
 }

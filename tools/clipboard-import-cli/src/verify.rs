@@ -1,14 +1,15 @@
 use std::{
     collections::BTreeMap,
-    fs, io,
+    fs,
+    io::{self, Cursor, Read},
     path::{Path, PathBuf},
     sync::Arc,
     thread,
     time::{Duration, Instant},
 };
 
-use clipboard_core::ContentFlags;
-use clipboard_store::{CasStore, ReadOnlyStore, StorageBoundaryLease};
+use clipboard_core::{ContentFlags, ContentKind, canonical_bytes, content_hash};
+use clipboard_store::{CasStore, MAX_CAS_OBJECT_BYTES, ReadOnlyStore, StorageBoundaryLease};
 use rusqlite::{
     Connection, MAIN_DB, OpenFlags,
     backup::{Backup, StepResult},
@@ -31,6 +32,7 @@ const FTS_BACKUP_DEADLINE: Duration = Duration::from_secs(120);
 const FTS_BACKUP_INITIAL_BACKOFF: Duration = Duration::from_millis(5);
 const FTS_BACKUP_MAX_BACKOFF: Duration = Duration::from_secs(1);
 const FTS_BACKUP_PAGES_PER_STEP: i32 = 256;
+const VERIFICATION_REFERENCE_PAGE_SIZE: i64 = 256;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,10 +90,9 @@ pub(crate) fn verify(data_dir: &Path, expect_records: u64) -> Result<VerifyOutpu
     let store = ReadOnlyStore::open_existing(config.with_storage_boundary(boundary))
         .map_err(store_failure)?;
     let cas = store.cas_store().map_err(store_failure)?;
-    let mut snapshot = store
-        .with_reader(read_verification_snapshot)
+    let snapshot = store
+        .with_reader(|connection| read_verification_snapshot(connection, &cas))
         .map_err(store_failure)?;
-    snapshot.blob_ok = blob_references_are_coherent(&cas, &snapshot.blob_references);
     verification_output(snapshot, expect_records)
 }
 
@@ -126,14 +127,7 @@ struct VerificationSnapshot {
     run_status_ok: bool,
     logical_ok: bool,
     blob_ok: bool,
-    blob_references: Vec<BlobReference>,
     fts_ok: bool,
-}
-
-struct BlobReference {
-    relpath: String,
-    stored_byte_size: i64,
-    original_byte_size: Option<i64>,
 }
 
 struct RawKindCount {
@@ -153,18 +147,39 @@ struct RawSourceSummary {
     declared_imported_records: i64,
 }
 
-fn read_verification_snapshot(connection: &Connection) -> rusqlite::Result<VerificationSnapshot> {
+fn read_verification_snapshot(
+    connection: &Connection,
+    cas: &CasStore,
+) -> rusqlite::Result<VerificationSnapshot> {
+    let (mut snapshot, stable) = read_stable_snapshot(connection, |connection| {
+        read_verification_snapshot_inner(connection, cas)
+    })?;
+    snapshot.logical_ok &= stable;
+    Ok(snapshot)
+}
+
+fn read_stable_snapshot<T>(
+    connection: &Connection,
+    read: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+) -> rusqlite::Result<(T, bool)> {
+    let data_version_before =
+        connection.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
     connection.execute_batch("BEGIN DEFERRED")?;
-    let snapshot = read_verification_snapshot_inner(connection);
+    let snapshot = read(connection);
     let rollback = connection.execute_batch("ROLLBACK");
     match (snapshot, rollback) {
-        (Ok(snapshot), Ok(())) => Ok(snapshot),
+        (Ok(snapshot), Ok(())) => {
+            let data_version_after =
+                connection.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
+            Ok((snapshot, data_version_before == data_version_after))
+        }
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
 }
 
 fn read_verification_snapshot_inner(
     connection: &Connection,
+    cas: &CasStore,
 ) -> rusqlite::Result<VerificationSnapshot> {
     let physical_content_count =
         connection.query_row("SELECT count(*) FROM content", [], |row| row.get(0))?;
@@ -189,8 +204,9 @@ fn read_verification_snapshot_inner(
     let kinds = read_kind_counts(connection, missing_mask)?;
     let sources = read_latest_sources(connection)?;
     let image_counts = read_source_image_counts(connection, missing_mask)?;
-    let logical_ok = logical_relations_are_coherent(connection, event_count)?;
-    let blob_references = read_blob_references(connection)?;
+    let relations_ok = logical_relations_are_coherent(connection, event_count)?;
+    let audit = semantic_storage_is_coherent(connection, cas)?;
+    let logical_ok = relations_ok && audit.logical_ok;
     let integrity_ok = connection
         .query_row("PRAGMA integrity_check(1)", [], |row| {
             row.get::<_, String>(0)
@@ -208,48 +224,390 @@ fn read_verification_snapshot_inner(
         integrity_ok,
         run_status_ok,
         logical_ok,
-        blob_ok: false,
-        blob_references,
+        blob_ok: audit.blob_ok,
         fts_ok,
     })
 }
 
-fn read_blob_references(connection: &Connection) -> rusqlite::Result<Vec<BlobReference>> {
-    let mut statement = connection.prepare(
-        "SELECT blob_relpath, stored_byte_size, original_byte_size
-         FROM content_representation
-         WHERE storage_kind = 'cas'
-         UNION ALL
-         SELECT blob_relpath, byte_size, NULL
-         FROM artifact",
-    )?;
-    statement
-        .query_map([], |row| {
-            Ok(BlobReference {
-                relpath: row.get(0)?,
-                stored_byte_size: row.get(1)?,
-                original_byte_size: row.get(2)?,
-            })
-        })?
-        .collect()
+#[derive(Clone, Copy)]
+struct AuditStatus {
+    logical_ok: bool,
+    blob_ok: bool,
 }
 
-fn blob_references_are_coherent(cas: &CasStore, references: &[BlobReference]) -> bool {
-    references.iter().all(|reference| {
-        let Ok(bytes) = cas.read(&reference.relpath) else {
-            return false;
-        };
-        let Ok(actual_size) = u64::try_from(bytes.len()) else {
-            return false;
-        };
-        let Ok(stored_byte_size) = u64::try_from(reference.stored_byte_size) else {
-            return false;
-        };
-        let original_matches = reference.original_byte_size.is_none_or(|size| {
-            u64::try_from(size).is_ok_and(|original_byte_size| original_byte_size == actual_size)
-        });
-        stored_byte_size == actual_size && original_matches
+impl AuditStatus {
+    fn healthy() -> Self {
+        Self {
+            logical_ok: true,
+            blob_ok: true,
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.logical_ok &= other.logical_ok;
+        self.blob_ok &= other.blob_ok;
+    }
+}
+
+fn semantic_storage_is_coherent(
+    connection: &Connection,
+    cas: &CasStore,
+) -> rusqlite::Result<AuditStatus> {
+    let shape_ok = connection.query_row(
+        "SELECT
+           NOT EXISTS(
+             SELECT 1 FROM history_event he
+             WHERE NOT EXISTS(
+               SELECT 1 FROM event_representation er
+               WHERE er.event_id = he.event_id AND er.ordinal = 0
+             )
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM event_representation
+             GROUP BY event_id
+             HAVING min(ordinal) != 0 OR max(ordinal) + 1 != count(*)
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM raw_payload rp
+             WHERE NOT EXISTS(
+               SELECT 1 FROM event_representation er
+               WHERE er.raw_payload_id = rp.raw_payload_id
+             )
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM content c
+             WHERE NOT EXISTS(
+               SELECT 1 FROM history_event he WHERE he.content_id = c.content_id
+             )
+           )
+           AND NOT EXISTS(
+             SELECT 1
+             FROM event_representation er
+             JOIN history_event he ON he.event_id = er.event_id
+             JOIN content c ON c.content_id = he.content_id
+             JOIN raw_payload rp ON rp.raw_payload_id = er.raw_payload_id
+             WHERE (c.kind IN ('image', 'file') AND rp.storage_kind != 'cas')
+                OR (c.kind NOT IN ('image', 'file') AND (
+                     (rp.original_byte_size < 4096 AND rp.storage_kind != 'inline')
+                  OR (rp.original_byte_size BETWEEN 4096 AND 262144
+                      AND rp.storage_kind != 'inline_zstd')
+                  OR (rp.original_byte_size > 262144 AND rp.storage_kind != 'cas')
+                ))
+           )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let mut status = AuditStatus {
+        logical_ok: shape_ok,
+        blob_ok: true,
+    };
+    status.merge(audit_raw_payload_pages(connection, cas)?);
+    status.merge(audit_event_primary_pages(connection, cas)?);
+    status.merge(audit_artifact_pages(connection, cas)?);
+    Ok(status)
+}
+
+fn audit_raw_payload_pages(
+    connection: &Connection,
+    cas: &CasStore,
+) -> rusqlite::Result<AuditStatus> {
+    let mut status = AuditStatus::healthy();
+    let mut last_id = 0_i64;
+    loop {
+        let mut statement = connection.prepare(
+            "SELECT raw_payload_id, raw_digest, storage_kind, inline_payload, blob_relpath,
+                    original_byte_size, stored_byte_size
+             FROM raw_payload
+             WHERE raw_payload_id > ?1
+             ORDER BY raw_payload_id
+             LIMIT ?2",
+        )?;
+        let mut rows =
+            statement.query(rusqlite::params![last_id, VERIFICATION_REFERENCE_PAGE_SIZE])?;
+        let mut page_entries = 0_i64;
+        while let Some(row) = rows.next()? {
+            last_id = row.get(0)?;
+            page_entries += 1;
+            let raw_digest = row.get::<_, Vec<u8>>(1)?;
+            let storage_kind = row.get::<_, String>(2)?;
+            let inline_payload = row.get::<_, Option<Vec<u8>>>(3)?;
+            let blob_relpath = row.get::<_, Option<String>>(4)?;
+            let original_size = row.get::<_, i64>(5)?;
+            let stored_size = row.get::<_, i64>(6)?;
+            let Some(original_size) = valid_object_size(original_size) else {
+                status.logical_ok = false;
+                continue;
+            };
+            let Some(stored_size) = valid_object_size(stored_size) else {
+                status.logical_ok = false;
+                continue;
+            };
+            match storage_kind.as_str() {
+                "inline" => {
+                    let valid = blob_relpath.is_none()
+                        && original_size < 4 * 1024
+                        && inline_payload.as_ref().is_some_and(|bytes| {
+                            bytes.len() == original_size
+                                && bytes.len() == stored_size
+                                && raw_digest.as_slice() == blake3::hash(bytes).as_bytes()
+                        });
+                    status.logical_ok &= valid;
+                }
+                "inline_zstd" => {
+                    let decoded = inline_payload.as_deref().and_then(|bytes| {
+                        (blob_relpath.is_none()
+                            && (4 * 1024..=256 * 1024).contains(&original_size)
+                            && bytes.len() == stored_size)
+                            .then(|| decode_exact_zstd(bytes, original_size))
+                            .flatten()
+                    });
+                    status.logical_ok &= decoded.as_ref().is_some_and(|bytes| {
+                        raw_digest.as_slice() == blake3::hash(bytes).as_bytes()
+                    });
+                }
+                "cas" => {
+                    let valid_shape = inline_payload.is_none()
+                        && original_size == stored_size
+                        && blob_relpath
+                            .as_ref()
+                            .is_some_and(|relpath| digest_matches_relpath(&raw_digest, relpath));
+                    let valid_blob = valid_shape
+                        && blob_relpath.as_ref().is_some_and(|relpath| {
+                            cas.verify(relpath, original_size as u64).is_ok()
+                        });
+                    status.logical_ok &= valid_blob;
+                    status.blob_ok &= valid_blob;
+                }
+                _ => status.logical_ok = false,
+            }
+        }
+        if page_entries < VERIFICATION_REFERENCE_PAGE_SIZE {
+            break;
+        }
+    }
+    Ok(status)
+}
+
+fn audit_event_primary_pages(
+    connection: &Connection,
+    cas: &CasStore,
+) -> rusqlite::Result<AuditStatus> {
+    let mut status = AuditStatus::healthy();
+    let mut last_event_id = 0_i64;
+    loop {
+        let mut statement = connection.prepare(
+            "SELECT he.event_id, c.kind, c.primary_mime, c.content_hash, c.byte_size, c.flags,
+                    er.raw_payload_id, er.missing_ref, rp.storage_kind, rp.inline_payload,
+                    rp.blob_relpath, rp.original_byte_size, rp.stored_byte_size
+             FROM history_event he
+             JOIN content c ON c.content_id = he.content_id
+             LEFT JOIN event_representation er
+               ON er.event_id = he.event_id AND er.ordinal = 0
+             LEFT JOIN raw_payload rp ON rp.raw_payload_id = er.raw_payload_id
+             WHERE he.event_id > ?1
+             ORDER BY he.event_id
+             LIMIT ?2",
+        )?;
+        let mut rows = statement.query(rusqlite::params![
+            last_event_id,
+            VERIFICATION_REFERENCE_PAGE_SIZE
+        ])?;
+        let mut page_entries = 0_i64;
+        while let Some(row) = rows.next()? {
+            last_event_id = row.get(0)?;
+            page_entries += 1;
+            let kind = parse_content_kind(&row.get::<_, String>(1)?);
+            let primary_mime = row.get::<_, String>(2)?;
+            let stored_content_hash = row.get::<_, Vec<u8>>(3)?;
+            let content_size = row.get::<_, i64>(4)?;
+            let flags = row.get::<_, i64>(5)?;
+            let raw_payload_id = row.get::<_, Option<i64>>(6)?;
+            let missing_ref = row.get::<_, Option<String>>(7)?;
+            let Some(kind) = kind else {
+                status.logical_ok = false;
+                continue;
+            };
+            let Some(flags) = valid_content_flags(flags) else {
+                status.logical_ok = false;
+                continue;
+            };
+            if raw_payload_id.is_none() {
+                let valid = missing_ref
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && flags.contains(ContentFlags::MISSING_PAYLOAD)
+                    && content_size == 0
+                    && stored_content_hash.as_slice()
+                        == missing_content_hash(
+                            kind,
+                            &primary_mime,
+                            missing_ref.as_deref().unwrap(),
+                        );
+                status.logical_ok &= valid;
+                continue;
+            }
+            if missing_ref.is_some() || flags.contains(ContentFlags::MISSING_PAYLOAD) {
+                status.logical_ok = false;
+                continue;
+            }
+            let storage_kind = row.get::<_, Option<String>>(8)?;
+            let inline_payload = row.get::<_, Option<Vec<u8>>>(9)?;
+            let blob_relpath = row.get::<_, Option<String>>(10)?;
+            let original_size = row.get::<_, Option<i64>>(11)?;
+            let stored_size = row.get::<_, Option<i64>>(12)?;
+            let Some(bytes) = primary_payload_bytes(
+                cas,
+                storage_kind.as_deref(),
+                inline_payload.as_deref(),
+                blob_relpath.as_deref(),
+                original_size,
+                stored_size,
+            ) else {
+                status.logical_ok = false;
+                if storage_kind.as_deref() == Some("cas") {
+                    status.blob_ok = false;
+                }
+                continue;
+            };
+            let canonical_size = canonical_bytes(kind, &bytes).len();
+            let valid = usize::try_from(content_size).ok() == Some(canonical_size)
+                && stored_content_hash.as_slice() == content_hash(kind, &primary_mime, &bytes);
+            status.logical_ok &= valid;
+        }
+        if page_entries < VERIFICATION_REFERENCE_PAGE_SIZE {
+            break;
+        }
+    }
+    Ok(status)
+}
+
+fn audit_artifact_pages(connection: &Connection, cas: &CasStore) -> rusqlite::Result<AuditStatus> {
+    let mut status = AuditStatus::healthy();
+    let mut last_id = 0_i64;
+    loop {
+        let mut statement = connection.prepare(
+            "SELECT artifact_id, blob_relpath, byte_size, raw_digest
+             FROM artifact
+             WHERE artifact_id > ?1
+             ORDER BY artifact_id
+             LIMIT ?2",
+        )?;
+        let mut rows =
+            statement.query(rusqlite::params![last_id, VERIFICATION_REFERENCE_PAGE_SIZE])?;
+        let mut page_entries = 0_i64;
+        while let Some(row) = rows.next()? {
+            last_id = row.get(0)?;
+            page_entries += 1;
+            let relpath = row.get::<_, String>(1)?;
+            let size = row.get::<_, i64>(2)?;
+            let digest = row.get::<_, Vec<u8>>(3)?;
+            let valid = valid_object_size(size).is_some_and(|size| {
+                digest_matches_relpath(&digest, &relpath)
+                    && cas.verify(&relpath, size as u64).is_ok()
+            });
+            status.logical_ok &= valid;
+            status.blob_ok &= valid;
+        }
+        if page_entries < VERIFICATION_REFERENCE_PAGE_SIZE {
+            break;
+        }
+    }
+    Ok(status)
+}
+
+fn valid_object_size(size: i64) -> Option<usize> {
+    usize::try_from(size)
+        .ok()
+        .filter(|size| *size <= MAX_CAS_OBJECT_BYTES)
+}
+
+fn decode_exact_zstd(payload: &[u8], expected_size: usize) -> Option<Vec<u8>> {
+    let cursor = Cursor::new(payload);
+    let mut decoder = zstd::stream::read::Decoder::with_buffer(cursor)
+        .ok()?
+        .single_frame();
+    let mut decoded = Vec::with_capacity(expected_size);
+    decoder
+        .by_ref()
+        .take((expected_size as u64).saturating_add(1))
+        .read_to_end(&mut decoded)
+        .ok()?;
+    let consumed = decoder.finish().position();
+    (decoded.len() == expected_size && consumed == payload.len() as u64).then_some(decoded)
+}
+
+fn primary_payload_bytes(
+    cas: &CasStore,
+    storage_kind: Option<&str>,
+    inline_payload: Option<&[u8]>,
+    blob_relpath: Option<&str>,
+    original_size: Option<i64>,
+    stored_size: Option<i64>,
+) -> Option<Vec<u8>> {
+    let original_size = valid_object_size(original_size?)?;
+    let stored_size = valid_object_size(stored_size?)?;
+    match storage_kind? {
+        "inline" if blob_relpath.is_none() && original_size < 4 * 1024 => {
+            let bytes = inline_payload?;
+            (bytes.len() == original_size && stored_size == original_size).then(|| bytes.to_vec())
+        }
+        "inline_zstd"
+            if blob_relpath.is_none() && (4 * 1024..=256 * 1024).contains(&original_size) =>
+        {
+            let payload = inline_payload?;
+            (payload.len() == stored_size)
+                .then(|| decode_exact_zstd(payload, original_size))
+                .flatten()
+        }
+        "cas" if inline_payload.is_none() && original_size == stored_size => {
+            let relpath = blob_relpath?;
+            cas.verify(relpath, original_size as u64).ok()?;
+            cas.read(relpath).ok()
+        }
+        _ => None,
+    }
+}
+
+fn digest_matches_relpath(digest: &[u8], relpath: &str) -> bool {
+    if digest.len() != 32 || relpath.len() != 67 || relpath.as_bytes().get(2) != Some(&b'/') {
+        return false;
+    }
+    let encoded = &relpath[3..];
+    digest.iter().enumerate().all(|(index, byte)| {
+        u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16) == Ok(*byte)
     })
+}
+
+fn parse_content_kind(value: &str) -> Option<ContentKind> {
+    match value {
+        "text" => Some(ContentKind::Text),
+        "link" => Some(ContentKind::Link),
+        "image" => Some(ContentKind::Image),
+        "file" => Some(ContentKind::File),
+        "color" => Some(ContentKind::Color),
+        "code" => Some(ContentKind::Code),
+        "html" => Some(ContentKind::Html),
+        _ => None,
+    }
+}
+
+fn valid_content_flags(value: i64) -> Option<ContentFlags> {
+    let bits = u32::try_from(value).ok()?;
+    ContentFlags::from_bits(bits)
+}
+
+fn missing_content_hash(kind: ContentKind, primary_mime: &str, missing_ref: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"clipboard-store.missing-primary-v1");
+    for component in [
+        kind.as_str().as_bytes(),
+        primary_mime.as_bytes(),
+        missing_ref.as_bytes(),
+    ] {
+        hasher.update(&(component.len() as u64).to_be_bytes());
+        hasher.update(component);
+    }
+    *hasher.finalize().as_bytes()
 }
 
 fn read_kind_counts(
@@ -932,8 +1290,37 @@ mod tests {
 
     use super::{
         BackupProgress, BackupStep, FtsScratchError, FtsScratchPolicy, ScratchEvent,
-        fts_is_coherent_with_policy, fts_scratch_check_with_cleanup, run_backup_loop,
+        fts_is_coherent_with_policy, fts_scratch_check_with_cleanup, read_stable_snapshot,
+        run_backup_loop,
     };
+
+    #[test]
+    fn changing_database_version_marks_a_verification_snapshot_unstable() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("synthetic.db");
+        let setup = Connection::open(&database).unwrap();
+        setup
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE synthetic(value INTEGER NOT NULL);
+                 INSERT INTO synthetic(value) VALUES (1);",
+            )
+            .unwrap();
+        drop(setup);
+        let reader = Connection::open(&database).unwrap();
+        let modifier = Connection::open(&database).unwrap();
+
+        let (_, stable) = read_stable_snapshot(&reader, |connection| {
+            connection.query_row("SELECT count(*) FROM synthetic", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+            modifier.execute("INSERT INTO synthetic(value) VALUES (2)", [])?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(!stable);
+    }
 
     fn read_only_fixture(data_dir: &Path) -> Connection {
         read_only_fixture_with_unindexed_document(data_dir, false)

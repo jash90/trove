@@ -142,13 +142,162 @@ fn first_cas_blob_path(data_dir: &Path) -> PathBuf {
     let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
     let relpath: String = connection
         .query_row(
-            "SELECT blob_relpath FROM content_representation
-             WHERE storage_kind = 'cas' ORDER BY representation_id LIMIT 1",
+            "SELECT blob_relpath FROM raw_payload
+             WHERE storage_kind = 'cas' ORDER BY raw_payload_id LIMIT 1",
             [],
             |row| row.get(0),
         )
         .unwrap();
     data_dir.join("blobs").join(relpath)
+}
+
+#[test]
+fn verify_audits_primary_representation_presence_and_content_ownership() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    connection
+        .execute(
+            "DELETE FROM event_representation
+             WHERE event_id = (SELECT min(event_id) FROM history_event) AND ordinal = 0",
+            [],
+        )
+        .unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "logicalStatus");
+}
+
+#[test]
+fn verify_audits_inline_raw_digest_and_domain_content_hash() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    let raw_payload_id: i64 = connection
+        .query_row(
+            "SELECT raw_payload_id FROM raw_payload WHERE storage_kind = 'inline' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE raw_payload SET inline_payload = zeroblob(original_byte_size)
+             WHERE raw_payload_id = ?1",
+            [raw_payload_id],
+        )
+        .unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "logicalStatus");
+}
+
+#[test]
+fn verify_audits_content_size_hash_and_flags() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE content
+             SET byte_size = byte_size + 1,
+                 content_hash = zeroblob(32),
+                 flags = flags | ?1
+             WHERE content_id = (SELECT min(content_id) FROM content)",
+            [i64::from(
+                clipboard_core::ContentFlags::MISSING_PAYLOAD.bits(),
+            )],
+        )
+        .unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "logicalStatus");
+}
+
+#[test]
+fn verify_rejects_zstd_trailing_data_and_declared_size_bombs() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let raycast = sandbox.path().join("synthetic-raycast-zstd");
+    let supercmd = sandbox.path().join("synthetic-supercmd-zstd");
+    let data_dir = sandbox.path().join("synthetic-data-zstd");
+    fs::create_dir(&raycast).unwrap();
+    fs::create_dir(&supercmd).unwrap();
+    fs::write(
+        raycast.join("clipboard.json"),
+        serde_json::to_vec(&json!([{
+            "createdAt": "2026-08-22T12:00:00Z",
+            "modifiedAt": "2026-08-22T12:00:00Z",
+            "category": "text",
+            "copyCount": 1,
+            "text": "z".repeat(5_000)
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        supercmd.join("clipboard.json"),
+        serde_json::to_vec(&json!([{
+            "copied_at": "2026-08-22T12:00:01Z",
+            "type": "text",
+            "text": "synthetic companion",
+            "has_image": false
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(run_import(&raycast, &data_dir).status.success());
+    assert!(run_import(&supercmd, &data_dir).status.success());
+    assert!(run_verify(&data_dir, 2).status.success());
+
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE raw_payload
+             SET inline_payload = CAST(inline_payload || x'00' AS BLOB),
+                 stored_byte_size = stored_byte_size + 1,
+                 original_byte_size = 4096
+             WHERE storage_kind = 'inline_zstd'",
+            [],
+        )
+        .unwrap();
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "logicalStatus");
+}
+
+#[test]
+fn verify_pages_more_than_256_blob_references_without_collecting_them() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let cas = CasStore::new(data_dir.join("blobs"));
+    let blob = cas.put(b"synthetic shared artifact").unwrap();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    let content_id: i64 = connection
+        .query_row("SELECT min(content_id) FROM content", [], |row| row.get(0))
+        .unwrap();
+    for index in 0..300 {
+        connection
+            .execute(
+                "INSERT INTO artifact(
+                   content_id, artifact_kind, blob_relpath, byte_size, raw_digest, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+                params![
+                    content_id,
+                    format!("synthetic-{index}"),
+                    blob.relpath,
+                    i64::try_from(blob.byte_size).unwrap(),
+                    blob.hash.as_slice(),
+                ],
+            )
+            .unwrap();
+    }
+
+    let output = run_verify(&data_dir, 2);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 fn insert_unfinished_run(data_dir: &Path, status: &str, discriminator: u8) {
@@ -493,8 +642,13 @@ fn verify_fails_foreign_key_check_without_disclosing_database_details() {
         .unwrap();
     connection
         .execute(
-            "INSERT INTO artifact(content_id, artifact_kind, blob_relpath, byte_size, created_at_ms)
-             VALUES (9223372036854775806, 'synthetic', '00/0000000000000000000000000000000000000000000000000000000000000000', 0, 1)",
+            "INSERT INTO artifact(
+               content_id, artifact_kind, blob_relpath, byte_size, raw_digest, created_at_ms
+             ) VALUES (
+               9223372036854775806, 'synthetic',
+               '00/0000000000000000000000000000000000000000000000000000000000000000',
+               0, zeroblob(32), 1
+             )",
             [],
         )
         .unwrap();
@@ -569,12 +723,46 @@ fn verify_checks_artifact_blob_sizes_through_the_cas_boundary() {
         .unwrap();
     connection
         .execute(
-            "INSERT INTO artifact(content_id, artifact_kind, blob_relpath, byte_size, created_at_ms)
-             VALUES (?1, 'synthetic-artifact', ?2, ?3, 1)",
+            "INSERT INTO artifact(
+               content_id, artifact_kind, blob_relpath, byte_size, raw_digest, created_at_ms
+             ) VALUES (?1, 'synthetic-artifact', ?2, ?3, ?4, 1)",
             params![
                 content_id,
                 blob.relpath,
-                i64::try_from(blob.byte_size).unwrap() + 1
+                i64::try_from(blob.byte_size).unwrap() + 1,
+                blob.hash.as_slice(),
+            ],
+        )
+        .unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "blobStatus");
+}
+
+#[test]
+fn verify_checks_artifact_digests_against_content_addressed_storage() {
+    let (_sandbox, data_dir) = imported_two_source_store();
+    let cas = CasStore::new(data_dir.join("blobs"));
+    let blob = cas.put(b"synthetic artifact digest bytes").unwrap();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    let content_id: i64 = connection
+        .query_row(
+            "SELECT content_id FROM content ORDER BY content_id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifact(
+               content_id, artifact_kind, blob_relpath, byte_size, raw_digest, created_at_ms
+             ) VALUES (?1, 'synthetic-digest', ?2, ?3, ?4, 1)",
+            params![
+                content_id,
+                blob.relpath,
+                i64::try_from(blob.byte_size).unwrap(),
+                [0_u8; 32].as_slice(),
             ],
         )
         .unwrap();
@@ -601,12 +789,14 @@ fn verify_reads_artifact_references_through_the_cas_boundary() {
         .unwrap();
     connection
         .execute(
-            "INSERT INTO artifact(content_id, artifact_kind, blob_relpath, byte_size, created_at_ms)
-             VALUES (?1, 'synthetic-boundary', ?2, ?3, 1)",
+            "INSERT INTO artifact(
+               content_id, artifact_kind, blob_relpath, byte_size, raw_digest, created_at_ms
+             ) VALUES (?1, 'synthetic-boundary', ?2, ?3, ?4, 1)",
             params![
                 content_id,
                 blob.relpath,
-                i64::try_from(blob.byte_size).unwrap()
+                i64::try_from(blob.byte_size).unwrap(),
+                blob.hash.as_slice(),
             ],
         )
         .unwrap();

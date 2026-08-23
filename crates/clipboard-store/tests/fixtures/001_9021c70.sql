@@ -1,9 +1,9 @@
 CREATE TABLE schema_identity (
   identity TEXT PRIMARY KEY CHECK(identity = 'clipboard-store'),
-  revision INTEGER NOT NULL CHECK(revision = 5)
+  revision INTEGER NOT NULL CHECK(revision = 4)
 );
 
-INSERT INTO schema_identity(identity, revision) VALUES ('clipboard-store', 5);
+INSERT INTO schema_identity(identity, revision) VALUES ('clipboard-store', 4);
 
 CREATE TABLE content (
   content_id INTEGER PRIMARY KEY,
@@ -21,29 +21,32 @@ CREATE TABLE content (
   created_at_ms INTEGER NOT NULL
 );
 
-CREATE TABLE raw_payload (
-  raw_payload_id INTEGER PRIMARY KEY,
-  raw_digest BLOB NOT NULL CHECK(
-    typeof(raw_digest) = 'blob' AND length(raw_digest) = 32
-  ),
-  storage_kind TEXT NOT NULL CHECK(storage_kind IN ('inline', 'inline_zstd', 'cas')),
+CREATE TABLE content_representation (
+  representation_id INTEGER PRIMARY KEY,
+  content_id INTEGER NOT NULL REFERENCES content(content_id) ON DELETE CASCADE,
+  format_id TEXT NOT NULL,
+  storage_kind TEXT NOT NULL CHECK(storage_kind IN ('inline', 'inline_zstd', 'cas', 'missing')),
   inline_payload BLOB,
   blob_relpath TEXT,
+  missing_ref TEXT,
   original_byte_size INTEGER NOT NULL CHECK(original_byte_size >= 0),
   stored_byte_size INTEGER NOT NULL CHECK(stored_byte_size >= 0),
   CHECK(
     (storage_kind = 'inline'
-      AND inline_payload IS NOT NULL AND blob_relpath IS NULL
+      AND inline_payload IS NOT NULL AND blob_relpath IS NULL AND missing_ref IS NULL
       AND original_byte_size < 4096 AND stored_byte_size = length(inline_payload))
     OR (storage_kind = 'inline_zstd'
-      AND inline_payload IS NOT NULL AND blob_relpath IS NULL
+      AND inline_payload IS NOT NULL AND blob_relpath IS NULL AND missing_ref IS NULL
       AND original_byte_size >= 4096 AND original_byte_size <= 262144
       AND stored_byte_size = length(inline_payload))
     OR (storage_kind = 'cas'
-      AND inline_payload IS NULL AND blob_relpath IS NOT NULL
+      AND inline_payload IS NULL AND blob_relpath IS NOT NULL AND missing_ref IS NULL
       AND stored_byte_size = original_byte_size)
+    OR (storage_kind = 'missing'
+      AND inline_payload IS NULL AND blob_relpath IS NULL AND missing_ref IS NOT NULL
+      AND original_byte_size = 0 AND stored_byte_size = 0)
   ),
-  UNIQUE(raw_digest, storage_kind)
+  UNIQUE(content_id, format_id)
 );
 
 CREATE TABLE history_event (
@@ -67,31 +70,6 @@ CREATE TABLE history_event (
   expires_at_ms INTEGER,
   flags INTEGER NOT NULL DEFAULT 0
 );
-
-CREATE TABLE event_representation (
-  event_id INTEGER NOT NULL REFERENCES history_event(event_id) ON DELETE CASCADE,
-  ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
-  format_id TEXT NOT NULL CHECK(length(CAST(format_id AS BLOB)) BETWEEN 1 AND 1024),
-  raw_payload_id INTEGER REFERENCES raw_payload(raw_payload_id) ON DELETE RESTRICT,
-  missing_ref TEXT,
-  CHECK(
-    (raw_payload_id IS NOT NULL AND missing_ref IS NULL)
-    OR (raw_payload_id IS NULL AND missing_ref IS NOT NULL)
-  ),
-  PRIMARY KEY(event_id, ordinal)
-);
-
-CREATE TRIGGER event_representation_after_delete
-AFTER DELETE ON event_representation
-WHEN old.raw_payload_id IS NOT NULL
-BEGIN
-  DELETE FROM raw_payload
-  WHERE raw_payload_id = old.raw_payload_id
-    AND NOT EXISTS(
-      SELECT 1 FROM event_representation
-      WHERE raw_payload_id = old.raw_payload_id
-    );
-END;
 
 CREATE TABLE search_doc (
   content_id INTEGER PRIMARY KEY REFERENCES content(content_id) ON DELETE CASCADE,
@@ -156,9 +134,6 @@ CREATE TABLE artifact (
   artifact_kind TEXT NOT NULL,
   blob_relpath TEXT NOT NULL,
   byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
-  raw_digest BLOB NOT NULL CHECK(
-    typeof(raw_digest) = 'blob' AND length(raw_digest) = 32
-  ),
   created_at_ms INTEGER NOT NULL,
   UNIQUE(content_id, artifact_kind)
 );
@@ -233,7 +208,5 @@ CREATE INDEX idx_import_run_source_fingerprint
   ON import_run(source_kind, source_fingerprint);
 CREATE INDEX idx_import_record_source_fingerprint
   ON import_record(source_kind, record_fingerprint);
-CREATE INDEX idx_event_representation_raw_payload
-  ON event_representation(raw_payload_id) WHERE raw_payload_id IS NOT NULL;
 
 INSERT INTO search_fts(search_fts) VALUES('rebuild');

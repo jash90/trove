@@ -56,7 +56,7 @@ fn prepare_import_paths_with_hooks(
     let resolved = resolve_data_candidate(data_dir)?;
     validate_data_boundary(&resolved.candidate)?;
     validate_nonoverlap(&source, &resolved.candidate)?;
-    let data_directory =
+    let _data_directory =
         create_missing_components_no_follow(&resolved, &mut before_component_create)?;
     let data_dir = fs::canonicalize(&resolved.candidate)
         .map_err(|_| CliFailure::new("storage_unavailable"))?;
@@ -73,7 +73,6 @@ fn prepare_import_paths_with_hooks(
     let database_path = data_dir.join(DATABASE_FILENAME);
     let blob_root = data_dir.join(BLOB_DIRECTORY);
     ensure_optional_child(&data_dir, &database_path, ChildKind::File)?;
-    ensure_directory_child_no_follow(&data_directory, &data_dir, BLOB_DIRECTORY)?;
     let config = StoreConfig::new(&database_path).with_blob_root(&blob_root);
     let storage_boundary = Arc::new(
         StorageBoundaryLease::create_writer(&config)
@@ -205,7 +204,10 @@ fn create_missing_components_no_follow(
     for component in &resolved.missing_components {
         current_path.push(component);
         before_component_create(&current_path);
-        match directory.create_dir(Path::new(component)) {
+        let mut builder = cap_std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match directory.create_dir_with(Path::new(component), &builder) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(_) => return Err(CliFailure::new("storage_unavailable")),
@@ -216,24 +218,6 @@ fn create_missing_components_no_follow(
     }
     ensure_exact_directory(&resolved.candidate)?;
     Ok(directory)
-}
-
-fn ensure_directory_child_no_follow(
-    directory: &Dir,
-    parent: &Path,
-    child_name: &str,
-) -> Result<(), CliFailure> {
-    ensure_exact_directory(parent)?;
-    match directory.create_dir(child_name) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(_) => return Err(CliFailure::new("storage_unavailable")),
-    }
-    directory
-        .open_dir_nofollow(child_name)
-        .map_err(|_| CliFailure::new("unsafe_storage_layout"))?;
-    let child = parent.join(child_name);
-    ensure_existing_child(parent, &child, ChildKind::Directory)
 }
 
 fn ensure_exact_directory(path: &Path) -> Result<(), CliFailure> {

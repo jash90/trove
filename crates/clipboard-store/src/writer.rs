@@ -1,17 +1,20 @@
 use std::{
-    collections::BTreeMap,
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
     io,
+    mem::size_of,
+    rc::Rc,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex, OnceLock, Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    thread,
+    thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use clipboard_core::{
-    CaptureInput, ContentFlags, ContentHash, ContentKind, SourceConfidence, content_hash,
-    normalize_search_text,
+    CaptureInput, ContentFlags, ContentHash, ContentKind, SourceConfidence, canonical_bytes,
+    content_hash, normalize_search_text,
 };
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use thiserror::Error;
@@ -19,12 +22,14 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::{
-    CasError, CasStore, StorageBoundaryLease, StoreConfig, migrations,
+    CasError, CasStore, StorageBoundaryError, StorageBoundaryLease, StoreConfig, migrations,
     reader::{open_reader_connection, open_writer_connection, required_boundary},
 };
 
 pub const WRITER_QUEUE_CAPACITY: usize = 256;
+pub const MAX_STORE_READERS: usize = 8;
 pub const IMPORT_BATCH_SIZE: usize = 250;
+pub const MAX_IMPORT_BATCH_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SEARCH_DERIVATIONS_PER_CONTENT: usize = 16;
 pub const MAX_SEARCH_DERIVATION_BYTES: usize = 64 * 1024;
 pub const MAX_SEARCH_DOCUMENT_BYTES: usize = 512 * 1024;
@@ -46,6 +51,10 @@ pub enum StoreError {
     DatabaseMissing,
     #[error("storage boundary changed")]
     StorageBoundary,
+    #[error("private_storage_unavailable")]
+    PrivateStorageUnavailable,
+    #[error("store_runtime_configuration_mismatch")]
+    RuntimeConfigurationMismatch,
     #[error("payload storage is unavailable until CAS storage is configured")]
     PayloadStorageUnavailable,
     #[error(transparent)]
@@ -60,6 +69,8 @@ pub enum StoreError {
     WriterThreadSpawn(#[source] io::Error),
     #[error("invalid import input")]
     InvalidImportInput,
+    #[error("invalid_content_flags")]
+    InvalidContentFlags,
     #[error("import run not found")]
     ImportRunNotFound,
     #[error("import source does not match the persisted run")]
@@ -82,6 +93,15 @@ pub enum StoreError {
     #[doc(hidden)]
     #[error("injected import status failure")]
     InjectedImportStatusFailure,
+}
+
+impl From<StorageBoundaryError> for StoreError {
+    fn from(error: StorageBoundaryError) -> Self {
+        match error {
+            StorageBoundaryError::Changed => Self::StorageBoundary,
+            StorageBoundaryError::PrivateStorageUnavailable => Self::PrivateStorageUnavailable,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -187,11 +207,411 @@ pub struct ImportBatchOutcome {
     pub processed_candidates: u64,
 }
 
-#[derive(Clone)]
 pub struct StoreHandle {
     config: StoreConfig,
+    runtime: RuntimeRef,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct RuntimeIdentity((u64, u64));
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RuntimeConfiguration {
+    blob_identity: (u64, u64),
+}
+
+enum RegistryEntry {
+    Initializing,
+    Ready {
+        runtime: Weak<StoreRuntime>,
+        clients: usize,
+    },
+    Closing,
+}
+
+struct RuntimeRegistry {
+    entries: Mutex<HashMap<RuntimeIdentity, RegistryEntry>>,
+    changed: Condvar,
+}
+
+impl RuntimeRegistry {
+    fn global() -> &'static Self {
+        static REGISTRY: OnceLock<RuntimeRegistry> = OnceLock::new();
+        REGISTRY.get_or_init(|| Self {
+            entries: Mutex::new(HashMap::new()),
+            changed: Condvar::new(),
+        })
+    }
+}
+
+struct ReaderGate {
+    active: Mutex<usize>,
+    changed: Condvar,
+}
+
+struct ReaderPermit<'a> {
+    gate: &'a ReaderGate,
+}
+
+impl ReaderGate {
+    fn new() -> Self {
+        Self {
+            active: Mutex::new(0),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> ReaderPermit<'_> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while *active >= MAX_STORE_READERS {
+            active = self
+                .changed
+                .wait(active)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        *active += 1;
+        ReaderPermit { gate: self }
+    }
+}
+
+impl Drop for ReaderPermit<'_> {
+    fn drop(&mut self) {
+        let mut active = self
+            .gate
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *active -= 1;
+        self.gate.changed.notify_one();
+    }
+}
+
+thread_local! {
+    static ACTIVE_READERS: RefCell<Vec<(usize, Rc<Connection>)>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ActiveReader {
+    runtime_id: usize,
+}
+
+impl Drop for ActiveReader {
+    fn drop(&mut self) {
+        ACTIVE_READERS.with(|readers| {
+            let mut readers = readers.borrow_mut();
+            let index = readers
+                .iter()
+                .rposition(|(runtime_id, _)| *runtime_id == self.runtime_id)
+                .expect("active store reader is registered");
+            readers.remove(index);
+        });
+    }
+}
+
+enum WriterSlot {
+    Empty,
+    Initializing,
+    Ready(WriterRuntime),
+}
+
+struct WriterRuntime {
     tx: mpsc::Sender<WriteCommand>,
-    import_status_available: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+struct StoreRuntime {
+    id: usize,
+    identity: RuntimeIdentity,
+    configuration: RuntimeConfiguration,
+    readers: ReaderGate,
+    writer: Mutex<WriterSlot>,
+    writer_changed: Condvar,
+    import_status_available: AtomicBool,
+}
+
+pub(crate) struct RuntimeRef {
+    runtime: Arc<StoreRuntime>,
+}
+
+impl RuntimeRef {
+    pub(crate) fn with_reader<T, E>(
+        &self,
+        config: &StoreConfig,
+        operation: impl FnOnce(&Connection) -> Result<T, E>,
+    ) -> Result<T, StoreError>
+    where
+        StoreError: From<E>,
+    {
+        self.runtime.with_reader(config, operation)
+    }
+}
+
+impl Clone for RuntimeRef {
+    fn clone(&self) -> Self {
+        let registry = RuntimeRegistry::global();
+        let mut entries = registry
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match entries.get_mut(&self.runtime.identity) {
+            Some(RegistryEntry::Ready { clients, .. }) => *clients += 1,
+            _ => unreachable!("a referenced store runtime must remain registered"),
+        }
+        drop(entries);
+        Self {
+            runtime: Arc::clone(&self.runtime),
+        }
+    }
+}
+
+impl Drop for RuntimeRef {
+    fn drop(&mut self) {
+        let registry = RuntimeRegistry::global();
+        let should_close = {
+            let mut entries = registry
+                .entries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match entries.get_mut(&self.runtime.identity) {
+                Some(RegistryEntry::Ready { clients, .. }) if *clients > 1 => {
+                    *clients -= 1;
+                    false
+                }
+                Some(entry @ RegistryEntry::Ready { .. }) => {
+                    *entry = RegistryEntry::Closing;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if should_close {
+            self.runtime.shutdown();
+            let mut entries = registry
+                .entries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if matches!(
+                entries.get(&self.runtime.identity),
+                Some(RegistryEntry::Closing)
+            ) {
+                entries.remove(&self.runtime.identity);
+            }
+            registry.changed.notify_all();
+        }
+    }
+}
+
+impl StoreRuntime {
+    fn new(identity: RuntimeIdentity, configuration: RuntimeConfiguration) -> Self {
+        static NEXT_RUNTIME_ID: AtomicUsize = AtomicUsize::new(1);
+        Self {
+            id: NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed),
+            identity,
+            configuration,
+            readers: ReaderGate::new(),
+            writer: Mutex::new(WriterSlot::Empty),
+            writer_changed: Condvar::new(),
+            import_status_available: AtomicBool::new(true),
+        }
+    }
+
+    fn ensure_writer(
+        &self,
+        config: &StoreConfig,
+        boundary: Arc<StorageBoundaryLease>,
+    ) -> Result<(), StoreError> {
+        loop {
+            let mut writer = self
+                .writer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match &*writer {
+                WriterSlot::Ready(_) => return Ok(()),
+                WriterSlot::Initializing => {
+                    drop(
+                        self.writer_changed
+                            .wait(writer)
+                            .unwrap_or_else(|error| error.into_inner()),
+                    );
+                }
+                WriterSlot::Empty => {
+                    *writer = WriterSlot::Initializing;
+                    break;
+                }
+            }
+        }
+
+        let initialized = start_writer(config, boundary);
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match initialized {
+            Ok(runtime) => {
+                *writer = WriterSlot::Ready(runtime);
+                self.writer_changed.notify_all();
+                Ok(())
+            }
+            Err(error) => {
+                *writer = WriterSlot::Empty;
+                self.writer_changed.notify_all();
+                Err(error)
+            }
+        }
+    }
+
+    fn writer_sender(&self) -> Result<mpsc::Sender<WriteCommand>, StoreError> {
+        let writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match &*writer {
+            WriterSlot::Ready(runtime) => Ok(runtime.tx.clone()),
+            WriterSlot::Empty | WriterSlot::Initializing => Err(StoreError::WriterClosed),
+        }
+    }
+
+    fn with_reader<T, E>(
+        &self,
+        config: &StoreConfig,
+        operation: impl FnOnce(&Connection) -> Result<T, E>,
+    ) -> Result<T, StoreError>
+    where
+        StoreError: From<E>,
+    {
+        let mut operation = Some(operation);
+        if let Some(connection) = ACTIVE_READERS.with(|readers| {
+            readers
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(runtime_id, _)| *runtime_id == self.id)
+                .map(|(_, connection)| Rc::clone(connection))
+        }) {
+            let result = operation.take().expect("reader callback is available")(&connection);
+            required_boundary(config)?
+                .validate()
+                .map_err(<StoreError as From<StorageBoundaryError>>::from)?;
+            return result.map_err(StoreError::from);
+        }
+
+        let _permit = self.readers.acquire();
+        let connection = Rc::new(open_reader_connection(config)?);
+        ACTIVE_READERS.with(|readers| {
+            readers.borrow_mut().push((self.id, Rc::clone(&connection)));
+        });
+        let _active = ActiveReader {
+            runtime_id: self.id,
+        };
+        let result = operation.take().expect("reader callback is available")(&connection);
+        required_boundary(config)?
+            .validate()
+            .map_err(<StoreError as From<StorageBoundaryError>>::from)?;
+        result.map_err(StoreError::from)
+    }
+
+    fn shutdown(&self) {
+        let runtime = {
+            let mut writer = self
+                .writer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match std::mem::replace(&mut *writer, WriterSlot::Empty) {
+                WriterSlot::Ready(runtime) => Some(runtime),
+                WriterSlot::Empty | WriterSlot::Initializing => None,
+            }
+        };
+        if let Some(mut runtime) = runtime {
+            drop(runtime.tx);
+            if let Some(join) = runtime.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+}
+
+fn acquire_runtime(
+    config: &StoreConfig,
+    boundary: Arc<StorageBoundaryLease>,
+    writer: bool,
+) -> Result<RuntimeRef, StoreError> {
+    let identity = RuntimeIdentity(boundary.database_identity_key());
+    let configuration = RuntimeConfiguration {
+        blob_identity: boundary.blob_identity_key(),
+    };
+    let registry = RuntimeRegistry::global();
+    loop {
+        let mut entries = registry
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match entries.get_mut(&identity) {
+            Some(RegistryEntry::Ready { runtime, clients }) => {
+                let runtime = runtime
+                    .upgrade()
+                    .expect("registered store runtime has a live client");
+                if runtime.configuration != configuration {
+                    return Err(StoreError::RuntimeConfigurationMismatch);
+                }
+                *clients += 1;
+                drop(entries);
+                let runtime_ref = RuntimeRef { runtime };
+                if writer {
+                    runtime_ref
+                        .runtime
+                        .ensure_writer(config, Arc::clone(&boundary))?;
+                }
+                return Ok(runtime_ref);
+            }
+            Some(RegistryEntry::Initializing | RegistryEntry::Closing) => {
+                drop(
+                    registry
+                        .changed
+                        .wait(entries)
+                        .unwrap_or_else(|error| error.into_inner()),
+                );
+            }
+            None => {
+                entries.insert(identity, RegistryEntry::Initializing);
+                drop(entries);
+                let initialized = (|| {
+                    let runtime = Arc::new(StoreRuntime::new(identity, configuration));
+                    if writer {
+                        runtime.ensure_writer(config, Arc::clone(&boundary))?;
+                    } else {
+                        let connection = open_reader_connection(config)?;
+                        crate::migrations::validate_current_schema(&connection)?;
+                        boundary.validate().map_err(StoreError::from)?;
+                    }
+                    Ok::<_, StoreError>(runtime)
+                })();
+                let mut entries = registry
+                    .entries
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                match initialized {
+                    Ok(runtime) => {
+                        entries.insert(
+                            identity,
+                            RegistryEntry::Ready {
+                                runtime: Arc::downgrade(&runtime),
+                                clients: 1,
+                            },
+                        );
+                        registry.changed.notify_all();
+                        return Ok(RuntimeRef { runtime });
+                    }
+                    Err(error) => {
+                        entries.remove(&identity);
+                        registry.changed.notify_all();
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
 }
 
 enum WriteCommand {
@@ -243,54 +663,40 @@ impl StoreHandle {
         let boundary = match config.storage_boundary() {
             Some(boundary) => {
                 boundary
-                    .validate_for_config(&config, true)
-                    .map_err(|_| StoreError::StorageBoundary)?;
+                    .validate_preflight_for_config(&config, true)
+                    .map_err(StoreError::from)?;
                 Arc::clone(boundary)
             }
             None => {
                 let boundary = Arc::new(
-                    StorageBoundaryLease::create_writer(&config)
-                        .map_err(|_| StoreError::StorageBoundary)?,
+                    StorageBoundaryLease::create_writer_preflight(&config)
+                        .map_err(StoreError::from)?,
                 );
                 config.set_storage_boundary(Arc::clone(&boundary));
                 boundary
             }
         };
-        let cas = CasStore::with_storage_boundary(
-            config.blob_root().to_path_buf(),
-            Arc::clone(&boundary),
-        );
-        let mut connection = open_writer_connection(&config)?;
-        migrations().apply(&mut connection)?;
+        let runtime = acquire_runtime(&config, Arc::clone(&boundary), true)?;
         boundary
-            .validate()
-            .map_err(|_| StoreError::StorageBoundary)?;
-
-        let (tx, mut rx) = mpsc::channel(WRITER_QUEUE_CAPACITY);
-        let writer_boundary = Arc::clone(&boundary);
-        thread::Builder::new()
-            .name("clipboard-db-writer".to_owned())
-            .spawn(move || {
-                while let Some(command) = rx.blocking_recv() {
-                    handle_command(&mut connection, &cas, &writer_boundary, command);
-                }
-            })
-            .map_err(StoreError::WriterThreadSpawn)?;
-
-        Ok(Self {
-            config,
-            tx,
-            import_status_available: Arc::new(AtomicBool::new(true)),
-        })
+            .validate_for_config(&config, true)
+            .map_err(StoreError::from)?;
+        Ok(Self { config, runtime })
     }
 
     pub fn config(&self) -> &StoreConfig {
         &self.config
     }
 
+    #[doc(hidden)]
+    pub fn shares_runtime_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.runtime.runtime, &other.runtime.runtime)
+    }
+
     pub async fn ingest(&self, input: CaptureInput) -> Result<IngestOutcome, StoreError> {
         let (reply, response) = oneshot::channel();
-        self.tx
+        self.runtime
+            .runtime
+            .writer_sender()?
             .send(WriteCommand::Ingest { input, reply })
             .await
             .map_err(|_| StoreError::WriterClosed)?;
@@ -301,7 +707,9 @@ impl StoreHandle {
 
     pub async fn set_pinned(&self, event_id: i64, pinned: bool) -> Result<(), StoreError> {
         let (reply, response) = oneshot::channel();
-        self.tx
+        self.runtime
+            .runtime
+            .writer_sender()?
             .send(WriteCommand::SetPinned {
                 event_id,
                 pinned,
@@ -316,7 +724,9 @@ impl StoreHandle {
 
     pub async fn delete_event(&self, event_id: i64) -> Result<(), StoreError> {
         let (reply, response) = oneshot::channel();
-        self.tx
+        self.runtime
+            .runtime
+            .writer_sender()?
             .send(WriteCommand::DeleteEvent { event_id, reply })
             .await
             .map_err(|_| StoreError::WriterClosed)?;
@@ -331,7 +741,9 @@ impl StoreHandle {
     ) -> Result<ImportWorkerLease, StoreError> {
         validate_begin_import(&input)?;
         let (reply, response) = oneshot::channel();
-        self.tx
+        self.runtime
+            .runtime
+            .writer_sender()?
             .send(WriteCommand::BeginImport { input, reply })
             .await
             .map_err(|_| StoreError::WriterClosed)?;
@@ -343,7 +755,9 @@ impl StoreHandle {
     #[doc(hidden)]
     pub async fn inject_begin_import_failure(&self) -> Result<ImportWorkerLease, StoreError> {
         let (reply, response) = oneshot::channel();
-        self.tx
+        self.runtime
+            .runtime
+            .writer_sender()?
             .send(WriteCommand::InjectBeginImportFailure { reply })
             .await
             .map_err(|_| StoreError::WriterClosed)?;
@@ -357,7 +771,9 @@ impl StoreHandle {
         input: ResumeImportRun,
     ) -> Result<ImportWorkerLease, StoreError> {
         let (reply, response) = oneshot::channel();
-        self.tx
+        self.runtime
+            .runtime
+            .writer_sender()?
             .send(WriteCommand::ResumeImport { input, reply })
             .await
             .map_err(|_| StoreError::WriterClosed)?;
@@ -372,11 +788,20 @@ impl StoreHandle {
         generation: u64,
         candidates: Vec<StoreImportCandidate>,
     ) -> Result<ImportBatchOutcome, StoreError> {
-        if candidates.len() > IMPORT_BATCH_SIZE {
+        if candidates.len() > IMPORT_BATCH_SIZE
+            || candidates
+                .iter()
+                .try_fold(0_usize, |total, candidate| {
+                    total.checked_add(store_candidate_bytes(candidate))
+                })
+                .is_none_or(|bytes| bytes > MAX_IMPORT_BATCH_BYTES)
+        {
             return Err(StoreError::ImportBatchTooLarge);
         }
         let (reply, response) = oneshot::channel();
-        self.tx
+        self.runtime
+            .runtime
+            .writer_sender()?
             .send(WriteCommand::ImportBatch {
                 run_id,
                 generation,
@@ -396,7 +821,9 @@ impl StoreHandle {
         generation: u64,
     ) -> Result<StoreImportRunStatus, StoreError> {
         let (reply, response) = oneshot::channel();
-        self.tx
+        self.runtime
+            .runtime
+            .writer_sender()?
             .send(WriteCommand::FinishImport {
                 run_id,
                 generation,
@@ -419,7 +846,9 @@ impl StoreHandle {
             return Err(StoreError::InvalidImportInput);
         }
         let (reply, response) = oneshot::channel();
-        self.tx
+        self.runtime
+            .runtime
+            .writer_sender()?
             .send(WriteCommand::FailImport {
                 run_id,
                 generation,
@@ -434,20 +863,24 @@ impl StoreHandle {
     }
 
     pub fn import_status(&self, run_id: Uuid) -> Result<StoreImportRunStatus, StoreError> {
-        if !self.import_status_available.load(Ordering::Acquire) {
+        if !self
+            .runtime
+            .runtime
+            .import_status_available
+            .load(Ordering::Acquire)
+        {
             return Err(StoreError::InjectedImportStatusFailure);
         }
-        let connection = open_reader_connection(&self.config)?;
-        let result = read_import_status(&connection, run_id);
-        required_boundary(&self.config)?
-            .validate()
-            .map_err(|_| StoreError::StorageBoundary)?;
-        result
+        self.runtime.with_reader(&self.config, |connection| {
+            read_import_status(connection, run_id)
+        })
     }
 
     #[doc(hidden)]
     pub fn set_import_status_available_for_test(&self, available: bool) {
-        self.import_status_available
+        self.runtime
+            .runtime
+            .import_status_available
             .store(available, Ordering::Release);
     }
 
@@ -469,13 +902,75 @@ impl StoreHandle {
         &self,
         operation: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, StoreError> {
-        let connection = open_reader_connection(&self.config)?;
-        let result = operation(&connection);
-        required_boundary(&self.config)?
-            .validate()
-            .map_err(|_| StoreError::StorageBoundary)?;
-        Ok(result?)
+        self.runtime.runtime.with_reader(&self.config, operation)
     }
+}
+
+impl Clone for StoreHandle {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            runtime: self.runtime.clone(),
+        }
+    }
+}
+
+fn start_writer(
+    config: &StoreConfig,
+    boundary: Arc<StorageBoundaryLease>,
+) -> Result<WriterRuntime, StoreError> {
+    let cas =
+        CasStore::with_storage_boundary(config.blob_root().to_path_buf(), Arc::clone(&boundary));
+    let mut connection = open_writer_connection(config)?;
+    migrations().apply(&mut connection)?;
+    boundary
+        .harden_sqlite_sidecars()
+        .map_err(StoreError::from)?;
+    boundary.validate().map_err(StoreError::from)?;
+    let (tx, mut rx) = mpsc::channel(WRITER_QUEUE_CAPACITY);
+    let writer_boundary = Arc::clone(&boundary);
+    let join = thread::Builder::new()
+        .name("clipboard-db-writer".to_owned())
+        .spawn(move || {
+            while let Some(command) = rx.blocking_recv() {
+                handle_command(&mut connection, &cas, &writer_boundary, command);
+            }
+        })
+        .map_err(StoreError::WriterThreadSpawn)?;
+    Ok(WriterRuntime {
+        tx,
+        join: Some(join),
+    })
+}
+
+pub(crate) fn acquire_read_runtime(
+    config: &StoreConfig,
+    boundary: Arc<StorageBoundaryLease>,
+) -> Result<RuntimeRef, StoreError> {
+    acquire_runtime(config, boundary, false)
+}
+
+fn store_candidate_bytes(candidate: &StoreImportCandidate) -> usize {
+    let capture = &candidate.capture;
+    let mut bytes = size_of::<StoreImportCandidate>()
+        .saturating_add(capture.primary_mime.len())
+        .saturating_add(capture.source_app_id.as_ref().map_or(0, String::len))
+        .saturating_add(capture.source_app_name.as_ref().map_or(0, String::len))
+        .saturating_add(candidate.search_text.as_ref().map_or(0, String::len))
+        .saturating_add(
+            candidate
+                .source_app_original
+                .as_ref()
+                .map_or(0, String::len),
+        );
+    for representation in &capture.representations {
+        bytes = bytes
+            .saturating_add(size_of::<clipboard_core::RepresentationInput>())
+            .saturating_add(representation.format_id.len())
+            .saturating_add(representation.bytes.as_ref().map_or(0, Vec::len))
+            .saturating_add(representation.missing_ref.as_ref().map_or(0, String::len));
+    }
+    bytes
 }
 
 fn handle_command(
@@ -555,13 +1050,9 @@ fn with_storage_boundary<T>(
     boundary: &StorageBoundaryLease,
     operation: impl FnOnce() -> Result<T, StoreError>,
 ) -> Result<T, StoreError> {
-    boundary
-        .validate()
-        .map_err(|_| StoreError::StorageBoundary)?;
+    boundary.validate().map_err(StoreError::from)?;
     let result = operation();
-    boundary
-        .validate()
-        .map_err(|_| StoreError::StorageBoundary)?;
+    boundary.validate().map_err(StoreError::from)?;
     result
 }
 
@@ -964,6 +1455,7 @@ struct PreparedIngest<'a> {
     byte_size: u64,
     preview_text: String,
     primary_payload: Option<&'a [u8]>,
+    content_flags: ContentFlags,
     representations: Vec<StoredRepresentation<'a>>,
 }
 
@@ -975,18 +1467,30 @@ fn prepare_ingest<'a>(
         .representations
         .first()
         .ok_or(StoreError::PayloadStorageUnavailable)?;
-    let (content_hash, byte_size, primary_payload) =
+    let (content_hash, byte_size, primary_payload, content_flags) =
         match (primary.bytes.as_deref(), primary.missing_ref.as_deref()) {
-            (Some(bytes), None) => (
-                content_hash(input.kind, &input.primary_mime, bytes),
-                bytes.len() as u64,
-                Some(bytes),
-            ),
-            (None, Some(missing_ref)) => (
-                missing_content_hash(input.kind, &input.primary_mime, missing_ref),
-                0,
-                None,
-            ),
+            (Some(bytes), None) => {
+                if input.content_flags.contains(ContentFlags::MISSING_PAYLOAD) {
+                    return Err(StoreError::InvalidContentFlags);
+                }
+                (
+                    content_hash(input.kind, &input.primary_mime, bytes),
+                    canonical_bytes(input.kind, bytes).len() as u64,
+                    Some(bytes),
+                    input.content_flags,
+                )
+            }
+            (None, Some(missing_ref)) => {
+                if !input.content_flags.contains(ContentFlags::MISSING_PAYLOAD) {
+                    return Err(StoreError::InvalidContentFlags);
+                }
+                (
+                    missing_content_hash(input.kind, &input.primary_mime, missing_ref),
+                    0,
+                    None,
+                    input.content_flags,
+                )
+            }
             _ => return Err(StoreError::PayloadStorageUnavailable),
         };
     Ok(PreparedIngest {
@@ -994,6 +1498,7 @@ fn prepare_ingest<'a>(
         byte_size,
         preview_text: original_preview(input.kind, primary_payload),
         primary_payload,
+        content_flags,
         representations: stored_representations(input, cas)?,
     })
 }
@@ -1017,7 +1522,7 @@ fn write_ingest(
             input.primary_mime,
             sql_count(prepared.byte_size)?,
             prepared.preview_text,
-            i64::from(input.content_flags.bits()),
+            i64::from(prepared.content_flags.bits()),
             input.captured_at_ms,
         ],
     )?;
@@ -1028,35 +1533,13 @@ fn write_ingest(
     )?;
     transaction.execute(
         "UPDATE content SET flags = flags | ?1 WHERE content_id = ?2",
-        params![i64::from(input.content_flags.bits()), content_id],
+        params![i64::from(prepared.content_flags.bits()), content_id],
     )?;
     let merged_content_flags = transaction.query_row(
         "SELECT flags FROM content WHERE content_id = ?1",
         [content_id],
         |row| row.get::<_, i64>(0),
     )?;
-
-    for representation in &prepared.representations {
-        let (storage_kind, inline_payload, blob_relpath, missing_ref, stored_byte_size) =
-            representation.storage_values();
-        transaction.execute(
-            "INSERT INTO content_representation
-               (content_id, format_id, storage_kind, inline_payload, blob_relpath, missing_ref,
-                original_byte_size, stored_byte_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(content_id, format_id) DO NOTHING",
-            params![
-                content_id,
-                representation.format_id,
-                storage_kind,
-                inline_payload,
-                blob_relpath,
-                missing_ref,
-                sql_count(representation.original_byte_size)?,
-                sql_count(stored_byte_size)?,
-            ],
-        )?;
-    }
 
     if merged_content_flags & i64::from(ContentFlags::DO_NOT_INDEX.bits()) != 0 {
         transaction.execute("DELETE FROM search_doc WHERE content_id = ?1", [content_id])?;
@@ -1086,9 +1569,54 @@ fn write_ingest(
             i64::from(input.event_flags.bits()),
         ],
     )?;
+    let event_id = transaction.last_insert_rowid();
+    for (ordinal, representation) in prepared.representations.iter().enumerate() {
+        let ordinal = i64::try_from(ordinal).map_err(|_| StoreError::PayloadStorageUnavailable)?;
+        match &representation.payload {
+            PreparedPayload::Missing(missing_ref) => {
+                transaction.execute(
+                    "INSERT INTO event_representation
+                       (event_id, ordinal, format_id, raw_payload_id, missing_ref)
+                     VALUES (?1, ?2, ?3, NULL, ?4)",
+                    params![event_id, ordinal, representation.format_id, missing_ref],
+                )?;
+            }
+            PreparedPayload::Stored(_) => {
+                let (storage_kind, inline_payload, blob_relpath, stored_byte_size) =
+                    representation.storage_values();
+                transaction.execute(
+                    "INSERT INTO raw_payload
+                       (raw_digest, storage_kind, inline_payload, blob_relpath,
+                        original_byte_size, stored_byte_size)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(raw_digest, storage_kind) DO NOTHING",
+                    params![
+                        representation.raw_digest.as_slice(),
+                        storage_kind,
+                        inline_payload,
+                        blob_relpath,
+                        sql_count(representation.original_byte_size)?,
+                        sql_count(stored_byte_size)?,
+                    ],
+                )?;
+                let raw_payload_id = transaction.query_row(
+                    "SELECT raw_payload_id FROM raw_payload
+                     WHERE raw_digest = ?1 AND storage_kind = ?2",
+                    params![representation.raw_digest.as_slice(), storage_kind],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                transaction.execute(
+                    "INSERT INTO event_representation
+                       (event_id, ordinal, format_id, raw_payload_id, missing_ref)
+                     VALUES (?1, ?2, ?3, ?4, NULL)",
+                    params![event_id, ordinal, representation.format_id, raw_payload_id],
+                )?;
+            }
+        }
+    }
     Ok(IngestOutcome {
         content_id,
-        event_id: transaction.last_insert_rowid(),
+        event_id,
     })
 }
 
@@ -1226,6 +1754,7 @@ fn merge_search_derivations(retained: &[(Vec<u8>, String)]) -> String {
 
 struct StoredRepresentation<'a> {
     format_id: &'a str,
+    raw_digest: ContentHash,
     original_byte_size: u64,
     payload: PreparedPayload,
 }
@@ -1236,18 +1765,18 @@ enum PreparedPayload {
 }
 
 impl StoredRepresentation<'_> {
-    fn storage_values(&self) -> (&str, Option<&[u8]>, Option<&str>, Option<&str>, u64) {
+    fn storage_values(&self) -> (&str, Option<&[u8]>, Option<&str>, u64) {
         match &self.payload {
             PreparedPayload::Stored(StoredPayload::Inline(bytes)) => {
-                ("inline", Some(bytes), None, None, bytes.len() as u64)
+                ("inline", Some(bytes), None, bytes.len() as u64)
             }
             PreparedPayload::Stored(StoredPayload::InlineZstd(bytes)) => {
-                ("inline_zstd", Some(bytes), None, None, bytes.len() as u64)
+                ("inline_zstd", Some(bytes), None, bytes.len() as u64)
             }
             PreparedPayload::Stored(StoredPayload::Cas {
                 relpath, byte_size, ..
-            }) => ("cas", None, Some(relpath), None, *byte_size),
-            PreparedPayload::Missing(missing_ref) => ("missing", None, None, Some(missing_ref), 0),
+            }) => ("cas", None, Some(relpath), *byte_size),
+            PreparedPayload::Missing(_) => ("missing", None, None, 0),
         }
     }
 }
@@ -1269,6 +1798,7 @@ fn stored_representations<'a>(
                 }
                 return Ok(StoredRepresentation {
                     format_id: representation.format_id.as_str(),
+                    raw_digest: *blake3::hash(bytes).as_bytes(),
                     original_byte_size: bytes.len() as u64,
                     payload: PreparedPayload::Stored(classify_payload(input.kind, bytes, cas)?),
                 });
@@ -1279,6 +1809,7 @@ fn stored_representations<'a>(
                 .ok_or(StoreError::PayloadStorageUnavailable)?;
             Ok(StoredRepresentation {
                 format_id: representation.format_id.as_str(),
+                raw_digest: [0; 32],
                 original_byte_size: 0,
                 payload: PreparedPayload::Missing(missing_ref.to_owned()),
             })

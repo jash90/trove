@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     ffi::{OsStr, OsString},
     fmt,
     fs::{self, File, OpenOptions},
@@ -16,8 +15,15 @@ use uuid::Uuid;
 
 use crate::StorageBoundaryLease;
 
+pub const CAS_VERIFY_BUFFER_BYTES: usize = 64 * 1024;
+pub const MAX_CAS_OBJECT_BYTES: usize = 128 * 1024 * 1024;
+
 #[derive(Debug, Error)]
 pub enum CasError {
+    #[error("cas_object_too_large")]
+    ObjectTooLarge,
+    #[error("private_storage_unavailable")]
+    PrivateStorageUnavailable,
     #[error("invalid CAS relative path")]
     InvalidRelativePath,
     #[error("CAS filesystem boundary is invalid")]
@@ -28,6 +34,81 @@ pub enum CasError {
     Io(#[source] io::Error),
     #[error("CAS temporary-file cleanup failed")]
     CleanupFailed(#[source] io::Error),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CasVerification {
+    pub byte_size: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GcStepBudget {
+    max_entries: usize,
+    max_filesystem_operations: usize,
+}
+
+impl GcStepBudget {
+    pub const fn new(maximum: usize) -> Self {
+        Self {
+            max_entries: maximum,
+            max_filesystem_operations: maximum,
+        }
+    }
+
+    pub const fn with_limits(max_entries: usize, max_filesystem_operations: usize) -> Self {
+        Self {
+            max_entries,
+            max_filesystem_operations,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GcStep {
+    pub examined_entries: usize,
+    pub filesystem_operations: usize,
+    pub removed_objects: usize,
+    pub complete: bool,
+}
+
+pub struct CasGcSession {
+    store: CasStore,
+    state: GcState,
+}
+
+enum GcState {
+    Direct(DirectGcState),
+    Leased(LeasedGcState),
+    Complete,
+}
+
+struct DirectGcState {
+    root: PathBuf,
+    root_entries: fs::ReadDir,
+    shard: Option<DirectGcShard>,
+}
+
+struct DirectGcShard {
+    name: String,
+    directory: PathBuf,
+    entries: fs::ReadDir,
+}
+
+struct DirectGcFile {
+    identity: (u64, u64),
+    size: u64,
+}
+
+struct LeasedGcState {
+    root: CapDir,
+    root_entries: cap_std::fs::ReadDir,
+    shard: Option<LeasedGcShard>,
+}
+
+struct LeasedGcShard {
+    name: String,
+    directory: CapDir,
+    entries: cap_std::fs::ReadDir,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -87,6 +168,9 @@ impl CasStore {
     }
 
     pub fn put(&self, bytes: &[u8]) -> Result<CasBlob, CasError> {
+        if bytes.len() > MAX_CAS_OBJECT_BYTES {
+            return Err(CasError::ObjectTooLarge);
+        }
         self.with_valid_boundary(|| {
             if self.storage_boundary.is_some() {
                 self.put_leased(bytes)
@@ -117,11 +201,14 @@ impl CasStore {
         }
 
         let temporary_path = temporary_directory.join(Uuid::now_v7().simple().to_string());
-        let temporary = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-            .map_err(CasError::Io)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let temporary = options.open(&temporary_path).map_err(CasError::Io)?;
         let guard = TempBlob::new(
             self,
             temporary_path.clone(),
@@ -166,6 +253,19 @@ impl CasStore {
         })
     }
 
+    pub fn verify(&self, relpath: &str, expected_size: u64) -> Result<CasVerification, CasError> {
+        if expected_size > MAX_CAS_OBJECT_BYTES as u64 {
+            return Err(CasError::ObjectTooLarge);
+        }
+        self.with_valid_boundary(|| {
+            if self.storage_boundary.is_some() {
+                self.verify_leased(relpath, expected_size)
+            } else {
+                self.verify_inner(relpath, expected_size)
+            }
+        })
+    }
+
     fn read_inner(&self, relpath: &str) -> Result<Vec<u8>, CasError> {
         let (shard_name, blob_name) = split_relpath(relpath)?;
         let root = self.existing_root()?;
@@ -180,54 +280,72 @@ impl CasStore {
             })
     }
 
-    pub fn remove_orphans(&self, live_relpaths: &BTreeSet<String>) -> Result<(), CasError> {
-        self.with_valid_boundary(|| {
-            if self.storage_boundary.is_some() {
-                self.remove_orphans_leased(live_relpaths)
-            } else {
-                self.remove_orphans_inner(live_relpaths)
-            }
+    fn verify_inner(&self, relpath: &str, expected_size: u64) -> Result<CasVerification, CasError> {
+        let (shard_name, blob_name) = split_relpath(relpath)?;
+        let root = self.existing_root()?;
+        let shard = self.validate_existing_directory(&root, &root.join(shard_name))?;
+        let path = shard.join(blob_name);
+        let metadata = fs::symlink_metadata(&path).map_err(CasError::Io)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || MetadataExt::nlink(&metadata) != 1
+        {
+            return Err(CasError::FilesystemBoundary);
+        }
+        validate_private_direct_file(&metadata)?;
+        if metadata.len() > MAX_CAS_OBJECT_BYTES as u64 || metadata.len() != expected_size {
+            return Err(CasError::CorruptBlob);
+        }
+        let identity = (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata));
+        let mut file = open_direct_file_nofollow(&path)?;
+        let opened = file.metadata().map_err(CasError::Io)?;
+        validate_private_direct_file(&opened)?;
+        if (MetadataExt::dev(&opened), MetadataExt::ino(&opened)) != identity {
+            return Err(CasError::FilesystemBoundary);
+        }
+        verify_reader(&mut file, relpath, expected_size)?;
+        let after = file.metadata().map_err(CasError::Io)?;
+        validate_private_direct_file(&after)?;
+        if !after.is_file()
+            || MetadataExt::nlink(&after) != 1
+            || (MetadataExt::dev(&after), MetadataExt::ino(&after)) != identity
+        {
+            return Err(CasError::FilesystemBoundary);
+        }
+        Ok(CasVerification {
+            byte_size: expected_size,
         })
     }
 
-    fn remove_orphans_inner(&self, live_relpaths: &BTreeSet<String>) -> Result<(), CasError> {
-        if matches!(fs::symlink_metadata(&self.root), Err(error) if error.kind() == io::ErrorKind::NotFound)
-        {
-            return Ok(());
-        }
-        let root = self.existing_root()?;
-        let live_relpaths = live_relpaths
-            .iter()
-            .filter(|relpath| is_valid_relpath(relpath))
-            .collect::<BTreeSet<_>>();
-
-        for entry in fs::read_dir(&root).map_err(CasError::Io)? {
-            let entry = entry.map_err(CasError::Io)?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let path = entry.path();
-            if name == ".tmp" {
-                self.validate_existing_directory(&root, &path)?;
-                continue;
-            }
-            if !is_lower_hex(&name, 2) {
-                continue;
-            }
-            let shard = self.validate_existing_directory(&root, &path)?;
-            for blob_entry in fs::read_dir(&shard).map_err(CasError::Io)? {
-                let blob_entry = blob_entry.map_err(CasError::Io)?;
-                let blob_name = blob_entry.file_name().to_string_lossy().into_owned();
-                let relpath = format!("{name}/{blob_name}");
-                if !is_valid_relpath(&relpath) {
-                    continue;
-                }
-                let path = blob_entry.path();
-                self.read_existing_blob(&root, &path, &relpath)?;
-                if !live_relpaths.contains(&relpath) {
-                    fs::remove_file(path).map_err(CasError::Io)?;
-                }
-            }
-        }
-        Ok(())
+    pub fn start_gc(&self) -> Result<CasGcSession, CasError> {
+        self.with_valid_boundary(|| {
+            let state = if self.storage_boundary.is_some() {
+                let root = self.leased_root()?;
+                let root_entries = root.entries().map_err(CasError::Io)?;
+                GcState::Leased(LeasedGcState {
+                    root,
+                    root_entries,
+                    shard: None,
+                })
+            } else if matches!(
+                fs::symlink_metadata(&self.root),
+                Err(error) if error.kind() == io::ErrorKind::NotFound
+            ) {
+                GcState::Complete
+            } else {
+                let root = self.existing_root()?;
+                let root_entries = fs::read_dir(&root).map_err(CasError::Io)?;
+                GcState::Direct(DirectGcState {
+                    root,
+                    root_entries,
+                    shard: None,
+                })
+            };
+            Ok(CasGcSession {
+                store: self.clone(),
+                state,
+            })
+        })
     }
 
     fn with_valid_boundary<T>(
@@ -241,6 +359,8 @@ impl CasStore {
     }
 
     fn validate_storage_boundary(&self) -> Result<(), CasError> {
+        #[cfg(not(unix))]
+        return Err(CasError::PrivateStorageUnavailable);
         if let Some(boundary) = &self.storage_boundary {
             boundary
                 .validate_for_cas(&self.root)
@@ -280,6 +400,8 @@ impl CasStore {
             .write(true)
             .create_new(true)
             .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        cap_std::fs::OpenOptionsExt::mode(&mut options, 0o600);
         let mut temporary = temporary_directory
             .open_with(&temporary_name, &options)
             .map_err(CasError::Io)?;
@@ -349,50 +471,51 @@ impl CasStore {
         })
     }
 
-    fn remove_orphans_leased(&self, live_relpaths: &BTreeSet<String>) -> Result<(), CasError> {
+    fn verify_leased(
+        &self,
+        relpath: &str,
+        expected_size: u64,
+    ) -> Result<CasVerification, CasError> {
+        let (shard_name, blob_name) = split_relpath(relpath)?;
         let root = self.leased_root()?;
-        let live_relpaths = live_relpaths
-            .iter()
-            .filter(|relpath| is_valid_relpath(relpath))
-            .collect::<BTreeSet<_>>();
-        for entry in root.entries().map_err(CasError::Io)? {
-            let entry = entry.map_err(CasError::Io)?;
-            let name = match entry.file_name().into_string() {
-                Ok(name) => name,
-                Err(_) => continue,
-            };
-            if name == ".tmp" {
-                open_cap_directory(&root, &name)?;
-                continue;
-            }
-            if !is_lower_hex(&name, 2) {
-                continue;
-            }
-            let shard = open_cap_directory(&root, &name)?;
-            for blob_entry in shard.entries().map_err(CasError::Io)? {
-                let blob_entry = blob_entry.map_err(CasError::Io)?;
-                let blob_name = match blob_entry.file_name().into_string() {
-                    Ok(name) => name,
-                    Err(_) => continue,
-                };
-                let relpath = format!("{name}/{blob_name}");
-                if !is_valid_relpath(&relpath) {
-                    continue;
-                }
-                read_cap_blob(&shard, OsStr::new(&blob_name), &relpath)?;
-                if !live_relpaths.contains(&relpath) {
-                    shard.remove_file(&blob_name).map_err(CasError::Io)?;
-                }
-            }
+        let shard = open_cap_directory(&root, shard_name)?;
+        let metadata = shard.symlink_metadata(blob_name).map_err(CasError::Io)?;
+        let identity = CapFileIdentity::from_metadata(&metadata)?;
+        if metadata.len() > MAX_CAS_OBJECT_BYTES as u64 || metadata.len() != expected_size {
+            return Err(CasError::CorruptBlob);
         }
-        Ok(())
+        let mut options = CapOpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let mut file = shard
+            .open_with(blob_name, &options)
+            .map_err(|_| CasError::FilesystemBoundary)?;
+        let handle_identity =
+            CapFileIdentity::from_metadata(&file.metadata().map_err(CasError::Io)?)?;
+        if handle_identity != identity {
+            return Err(CasError::FilesystemBoundary);
+        }
+        verify_reader(&mut file, relpath, expected_size)?;
+        validate_named_cap_file(&shard, OsStr::new(blob_name), identity)?;
+        Ok(CasVerification {
+            byte_size: expected_size,
+        })
     }
 
     fn ensure_root(&self) -> Result<PathBuf, CasError> {
         match fs::symlink_metadata(&self.root) {
             Ok(_) => self.validate_existing_directory_uncontained(&self.root),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir_all(&self.root).map_err(CasError::Io)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    fs::DirBuilder::new()
+                        .recursive(true)
+                        .mode(0o700)
+                        .create(&self.root)
+                        .map_err(CasError::Io)?;
+                }
+                #[cfg(not(unix))]
+                return Err(CasError::PrivateStorageUnavailable);
                 self.validate_existing_directory_uncontained(&self.root)
             }
             Err(error) => Err(CasError::Io(error)),
@@ -408,7 +531,17 @@ impl CasStore {
         match fs::symlink_metadata(&path) {
             Ok(_) => self.validate_existing_directory(root, &path),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                match fs::create_dir(&path) {
+                #[cfg(unix)]
+                let create_result = {
+                    use std::os::unix::fs::DirBuilderExt;
+                    fs::DirBuilder::new().mode(0o700).create(&path)
+                };
+                #[cfg(not(unix))]
+                let create_result = Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "private storage unavailable",
+                ));
+                match create_result {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(error) => return Err(CasError::Io(error)),
@@ -424,6 +557,17 @@ impl CasStore {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(CasError::FilesystemBoundary);
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if metadata.uid() != rustix::process::geteuid().as_raw()
+                || metadata.mode() & 0o777 != 0o700
+            {
+                return Err(CasError::PrivateStorageUnavailable);
+            }
+        }
+        #[cfg(not(unix))]
+        return Err(CasError::PrivateStorageUnavailable);
         fs::canonicalize(path).map_err(CasError::Io)
     }
 
@@ -449,13 +593,26 @@ impl CasStore {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(CasError::FilesystemBoundary);
         }
+        validate_private_direct_file(&metadata)?;
         let canonical_path = fs::canonicalize(path).map_err(CasError::Io)?;
         if !canonical_path.starts_with(root) {
             return Err(CasError::FilesystemBoundary);
         }
-        let bytes = fs::read(path).map_err(CasError::Io)?;
-        if blake3::hash(&bytes).to_hex().as_str() != &relpath[3..] {
-            return Err(CasError::CorruptBlob);
+        if metadata.len() > MAX_CAS_OBJECT_BYTES as u64 {
+            return Err(CasError::ObjectTooLarge);
+        }
+        let identity = (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata));
+        let mut file = open_direct_file_nofollow(path)?;
+        let opened = file.metadata().map_err(CasError::Io)?;
+        validate_private_direct_file(&opened)?;
+        if (MetadataExt::dev(&opened), MetadataExt::ino(&opened)) != identity {
+            return Err(CasError::FilesystemBoundary);
+        }
+        let bytes = read_verified_bytes(&mut file, relpath, metadata.len())?;
+        let after = fs::symlink_metadata(path).map_err(CasError::Io)?;
+        validate_private_direct_file(&after)?;
+        if (MetadataExt::dev(&after), MetadataExt::ino(&after)) != identity {
+            return Err(CasError::FilesystemBoundary);
         }
         Ok(Some(bytes))
     }
@@ -517,7 +674,35 @@ impl CasStore {
         if self.should_fail(TestFailure::Rename) {
             return Err(io::Error::other("deterministic test rename failure"));
         }
-        temporary_directory.rename(temporary_name, shard, blob_name)
+        #[cfg(any(
+            target_vendor = "apple",
+            target_os = "linux",
+            target_os = "android",
+            target_os = "redox"
+        ))]
+        {
+            rustix::fs::renameat_with(
+                temporary_directory,
+                temporary_name,
+                shard,
+                blob_name,
+                rustix::fs::RenameFlags::NOREPLACE,
+            )
+            .map_err(io::Error::from)
+        }
+        #[cfg(not(any(
+            target_vendor = "apple",
+            target_os = "linux",
+            target_os = "android",
+            target_os = "redox"
+        )))]
+        {
+            let _ = (temporary_directory, temporary_name, shard, blob_name);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "exclusive rename is unavailable",
+            ))
+        }
     }
 
     fn rename(&self, temporary_path: &Path, final_path: &Path, _bytes: &[u8]) -> io::Result<()> {
@@ -527,18 +712,315 @@ impl CasStore {
         }
         #[cfg(test)]
         if self.should_fail(TestFailure::DestinationAppears) {
-            fs::write(final_path, _bytes)?;
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options.open(final_path)?.write_all(_bytes)?;
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "deterministic test destination race",
             ));
         }
-        fs::rename(temporary_path, final_path)
+        #[cfg(any(
+            target_vendor = "apple",
+            target_os = "linux",
+            target_os = "android",
+            target_os = "redox"
+        ))]
+        {
+            rustix::fs::renameat_with(
+                rustix::fs::CWD,
+                temporary_path,
+                rustix::fs::CWD,
+                final_path,
+                rustix::fs::RenameFlags::NOREPLACE,
+            )
+            .map_err(io::Error::from)
+        }
+        #[cfg(not(any(
+            target_vendor = "apple",
+            target_os = "linux",
+            target_os = "android",
+            target_os = "redox"
+        )))]
+        {
+            let _ = (temporary_path, final_path);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "exclusive rename is unavailable",
+            ))
+        }
     }
 
     #[cfg(test)]
     fn should_fail(&self, failure: TestFailure) -> bool {
         self.test_failures.contains(&failure)
+    }
+}
+
+impl CasGcSession {
+    pub fn step(
+        &mut self,
+        budget: GcStepBudget,
+        mut is_live: impl FnMut(&str) -> Result<bool, CasError>,
+    ) -> Result<GcStep, CasError> {
+        self.store.validate_storage_boundary()?;
+        let mut outcome = GcStep {
+            examined_entries: 0,
+            filesystem_operations: 0,
+            removed_objects: 0,
+            complete: matches!(self.state, GcState::Complete),
+        };
+        while !outcome.complete
+            && outcome.examined_entries < budget.max_entries
+            && outcome.filesystem_operations < budget.max_filesystem_operations
+        {
+            let progress = match &mut self.state {
+                GcState::Direct(state) => next_direct_gc_entry(&self.store, state, &mut is_live)?,
+                GcState::Leased(state) => next_leased_gc_entry(state, &mut is_live)?,
+                GcState::Complete => GcProgress::Complete,
+            };
+            match progress {
+                GcProgress::Examined { removed } => {
+                    outcome.examined_entries += 1;
+                    outcome.filesystem_operations += 1;
+                    outcome.removed_objects += usize::from(removed);
+                }
+                GcProgress::Complete => {
+                    self.state = GcState::Complete;
+                    outcome.complete = true;
+                }
+            }
+        }
+        self.store.validate_storage_boundary()?;
+        Ok(outcome)
+    }
+}
+
+enum GcProgress {
+    Examined { removed: bool },
+    Complete,
+}
+
+fn next_direct_gc_entry(
+    store: &CasStore,
+    state: &mut DirectGcState,
+    is_live: &mut impl FnMut(&str) -> Result<bool, CasError>,
+) -> Result<GcProgress, CasError> {
+    loop {
+        if let Some(shard) = &mut state.shard {
+            match shard.entries.next() {
+                Some(Err(error)) => return Err(CasError::Io(error)),
+                Some(Ok(entry)) => {
+                    let blob_name = match entry.file_name().into_string() {
+                        Ok(name) => name,
+                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                    };
+                    let relpath = format!("{}/{blob_name}", shard.name);
+                    if !is_valid_relpath(&relpath) {
+                        return Ok(GcProgress::Examined { removed: false });
+                    }
+                    let path = shard.directory.join(&blob_name);
+                    let Some(file) = valid_direct_gc_file(&path)? else {
+                        return Ok(GcProgress::Examined { removed: false });
+                    };
+                    if store.verify_inner(&relpath, file.size).is_err() || is_live(&relpath)? {
+                        return Ok(GcProgress::Examined { removed: false });
+                    }
+                    let Some(after) = valid_direct_gc_file(&path)? else {
+                        return Ok(GcProgress::Examined { removed: false });
+                    };
+                    if after.identity != file.identity {
+                        return Ok(GcProgress::Examined { removed: false });
+                    }
+                    fs::remove_file(path).map_err(CasError::Io)?;
+                    return Ok(GcProgress::Examined { removed: true });
+                }
+                None => state.shard = None,
+            }
+        } else {
+            match state.root_entries.next() {
+                Some(Err(error)) => return Err(CasError::Io(error)),
+                Some(Ok(entry)) => {
+                    let name = match entry.file_name().into_string() {
+                        Ok(name) => name,
+                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                    };
+                    if name == ".tmp" || !is_lower_hex(&name, 2) {
+                        return Ok(GcProgress::Examined { removed: false });
+                    }
+                    let path = entry.path();
+                    let directory = match store.validate_existing_directory(&state.root, &path) {
+                        Ok(directory) => directory,
+                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                    };
+                    let entries = match fs::read_dir(&directory) {
+                        Ok(entries) => entries,
+                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                    };
+                    state.shard = Some(DirectGcShard {
+                        name,
+                        directory,
+                        entries,
+                    });
+                    return Ok(GcProgress::Examined { removed: false });
+                }
+                None => return Ok(GcProgress::Complete),
+            }
+        }
+    }
+}
+
+fn valid_direct_gc_file(path: &Path) -> Result<Option<DirectGcFile>, CasError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(CasError::Io(error)),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || MetadataExt::nlink(&metadata) != 1
+    {
+        return Ok(None);
+    }
+    if validate_private_direct_file(&metadata).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(DirectGcFile {
+        identity: (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)),
+        size: metadata.len(),
+    }))
+}
+
+fn validate_private_direct_file(metadata: &fs::Metadata) -> Result<(), CasError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if !metadata.is_file()
+            || metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.mode() & 0o777 != 0o600
+            || std::os::unix::fs::MetadataExt::nlink(metadata) != 1
+        {
+            return Err(CasError::PrivateStorageUnavailable);
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Err(CasError::PrivateStorageUnavailable)
+    }
+}
+
+fn open_direct_file_nofollow(path: &Path) -> Result<File, CasError> {
+    #[cfg(unix)]
+    {
+        use rustix::fs::{Mode, OFlags};
+        let descriptor = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|_| CasError::FilesystemBoundary)?;
+        Ok(File::from(descriptor))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(CasError::PrivateStorageUnavailable)
+    }
+}
+
+fn next_leased_gc_entry(
+    state: &mut LeasedGcState,
+    is_live: &mut impl FnMut(&str) -> Result<bool, CasError>,
+) -> Result<GcProgress, CasError> {
+    loop {
+        if let Some(shard) = &mut state.shard {
+            match shard.entries.next() {
+                Some(Err(error)) => return Err(CasError::Io(error)),
+                Some(Ok(entry)) => {
+                    let blob_name = match entry.file_name().into_string() {
+                        Ok(name) => name,
+                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                    };
+                    let relpath = format!("{}/{blob_name}", shard.name);
+                    if !is_valid_relpath(&relpath) {
+                        return Ok(GcProgress::Examined { removed: false });
+                    }
+                    let metadata = match shard.directory.symlink_metadata(&blob_name) {
+                        Ok(metadata) => metadata,
+                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                    };
+                    let identity = match CapFileIdentity::from_metadata(&metadata) {
+                        Ok(identity) => identity,
+                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                    };
+                    if metadata.len() > MAX_CAS_OBJECT_BYTES as u64 {
+                        return Ok(GcProgress::Examined { removed: false });
+                    }
+                    let mut options = CapOpenOptions::new();
+                    options.read(true).follow(FollowSymlinks::No);
+                    let mut file = match shard.directory.open_with(&blob_name, &options) {
+                        Ok(file) => file,
+                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                    };
+                    let handle_identity = match file.metadata() {
+                        Ok(metadata) => CapFileIdentity::from_metadata(&metadata),
+                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                    };
+                    if !matches!(handle_identity, Ok(current) if current == identity)
+                        || verify_reader(&mut file, &relpath, metadata.len()).is_err()
+                        || is_live(&relpath)?
+                    {
+                        return Ok(GcProgress::Examined { removed: false });
+                    }
+                    if validate_named_cap_file(&shard.directory, OsStr::new(&blob_name), identity)
+                        .is_err()
+                    {
+                        return Ok(GcProgress::Examined { removed: false });
+                    }
+                    shard
+                        .directory
+                        .remove_file(&blob_name)
+                        .map_err(CasError::Io)?;
+                    return Ok(GcProgress::Examined { removed: true });
+                }
+                None => state.shard = None,
+            }
+        } else {
+            match state.root_entries.next() {
+                Some(Err(error)) => return Err(CasError::Io(error)),
+                Some(Ok(entry)) => {
+                    let name = match entry.file_name().into_string() {
+                        Ok(name) => name,
+                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                    };
+                    if name == ".tmp" || !is_lower_hex(&name, 2) {
+                        return Ok(GcProgress::Examined { removed: false });
+                    }
+                    let directory = match open_cap_directory(&state.root, &name) {
+                        Ok(directory) => directory,
+                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                    };
+                    let entries = match directory.entries() {
+                        Ok(entries) => entries,
+                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                    };
+                    state.shard = Some(LeasedGcShard {
+                        name,
+                        directory,
+                        entries,
+                    });
+                    return Ok(GcProgress::Examined { removed: false });
+                }
+                None => return Ok(GcProgress::Complete),
+            }
+        }
     }
 }
 
@@ -556,6 +1038,17 @@ impl CapFileIdentity {
         {
             return Err(CasError::FilesystemBoundary);
         }
+        #[cfg(unix)]
+        {
+            use cap_std::fs::MetadataExt as _;
+            if metadata.uid() != rustix::process::geteuid().as_raw()
+                || metadata.mode() & 0o777 != 0o600
+            {
+                return Err(CasError::PrivateStorageUnavailable);
+            }
+        }
+        #[cfg(not(unix))]
+        return Err(CasError::PrivateStorageUnavailable);
         Ok(Self {
             device: MetadataExt::dev(metadata),
             inode: MetadataExt::ino(metadata),
@@ -564,7 +1057,18 @@ impl CapFileIdentity {
 }
 
 fn ensure_cap_directory(parent: &CapDir, name: &str) -> Result<CapDir, CasError> {
-    match parent.create_dir(name) {
+    #[cfg(unix)]
+    let create_result = {
+        let mut builder = cap_std::fs::DirBuilder::new();
+        cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        parent.create_dir_with(name, &builder)
+    };
+    #[cfg(not(unix))]
+    let create_result = Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "private storage unavailable",
+    ));
+    match create_result {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(CasError::Io(error)),
@@ -580,6 +1084,16 @@ fn open_cap_directory(parent: &CapDir, name: &str) -> Result<CapDir, CasError> {
     if !metadata.is_dir() || MetadataExt::nlink(&metadata) == 0 {
         return Err(CasError::FilesystemBoundary);
     }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::MetadataExt as _;
+        if metadata.uid() != rustix::process::geteuid().as_raw() || metadata.mode() & 0o777 != 0o700
+        {
+            return Err(CasError::PrivateStorageUnavailable);
+        }
+    }
+    #[cfg(not(unix))]
+    return Err(CasError::PrivateStorageUnavailable);
     Ok(directory)
 }
 
@@ -625,13 +1139,68 @@ fn read_cap_blob(
     if handle_identity != identity {
         return Err(CasError::FilesystemBoundary);
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(CasError::Io)?;
+    if metadata.len() > MAX_CAS_OBJECT_BYTES as u64 {
+        return Err(CasError::ObjectTooLarge);
+    }
+    let bytes = read_verified_bytes(&mut file, relpath, metadata.len())?;
     validate_named_cap_file(directory, name, identity)?;
-    if blake3::hash(&bytes).to_hex().as_str() != &relpath[3..] {
+    Ok(Some(bytes))
+}
+
+fn read_verified_bytes(
+    reader: &mut impl Read,
+    relpath: &str,
+    expected_size: u64,
+) -> Result<Vec<u8>, CasError> {
+    let capacity = usize::try_from(expected_size).map_err(|_| CasError::ObjectTooLarge)?;
+    if capacity > MAX_CAS_OBJECT_BYTES {
+        return Err(CasError::ObjectTooLarge);
+    }
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; CAS_VERIFY_BUFFER_BYTES];
+    loop {
+        let read = reader.read(&mut buffer).map_err(CasError::Io)?;
+        if read == 0 {
+            break;
+        }
+        if bytes.len().saturating_add(read) > capacity {
+            return Err(CasError::CorruptBlob);
+        }
+        hasher.update(&buffer[..read]);
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    if bytes.len() != capacity || hasher.finalize().to_hex().as_str() != &relpath[3..] {
         return Err(CasError::CorruptBlob);
     }
-    Ok(Some(bytes))
+    Ok(bytes)
+}
+
+fn verify_reader(
+    reader: &mut impl Read,
+    relpath: &str,
+    expected_size: u64,
+) -> Result<(), CasError> {
+    let mut hasher = blake3::Hasher::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; CAS_VERIFY_BUFFER_BYTES];
+    loop {
+        let read = reader.read(&mut buffer).map_err(CasError::Io)?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .ok_or(CasError::ObjectTooLarge)?;
+        if total > MAX_CAS_OBJECT_BYTES as u64 || total > expected_size {
+            return Err(CasError::CorruptBlob);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if total != expected_size || hasher.finalize().to_hex().as_str() != &relpath[3..] {
+        return Err(CasError::CorruptBlob);
+    }
+    Ok(())
 }
 
 struct CapTempBlob {

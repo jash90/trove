@@ -2,10 +2,14 @@ use std::{sync::Arc, time::Duration};
 
 use rusqlite::{Connection, OpenFlags};
 
-use crate::{StorageBoundaryLease, StoreConfig, StoreError, migrations::validate_current_schema};
+use crate::{
+    StorageBoundaryLease, StoreConfig, StoreError,
+    writer::{RuntimeRef, acquire_read_runtime},
+};
 
 pub struct ReadOnlyStore {
     config: StoreConfig,
+    runtime: RuntimeRef,
 }
 
 impl ReadOnlyStore {
@@ -16,37 +20,31 @@ impl ReadOnlyStore {
         let boundary = match config.storage_boundary() {
             Some(boundary) => {
                 boundary
-                    .validate_for_config(&config, false)
-                    .map_err(|_| StoreError::StorageBoundary)?;
+                    .validate_preflight_for_config(&config, false)
+                    .map_err(StoreError::from)?;
                 Arc::clone(boundary)
             }
             None => {
                 let boundary = Arc::new(
-                    StorageBoundaryLease::open_read_only(&config)
-                        .map_err(|_| StoreError::StorageBoundary)?,
+                    StorageBoundaryLease::open_read_only_preflight(&config)
+                        .map_err(StoreError::from)?,
                 );
                 config.set_storage_boundary(Arc::clone(&boundary));
                 boundary
             }
         };
-        let connection = open_reader_connection(&config)?;
-        validate_current_schema(&connection)?;
+        let runtime = acquire_read_runtime(&config, Arc::clone(&boundary))?;
         boundary
-            .validate()
-            .map_err(|_| StoreError::StorageBoundary)?;
-        Ok(Self { config })
+            .validate_for_config(&config, false)
+            .map_err(StoreError::from)?;
+        Ok(Self { config, runtime })
     }
 
     pub fn with_reader<T>(
         &self,
         operation: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, StoreError> {
-        let connection = open_reader_connection(&self.config)?;
-        let result = operation(&connection);
-        required_boundary(&self.config)?
-            .validate()
-            .map_err(|_| StoreError::StorageBoundary)?;
-        Ok(result?)
+        self.runtime.with_reader(&self.config, operation)
     }
 
     pub fn cas_store(&self) -> Result<crate::CasStore, StoreError> {
@@ -62,19 +60,18 @@ pub(crate) fn open_writer_connection(config: &StoreConfig) -> Result<Connection,
     let boundary = required_boundary(config)?;
     boundary
         .validate_for_config(config, true)
-        .map_err(|_| StoreError::StorageBoundary)?;
+        .map_err(StoreError::from)?;
     let connection = Connection::open_with_flags(
         config.database_path(),
         OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    boundary
-        .validate()
-        .map_err(|_| StoreError::StorageBoundary)?;
+    boundary.validate().map_err(StoreError::from)?;
     enable_wal(&connection)?;
     configure_connection(&connection)?;
     boundary
-        .validate()
-        .map_err(|_| StoreError::StorageBoundary)?;
+        .harden_sqlite_sidecars()
+        .map_err(StoreError::from)?;
+    boundary.validate().map_err(StoreError::from)?;
     Ok(connection)
 }
 
@@ -82,19 +79,15 @@ pub(crate) fn open_reader_connection(config: &StoreConfig) -> Result<Connection,
     let boundary = required_boundary(config)?;
     boundary
         .validate_for_config(config, false)
-        .map_err(|_| StoreError::StorageBoundary)?;
+        .map_err(StoreError::from)?;
     let connection = Connection::open_with_flags(
         config.database_path(),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    boundary
-        .validate()
-        .map_err(|_| StoreError::StorageBoundary)?;
+    boundary.validate().map_err(StoreError::from)?;
     configure_connection(&connection)?;
     connection.execute_batch("PRAGMA query_only = ON;")?;
-    boundary
-        .validate()
-        .map_err(|_| StoreError::StorageBoundary)?;
+    boundary.validate().map_err(StoreError::from)?;
     Ok(connection)
 }
 

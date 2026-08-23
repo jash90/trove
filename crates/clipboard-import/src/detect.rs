@@ -1,11 +1,10 @@
 use std::{
     fmt, fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
-use serde_json::Value;
-
-use crate::{ImportError, ImportSource, bounded_manifest_bytes};
+use crate::{ImportError, ImportSource, MAX_IMPORT_MANIFEST_BYTES, stream_json_records};
 
 /// Maximum number of top-level directory entries inspected while discovering an unnamed export
 /// manifest. Named `clipboard.json` / `clipboard.csv` files bypass discovery entirely.
@@ -107,28 +106,37 @@ fn select_unnamed_manifest(
 }
 
 fn detect_file(path: &Path) -> Result<DetectedExport, ImportError> {
-    let bytes = bounded_manifest_bytes(path, "detection")?;
     let source = match path.extension().and_then(|extension| extension.to_str()) {
-        Some("csv") => detect_csv_source(&bytes)?,
+        Some("csv") => detect_csv_source(path)?,
         Some("json") => {
-            let document = serde_json::from_slice(&bytes)
-                .map_err(|_| ImportError::export("detection", "invalid_document"))?;
-            detect_json_source(&document)?
+            let mut detected = None;
+            stream_json_records(path, "detection", |_, bytes| {
+                detected = Some(detect_json_source(bytes)?);
+                Ok(false)
+            })?;
+            detected.ok_or_else(|| ImportError::export("detection", "invalid_document"))?
         }
         _ => return Err(ImportError::export("detection", "unsupported_format")),
     };
     Ok(DetectedExport {
         source,
         export_path: path.to_path_buf(),
-        source_fingerprint: source_fingerprint(source, &bytes),
+        source_fingerprint: source_fingerprint(source, path)?,
     })
 }
 
-fn detect_csv_source(bytes: &[u8]) -> Result<ImportSource, ImportError> {
+fn detect_csv_source(path: &Path) -> Result<ImportSource, ImportError> {
+    let metadata =
+        fs::metadata(path).map_err(|_| ImportError::export("detection", "unreadable_export"))?;
+    if metadata.len() > MAX_IMPORT_MANIFEST_BYTES as u64 {
+        return Err(ImportError::service("analysis_too_large"));
+    }
+    let file =
+        fs::File::open(path).map_err(|_| ImportError::export("detection", "unreadable_export"))?;
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(false)
-        .from_reader(bytes);
+        .from_reader(file);
     let headers = reader
         .headers()
         .map_err(|_| ImportError::export("detection", "invalid_document"))?;
@@ -142,20 +150,40 @@ fn detect_csv_source(bytes: &[u8]) -> Result<ImportSource, ImportError> {
     Err(ImportError::export("detection", "unknown_schema"))
 }
 
-fn source_fingerprint(source: ImportSource, manifest_bytes: &[u8]) -> [u8; 32] {
+fn source_fingerprint(source: ImportSource, path: &Path) -> Result<[u8; 32], ImportError> {
+    let metadata =
+        fs::metadata(path).map_err(|_| ImportError::export("detection", "unreadable_export"))?;
+    if metadata.len() > MAX_IMPORT_MANIFEST_BYTES as u64 {
+        return Err(ImportError::service("analysis_too_large"));
+    }
+    let mut file =
+        fs::File::open(path).map_err(|_| ImportError::export("detection", "unreadable_export"))?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(source.as_str().as_bytes());
     hasher.update(&[0]);
-    hasher.update(manifest_bytes);
-    *hasher.finalize().as_bytes()
+    let mut read_bytes = 0_usize;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| ImportError::export("detection", "unreadable_export"))?;
+        if read == 0 {
+            break;
+        }
+        read_bytes = read_bytes
+            .checked_add(read)
+            .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+        if read_bytes > MAX_IMPORT_MANIFEST_BYTES {
+            return Err(ImportError::service("analysis_too_large"));
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(*hasher.finalize().as_bytes())
 }
 
-fn detect_json_source(value: &Value) -> Result<ImportSource, ImportError> {
-    let record = value
-        .as_array()
-        .and_then(|records| records.first())
-        .and_then(Value::as_object)
-        .ok_or_else(|| ImportError::export("detection", "invalid_document"))?;
+fn detect_json_source(bytes: &[u8]) -> Result<ImportSource, ImportError> {
+    let record = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(bytes)
+        .map_err(|_| ImportError::export("detection", "invalid_document"))?;
 
     if record.contains_key("createdAt") && record.contains_key("category") {
         return Ok(ImportSource::Raycast);
