@@ -7,6 +7,7 @@
 
 use tauri::{
     AppHandle, Manager, Runtime,
+    image::Image,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
 };
@@ -47,9 +48,12 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri
     let menu_control = control.clone();
     let pause_item = pause.clone();
     TrayIconBuilder::with_id("clipboard-history")
-        .icon(app.default_window_icon().cloned().ok_or_else(|| {
-            tauri::Error::Anyhow(anyhow::anyhow!("the application has no icon to show"))
-        })?)
+        // Its own drawing, not the application icon. A template icon is drawn
+        // from its alpha channel alone — every opaque pixel becomes one flat
+        // colour — so the coloured icon that suits the Dock arrives in the menu
+        // bar as a featureless rectangle. This one is a glyph: mostly
+        // transparent, so what survives the flattening is the clipboard.
+        .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
         .icon_as_template(true)
         .tooltip("Historia schowka")
         .menu(&menu)
