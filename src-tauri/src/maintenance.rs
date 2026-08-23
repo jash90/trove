@@ -89,12 +89,21 @@ async fn reclaim_unused_blobs(store: &StoreHandle) {
     };
     let reader = store.clone();
     let scan = tokio::task::spawn_blocking(move || {
-        session.step(GcStepBudget::new(GC_ENTRIES_PER_PASS), |relpath| {
-            Ok(is_referenced(&reader, relpath))
-        })
+        // One reader for the whole pass. Asking the store per file opens a
+        // fresh connection each time, which costs more than the question.
+        let mut outcome = None;
+        let _ = reader.with_reader(|connection| {
+            outcome = Some(
+                session.step(GcStepBudget::new(GC_ENTRIES_PER_PASS), |relpath| {
+                    Ok(is_referenced(connection, relpath))
+                }),
+            );
+            Ok(())
+        });
+        outcome
     })
     .await;
-    let Ok(Ok(step)) = scan else {
+    let Ok(Some(Ok(step))) = scan else {
         return;
     };
     if step.candidates.is_empty() {
@@ -103,16 +112,14 @@ async fn reclaim_unused_blobs(store: &StoreHandle) {
     let _ = store.reclaim_orphans(step.candidates).await;
 }
 
-fn is_referenced(store: &StoreHandle, relpath: &str) -> bool {
-    store
-        .with_reader(|connection| {
-            connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM raw_payload WHERE blob_relpath = ?1)
-                     OR EXISTS(SELECT 1 FROM artifact WHERE blob_relpath = ?1)",
-                [relpath],
-                |row| row.get::<_, bool>(0),
-            )
-        })
+fn is_referenced(connection: &rusqlite::Connection, relpath: &str) -> bool {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM raw_payload WHERE blob_relpath = ?1)
+                 OR EXISTS(SELECT 1 FROM artifact WHERE blob_relpath = ?1)",
+            [relpath],
+            |row| row.get::<_, bool>(0),
+        )
         // An unreadable database must not be taken as "nothing is referenced":
         // that would delete every blob in the store.
         .unwrap_or(true)

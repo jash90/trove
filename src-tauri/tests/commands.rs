@@ -299,14 +299,14 @@ fn existing_revision_six_database_upgrades_to_settings_without_losing_data() {
 
     let config = StoreConfig::new(&database_path).with_blob_root(directory.path().join("blobs"));
     let store = StoreHandle::open(config.clone()).unwrap();
-    assert_eq!(schema_version(&store), 2);
+    assert_eq!(schema_version(&store), 3);
     assert_eq!(schema_revision(&store), 6);
     assert!(settings_table_exists(&store));
     assert_eq!(content_count(&store), 1);
     drop(store);
 
     let reopened = StoreHandle::open(config).unwrap();
-    assert_eq!(schema_version(&reopened), 2);
+    assert_eq!(schema_version(&reopened), 3);
     assert_eq!(schema_revision(&reopened), 6);
     assert!(settings_table_exists(&reopened));
     assert_eq!(content_count(&reopened), 1);
@@ -319,13 +319,13 @@ fn fresh_database_opens_at_settings_schema_and_reopens_idempotently() {
         .with_blob_root(directory.path().join("blobs"));
 
     let store = StoreHandle::open(config.clone()).unwrap();
-    assert_eq!(schema_version(&store), 2);
+    assert_eq!(schema_version(&store), 3);
     assert_eq!(schema_revision(&store), 6);
     assert!(settings_table_exists(&store));
     drop(store);
 
     let reopened = StoreHandle::open(config).unwrap();
-    assert_eq!(schema_version(&reopened), 2);
+    assert_eq!(schema_version(&reopened), 3);
     assert_eq!(schema_revision(&reopened), 6);
     assert!(settings_table_exists(&reopened));
 }

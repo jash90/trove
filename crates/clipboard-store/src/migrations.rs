@@ -4,7 +4,9 @@ use crate::StoreError;
 
 const INITIAL_MIGRATION: &str = include_str!("migrations/001_initial.sql");
 const SETTINGS_MIGRATION: &str = include_str!("migrations/002_settings.sql");
-const LATEST_SCHEMA_VERSION: i64 = 2;
+const BLOB_REFERENCE_INDEX_MIGRATION: &str =
+    include_str!("migrations/003_blob_reference_indexes.sql");
+const LATEST_SCHEMA_VERSION: i64 = 3;
 const SCHEMA_IDENTITY: &str = "clipboard-store";
 const SCHEMA_REVISION: i64 = 6;
 
@@ -50,6 +52,13 @@ impl Migrations {
             validate_schema_identity(&transaction)?;
             transaction.execute_batch(SETTINGS_MIGRATION)?;
             transaction.pragma_update(None, "user_version", 2_i64)?;
+        }
+        if version < 3 {
+            // Indexes only. The schema identity marks the shape of the tables,
+            // which this does not touch, so a database that has these and one
+            // that does not hold the same data and stay mutually readable.
+            transaction.execute_batch(BLOB_REFERENCE_INDEX_MIGRATION)?;
+            transaction.pragma_update(None, "user_version", 3_i64)?;
         }
         validate_schema_identity(&transaction)?;
         transaction.commit()?;
@@ -145,7 +154,7 @@ mod tests {
             .query_row("SELECT value FROM migration_sentinel", [], |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         assert_eq!(revision, 6);
         assert_eq!(sentinel, "preserved");
     }
