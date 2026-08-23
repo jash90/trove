@@ -3,6 +3,7 @@
 mod error;
 mod model;
 mod normalize;
+mod platform;
 
 pub use error::CoreError;
 pub use model::{
@@ -12,3 +13,7 @@ pub use model::{
     normalize_search_text_bounded, update_canonical_bytes,
 };
 pub use normalize::normalize_search_text;
+pub use platform::{
+    CaptureSink, ClipboardAdapter, ClipboardCapabilities, ClipboardSnapshot, PasteOutcome,
+    PasteTarget, PlatformError, SUPPRESSION_WINDOW_MS, WriteReceipt,
+};
