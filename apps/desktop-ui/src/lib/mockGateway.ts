@@ -87,10 +87,23 @@ export const mockGateway: ClipboardGateway = {
   // Nothing to open in a browser preview; the settings page is reachable by
   // hand at #settings.
   openSettingsWindow: async () => undefined,
+  linkPreview: async (eventId) => {
+    const item = historyItems.find((candidate) => candidate.eventId === eventId);
+    if (!item || item.kind !== 'link') return null;
+    return {
+      host: 'example.invalid',
+      rest: '/synthetic-document',
+      title: 'Synthetic document title',
+      iconMime: null,
+      iconBase64: null,
+      localOnly: false,
+    };
+  },
   chooseExportDirectory: async () => 'synthetic://clipboard-export',
   exportHistory: async () => ({ records: 4, images: 1, withoutPayload: 1 }),
   // The browser preview has no core behind it, so nothing ever changes.
   onHistoryChanged: () => () => undefined,
+  onLinkPreviewReady: () => () => undefined,
   getThumbnail: async (eventId) =>
     eventId === 103 ? { mimeType: 'image/png', base64: 'c3ludGhldGlj' } : null,
   getSettings: async () => ({ ...settings, denylistedApps: [...settings.denylistedApps] }),

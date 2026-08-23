@@ -54,6 +54,7 @@ export const SYNTHETIC_SETTINGS: AppSettings = {
   // History is unbounded unless the user deliberately enables retention.
   retentionDays: null,
   denylistedApps: ['com.apple.Passwords', 'com.apple.keychainaccess'],
+  linkPreviews: true,
 };
 
 export const SYNTHETIC_STORAGE_STATS: StorageStats = {

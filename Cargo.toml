@@ -7,6 +7,7 @@ members = [
   "crates/clipboard-search",
   "crates/clipboard-images",
   "crates/clipboard-import",
+  "crates/clipboard-link-preview",
   "crates/platform-macos",
   "crates/platform-linux",
   "crates/platform-windows",
@@ -41,6 +42,11 @@ directories = "6.0.0"
 # rust_backend keeps this pure Rust (miniz_oxide); no libz-sys, no C toolchain.
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+# HTTPS through the system trust store: on macOS that is Security.framework,
+# so a corporate root or a user-added certificate behaves here exactly as it
+# does everywhere else on the machine. The alternative bundles its own crypto
+# and its own certificate list, which is more to trust and more to update.
+reqwest = { version = "=0.13.4", default-features = false, features = ["native-tls", "charset"] }
 rusqlite = { version = "0.40.2", features = ["backup", "bundled", "cache"] }
 rusqlite_migration = "2.6.0"
 rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
@@ -51,6 +57,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 unicode-normalization = "0.1.25"
+url = "2.5.8"
 uuid = { version = "1.24.1", features = ["v7", "serde"] }
 zeroize = "=1.9.0"
 zstd = "=0.13.3"

@@ -717,6 +717,11 @@ enum WriteCommand {
         created_at_ms: i64,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    StoreLinkPreview {
+        content_id: i64,
+        record: LinkPreviewRecord,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     RunRetentionBatch {
         cutoff_ms: i64,
         max_events: u32,
@@ -857,6 +862,31 @@ impl StoreHandle {
                 content_id,
                 bytes,
                 created_at_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    /// Remembers what a link's page said about itself.
+    ///
+    /// Failures are remembered too: a site that is gone must not be asked again
+    /// every time the list is scrolled past it.
+    pub async fn store_link_preview(
+        &self,
+        content_id: i64,
+        record: LinkPreviewRecord,
+    ) -> Result<(), StoreError> {
+        let (reply, response) = oneshot::channel();
+        self.runtime
+            .runtime
+            .writer_sender()?
+            .send(WriteCommand::StoreLinkPreview {
+                content_id,
+                record,
                 reply,
             })
             .await
@@ -1231,6 +1261,15 @@ fn handle_command(
         } => {
             let _ = reply.send(with_storage_boundary(boundary, || {
                 store_thumbnail(connection, cas, content_id, &bytes, created_at_ms)
+            }));
+        }
+        WriteCommand::StoreLinkPreview {
+            content_id,
+            record,
+            reply,
+        } => {
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                store_link_preview(connection, cas, content_id, &record)
             }));
         }
         WriteCommand::RunRetentionBatch {
@@ -1749,6 +1788,75 @@ fn fail_import(
             Ok(_) => Err(StoreError::ImportRunNotResumable),
         };
     }
+    transaction.commit()?;
+    Ok(())
+}
+
+/// What a link fetch produced, ready to be remembered.
+#[derive(Clone, Debug, Default)]
+pub struct LinkPreviewRecord {
+    pub status: LinkPreviewStatus,
+    pub title: Option<String>,
+    pub icon: Option<Vec<u8>>,
+    pub icon_mime: Option<String>,
+}
+
+/// How a link fetch ended.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LinkPreviewStatus {
+    /// The page answered with something worth showing.
+    Ok,
+    /// The page answered, but had neither a title nor an icon.
+    Empty,
+    /// The attempt failed. Remembered so it is not repeated on sight.
+    #[default]
+    Failed,
+    /// Never attempted: the address is one this must not contact.
+    Refused,
+}
+
+impl LinkPreviewStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Empty => "empty",
+            Self::Failed => "failed",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+fn store_link_preview(
+    connection: &mut Connection,
+    cas: &CasStore,
+    content_id: i64,
+    record: &LinkPreviewRecord,
+) -> Result<(), StoreError> {
+    let icon = record
+        .icon
+        .as_ref()
+        .map(|bytes| cas.put(bytes))
+        .transpose()?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "INSERT INTO link_preview
+           (content_id, status, title, icon_relpath, icon_mime, fetched_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(content_id) DO UPDATE SET
+           status = excluded.status,
+           title = excluded.title,
+           icon_relpath = excluded.icon_relpath,
+           icon_mime = excluded.icon_mime,
+           fetched_at_ms = excluded.fetched_at_ms",
+        rusqlite::params![
+            content_id,
+            record.status.as_str(),
+            record.title,
+            icon.as_ref().map(|blob| blob.relpath.clone()),
+            icon.as_ref().and(record.icon_mime.clone()),
+            now_ms(),
+        ],
+    )?;
     transaction.commit()?;
     Ok(())
 }

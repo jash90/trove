@@ -1,8 +1,9 @@
 import { Eye, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 
-import type { Preview } from '../lib/contracts';
+import type { LinkPreview as LinkPreviewContract, Preview } from '../lib/contracts';
 import { formatByteSize, KIND_LABELS } from '../lib/format';
+import { LinkPreviewCard } from './LinkPreviewCard';
 import { ImagePreview, type ThumbnailStatus } from './ImagePreview';
 import { SourceLocation } from './SourceLocation';
 import { TextPreview } from './TextPreview';
@@ -14,6 +15,8 @@ interface PreviewPaneProps {
   status?: PreviewStatus;
   thumbnailUrl: string | null;
   thumbnailStatus: ThumbnailStatus;
+  /** What the selected link points at, when the entry is a link. */
+  linkPreview?: LinkPreviewContract | null;
   actions?: ReactNode;
   onClose?: () => void;
   onRevealSource?: () => void;
@@ -24,6 +27,7 @@ export const PreviewPane = ({
   status = preview ? 'ready' : 'idle',
   thumbnailUrl,
   thumbnailStatus,
+  linkPreview = null,
   actions,
   onClose,
   onRevealSource,
@@ -71,6 +75,8 @@ export const PreviewPane = ({
                 thumbnailUrl={thumbnailUrl}
                 thumbnailStatus={thumbnailStatus}
               />
+            ) : preview.kind === 'link' && linkPreview ? (
+              <LinkPreviewCard preview={linkPreview} />
             ) : (
               <TextPreview preview={preview} />
             )}

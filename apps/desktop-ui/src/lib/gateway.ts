@@ -12,6 +12,7 @@ import {
   type CopyResult,
   type ExportSummary,
   type HistoryPage,
+  type LinkPreview,
   type ImportAnalysis,
   type ImportProgress,
   type ImportRunHandle,
@@ -40,6 +41,8 @@ export interface ClipboardGateway {
   getImportStatus(runId: string): Promise<ImportProgress>;
   revealSource(eventId: number): Promise<void>;
   openSettingsWindow(): Promise<void>;
+  linkPreview(eventId: number): Promise<LinkPreview | null>;
+  onLinkPreviewReady?(listener: (eventId: number) => void): () => void;
   chooseExportDirectory(): Promise<string | null>;
   exportHistory(directory: string): Promise<ExportSummary>;
   /**
@@ -67,10 +70,13 @@ export interface ClipboardGateway {
  * the palette must still open, so a failure here degrades to a window that
  * misses a refresh rather than to a broken one.
  */
-const subscribe = (event: string, listener: () => void): (() => void) => {
+const subscribe = <T = void,>(
+  event: string,
+  listener: (payload: T) => void,
+): (() => void) => {
   let stop: (() => void) | null = null;
   let cancelled = false;
-  void listen(event, () => listener())
+  void listen<T>(event, (message) => listener(message.payload))
     .then((unlisten) => {
       if (cancelled) unlisten();
       else stop = unlisten;
@@ -115,6 +121,8 @@ export const tauriGateway: ClipboardGateway = {
     ),
   revealSource: (eventId) => invoke<void>('reveal_source', { eventId }),
   openSettingsWindow: () => invoke<void>('open_settings_window'),
+  linkPreview: (eventId) => invoke<LinkPreview | null>('get_link_preview', { eventId }),
+  onLinkPreviewReady: (listener) => subscribe<number>('link-preview-ready', listener),
   chooseExportDirectory: () =>
     save({
       title: 'Wybierz katalog na eksport historii',

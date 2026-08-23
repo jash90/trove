@@ -1,9 +1,12 @@
 # Clipboard History
 
 Lokalny menedżer historii schowka. Rdzeń w Rust, powłoka Tauri 2, interfejs
-React. Wszystko zostaje na tym urządzeniu: aplikacja nie wykonuje żadnych żądań
-sieciowych związanych z historią, a czcionki i pozostałe zasoby są zapakowane
-lokalnie.
+React. Historia, indeks i bloby nie opuszczają tego urządzenia, a czcionki i
+pozostałe zasoby są zapakowane lokalnie.
+
+**Jeden wyjątek, świadomie dodany:** podgląd wpisu z linkiem pobiera tytuł i
+ikonę strony. Można go wyłączyć w ustawieniach — patrz „Podgląd stron" niżej.
+Poza nim aplikacja nie wykonuje żadnych żądań sieciowych.
 
 ## Stan
 
@@ -232,10 +235,45 @@ nawet najrzadsze słowo trafia w 8% bazy; prawdziwa historia ma długi ogon sł�
 tego przypadku praktycznie nie produkuje. Budżet 50 ms jest dotrzymany dla
 zapytań selektywnych i **nie** jest dotrzymany dla terminów masowych.
 
+## Podgląd stron
+
+Wpis z linkiem pokazuje domenę, ścieżkę oraz — gdy pobieranie jest włączone —
+tytuł i ikonę strony. **To jedyne miejsce, w którym aplikacja łączy się z
+siecią.**
+
+Co to kosztuje, powiedziane wprost: przy włączonym pobieraniu otwarcie palety
+odpytuje strony widoczne na liście, więc każda z tych domen dowiaduje się, że
+w tej chwili zaglądasz do swojego schowka — razem z Twoim adresem IP. Wynik jest
+zapamiętywany na stałe, także nieudany, więc ta sama strona jest pytana raz.
+
+Granice, które obowiązują zawsze:
+
+- tylko `http` i `https`; żaden inny schemat nie jest pobierany,
+- **nigdy** adresy lokalne i prywatne (`localhost`, `127.0.0.0/8`, `10/8`,
+  `172.16/12`, `192.168/16`, `169.254/16`, `.local`, ULA IPv6) — sprawdzane
+  zarówno w nazwie, jak i w adresie zwróconym przez DNS, **po każdym
+  przekierowaniu**, żeby podgląd nie stał się skanerem Twojej sieci,
+- twarde limity czasu, rozmiaru odpowiedzi i liczby przekierowań; bez ciasteczek
+  i bez wykonywania JavaScriptu,
+- czytany jest wyłącznie `<title>` i odnośnik do ikony; nic więcej nie jest
+  parsowane ani przechowywane,
+- ikona trafia do okna jako bajty z lokalnego magazynu — **interfejs nigdy nie
+  pobiera niczego sam**, dlatego bramka „zero zdalnych adresów w pakiecie" nadal
+  obowiązuje i nadal przechodzi.
+
+Wyłączenie przełącznika oznacza zero żądań: podgląd pokazuje wtedy sam rozbiór
+adresu.
+
+Koszt w zależnościach: HTTPS przez `native-tls`, czyli magazyn certyfikatów
+systemu. Na macOS to Security.framework, na Windows schannel; **na Linuksie
+wymaga nagłówków OpenSSL przy budowaniu** — to jedyne miejsce, w którym ta
+zmiana utrudnia budowę na targecie, którego i tak nie weryfikujemy.
+
 ## Prywatność
 
 - Treść schowka, zapytania i ścieżki nigdy nie trafiają do logów. Logi zawierają
-  identyfikatory operacji, liczniki, czasy i kody błędów.
+  identyfikatory operacji, liczniki, czasy i kody błędów. Dotyczy to również
+  adresów pobieranych na potrzeby podglądu stron.
 - Interfejs nie otwiera bazy ani nie czyta dowolnych plików; komunikuje się z
   rdzeniem przez wąski zestaw typowanych komend.
 - Zaimportowany HTML i kod są wyświetlane jako tekst, nigdy jako znaczniki.

@@ -35,6 +35,7 @@ const settings: AppSettings = {
   autostart: false,
   retentionDays: null,
   denylistedApps: [],
+  linkPreviews: true,
 };
 
 const progress: ImportProgress = {

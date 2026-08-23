@@ -1,6 +1,6 @@
 import { PanelRightOpen } from 'lucide-react';
 
-import type { HistoryItem, Preview } from '../lib/contracts';
+import type { HistoryItem, LinkPreview as LinkPreviewContract, Preview } from '../lib/contracts';
 import type { PreviewStatus } from './PreviewPane';
 import type { ThumbnailStatus } from './ImagePreview';
 import { EmptyState } from './EmptyState';
@@ -15,6 +15,7 @@ interface PaletteWorkspaceProps {
   previewStatus: PreviewStatus;
   thumbnailUrl: string | null;
   thumbnailStatus: ThumbnailStatus;
+  linkPreview: LinkPreviewContract | null;
   mobilePreviewOpen: boolean;
   actions: React.ReactNode;
   onSelect: (eventId: number) => void;
@@ -32,6 +33,7 @@ export const PaletteWorkspace = ({
   previewStatus,
   thumbnailUrl,
   thumbnailStatus,
+  linkPreview,
   mobilePreviewOpen,
   actions,
   onSelect,
@@ -77,6 +79,7 @@ export const PaletteWorkspace = ({
         status={previewStatus}
         thumbnailUrl={thumbnailUrl}
         thumbnailStatus={thumbnailStatus}
+        linkPreview={linkPreview}
         onClose={onClosePreview}
         onRevealSource={onRevealSource}
         actions={actions}

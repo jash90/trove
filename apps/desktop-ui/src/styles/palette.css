@@ -1375,3 +1375,80 @@
 .workflow-actions--start {
   justify-content: flex-start;
 }
+
+/* ---------------------------------------------------------------- *
+ * A link, shown as a place rather than a line of text
+ * ---------------------------------------------------------------- */
+
+.link-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 15px;
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+}
+
+.link-card__identity {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.link-card__icon {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: 6px;
+  object-fit: contain;
+  background: var(--paper);
+}
+
+.link-card__icon--generic {
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.link-card__names {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.link-card__title {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.link-card__host {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.link-card__path {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.link-card__note {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}

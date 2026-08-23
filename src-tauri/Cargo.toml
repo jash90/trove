@@ -19,6 +19,7 @@ clipboard-store = { path = "../crates/clipboard-store" }
 clipboard-search = { path = "../crates/clipboard-search" }
 clipboard-images = { path = "../crates/clipboard-images" }
 clipboard-import = { path = "../crates/clipboard-import" }
+clipboard-link-preview = { path = "../crates/clipboard-link-preview" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos = { path = "../crates/platform-macos" }

@@ -78,6 +78,7 @@ const settings: AppSettings = {
   autostart: false,
   retentionDays: 30,
   denylistedApps: [],
+  linkPreviews: true,
 };
 
 const stats: StorageStats = {

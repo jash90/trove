@@ -1,4 +1,4 @@
-import { Download, KeyRound, Power, ShieldBan, Timer, X } from 'lucide-react';
+import { Download, Globe, KeyRound, Power, ShieldBan, Timer, X } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEventHandler, type KeyboardEventHandler } from 'react';
 
 import type {
@@ -122,6 +122,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [retentionDays, setRetentionDays] = useState('');
   const [denylist, setDenylist] = useState('');
   const [stats, setStats] = useState<StorageStatsContract | null>(null);
+  const [linkPreviews, setLinkPreviews] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [exportSummary, setExportSummary] = useState<ExportSummaryContract | null>(null);
   const [storageStatus, setStorageStatus] = useState<StorageStatus>('loading');
@@ -150,6 +151,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setUnlimitedRetention(settings.retentionDays === null);
       setRetentionDays(settings.retentionDays === null ? '' : String(settings.retentionDays));
       setDenylist(settings.denylistedApps.join('\n'));
+      setLinkPreviews(settings.linkPreviews);
     })();
     return () => {
       cancelled = true;
@@ -219,6 +221,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       autostart,
       retentionDays: nextRetention,
       denylistedApps: nextDenylist,
+      linkPreviews,
     };
 
     void (async () => {
@@ -420,6 +423,28 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
             </section>
 
             <StorageStats stats={stats} status={storageStatus} />
+
+            <section className="workflow-section" aria-labelledby="settings-links-title">
+              <h2 id="settings-links-title">
+                <Globe size={15} aria-hidden="true" />
+                Podgląd stron
+              </h2>
+              <label className="settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={linkPreviews}
+                  onChange={(event) => setLinkPreviews(event.currentTarget.checked)}
+                />
+                Pobieraj tytuł i ikonę strony
+              </label>
+              <p className="settings-help">
+                To jedyne miejsce, w którym aplikacja łączy się z siecią. Włączone
+                oznacza, że otwarcie palety odpytuje strony widoczne na liście —
+                każda z nich dowiaduje się wtedy, że zaglądasz do schowka. Wynik
+                jest zapamiętywany, więc ta sama strona jest pytana raz. Adresy
+                lokalne i prywatne nie są odpytywane nigdy.
+              </p>
+            </section>
 
             <section className="workflow-section" aria-labelledby="settings-export-title">
               <h2 id="settings-export-title">

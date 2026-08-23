@@ -14,6 +14,7 @@ import { useHistoryActions } from './hooks/useHistoryActions';
 import { useHistorySearch } from './hooks/useHistorySearch';
 import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
 import { useSelectedPreview } from './hooks/useSelectedPreview';
+import { useLinkPreview } from './hooks/useLinkPreview';
 import { useThumbnail } from './hooks/useThumbnail';
 import { HISTORY_PAGE_SIZE } from './lib/contracts';
 import {
@@ -83,6 +84,7 @@ const ClipboardPalette = (): React.JSX.Element => {
     // answers cheaply when there is no image to render from.
     selectedItem?.kind === 'image',
   );
+  const link = useLinkPreview(gateway, navigation.selectedId, selectedItem?.kind === 'link');
 
   // Settings are their own window; the palette only asks for it.
   const openSettings = (): void => void gateway.openSettingsWindow().catch(() => undefined);
@@ -206,6 +208,7 @@ const ClipboardPalette = (): React.JSX.Element => {
           previewStatus={preview.status}
           thumbnailUrl={thumbnail.url}
           thumbnailStatus={thumbnail.status}
+          linkPreview={link.preview}
           mobilePreviewOpen={mobilePreviewOpen}
           actions={actionBar}
           onSelect={handleSelect}

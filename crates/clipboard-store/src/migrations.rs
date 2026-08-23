@@ -6,7 +6,8 @@ const INITIAL_MIGRATION: &str = include_str!("migrations/001_initial.sql");
 const SETTINGS_MIGRATION: &str = include_str!("migrations/002_settings.sql");
 const BLOB_REFERENCE_INDEX_MIGRATION: &str =
     include_str!("migrations/003_blob_reference_indexes.sql");
-const LATEST_SCHEMA_VERSION: i64 = 3;
+const LINK_PREVIEW_MIGRATION: &str = include_str!("migrations/004_link_preview.sql");
+const LATEST_SCHEMA_VERSION: i64 = 4;
 const SCHEMA_IDENTITY: &str = "clipboard-store";
 const SCHEMA_REVISION: i64 = 6;
 
@@ -59,6 +60,12 @@ impl Migrations {
             // that does not hold the same data and stay mutually readable.
             transaction.execute_batch(BLOB_REFERENCE_INDEX_MIGRATION)?;
             transaction.pragma_update(None, "user_version", 3_i64)?;
+        }
+        if version < 4 {
+            // A new table beside the existing ones. The schema identity marks
+            // the shape of what was already there, which this does not touch.
+            transaction.execute_batch(LINK_PREVIEW_MIGRATION)?;
+            transaction.pragma_update(None, "user_version", 4_i64)?;
         }
         validate_schema_identity(&transaction)?;
         transaction.commit()?;
@@ -154,7 +161,7 @@ mod tests {
             .query_row("SELECT value FROM migration_sentinel", [], |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         assert_eq!(revision, 6);
         assert_eq!(sentinel, "preserved");
     }

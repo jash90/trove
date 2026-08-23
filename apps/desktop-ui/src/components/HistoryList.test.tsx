@@ -92,6 +92,7 @@ const makeGateway = (search: ClipboardGateway['search']): ClipboardGateway =>
       sourceAppName: 'Synthetic Editor',
     })),
     getThumbnail: vi.fn(async () => null),
+    linkPreview: vi.fn(async () => null),
     copyEvent: vi.fn(async () => ({ mode: 'copied', plainText: false })),
   }) as unknown as ClipboardGateway;
 

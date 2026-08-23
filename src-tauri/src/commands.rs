@@ -43,6 +43,7 @@ macro_rules! clipboard_history_command_registry {
             reveal_source => $crate::commands::reveal_source,
             open_settings_window => $crate::commands::open_settings_window,
             export_history => $crate::commands::export_history,
+            get_link_preview => $crate::commands::get_link_preview,
         }
     };
 }
@@ -115,6 +116,20 @@ pub struct AppSettingsDto {
     pub autostart: bool,
     pub retention_days: Option<u16>,
     pub denylisted_apps: Vec<String>,
+    /// Whether a link entry's page may be contacted for its title and icon.
+    ///
+    /// The one setting that decides whether this application uses the network
+    /// at all. Defaulted through serde so a settings row written before it
+    /// existed still reads.
+    #[serde(default = "default_link_previews")]
+    pub link_previews: bool,
+}
+
+/// Link previews are on by default, which was a deliberate choice: it is the
+/// only thing here that sends anything anywhere, and the person who asked for
+/// it wanted it on. Turning it off makes the application silent again.
+fn default_link_previews() -> bool {
+    true
 }
 
 impl Default for AppSettingsDto {
@@ -125,6 +140,7 @@ impl Default for AppSettingsDto {
             autostart: false,
             retention_days: None,
             denylisted_apps: Vec::new(),
+            link_previews: default_link_previews(),
         }
     }
 }
@@ -526,6 +542,23 @@ pub async fn export_history_service(
     .await
 }
 
+pub async fn get_link_preview_service(
+    state: &AppState,
+    event_id: i64,
+) -> Result<Option<crate::links::LinkPreviewDto>, String> {
+    crate::links::link_preview_service::<tauri::Wry>(None, state, event_id).await
+}
+
+/// What a link entry points at, and what its page said about itself.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_link_preview<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    event_id: i64,
+) -> Result<Option<crate::links::LinkPreviewDto>, String> {
+    crate::links::link_preview_service(Some(app), state.inner(), event_id).await
+}
+
 /// Writes the whole history into a directory the user chose.
 ///
 /// The bytes are assembled and written here rather than in the interface: a
@@ -794,6 +827,16 @@ pub fn retention_days(store: &StoreHandle) -> Option<u16> {
     get_settings_blocking(store)
         .ok()
         .and_then(|settings| settings.retention_days)
+}
+
+/// Whether link pages may be contacted.
+///
+/// An unreadable settings row means no fetching: silence is the safe direction
+/// for the only network path in the application.
+pub fn link_previews_enabled(store: &StoreHandle) -> bool {
+    get_settings_blocking(store)
+        .map(|settings| settings.link_previews)
+        .unwrap_or(false)
 }
 
 pub fn denylisted_apps(store: &StoreHandle) -> Vec<String> {

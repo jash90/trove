@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod export;
 pub mod hotkey;
+pub mod links;
 pub mod maintenance;
 pub mod monitor;
 pub mod state;

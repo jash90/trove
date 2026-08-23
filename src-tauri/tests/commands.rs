@@ -299,14 +299,14 @@ fn existing_revision_six_database_upgrades_to_settings_without_losing_data() {
 
     let config = StoreConfig::new(&database_path).with_blob_root(directory.path().join("blobs"));
     let store = StoreHandle::open(config.clone()).unwrap();
-    assert_eq!(schema_version(&store), 3);
+    assert_eq!(schema_version(&store), 4);
     assert_eq!(schema_revision(&store), 6);
     assert!(settings_table_exists(&store));
     assert_eq!(content_count(&store), 1);
     drop(store);
 
     let reopened = StoreHandle::open(config).unwrap();
-    assert_eq!(schema_version(&reopened), 3);
+    assert_eq!(schema_version(&reopened), 4);
     assert_eq!(schema_revision(&reopened), 6);
     assert!(settings_table_exists(&reopened));
     assert_eq!(content_count(&reopened), 1);
@@ -319,13 +319,13 @@ fn fresh_database_opens_at_settings_schema_and_reopens_idempotently() {
         .with_blob_root(directory.path().join("blobs"));
 
     let store = StoreHandle::open(config.clone()).unwrap();
-    assert_eq!(schema_version(&store), 3);
+    assert_eq!(schema_version(&store), 4);
     assert_eq!(schema_revision(&store), 6);
     assert!(settings_table_exists(&store));
     drop(store);
 
     let reopened = StoreHandle::open(config).unwrap();
-    assert_eq!(schema_version(&reopened), 3);
+    assert_eq!(schema_version(&reopened), 4);
     assert_eq!(schema_revision(&reopened), 6);
     assert!(settings_table_exists(&reopened));
 }
@@ -348,6 +348,7 @@ async fn settings_use_valid_defaults_and_persist_one_versioned_json_object() {
         autostart: true,
         retention_days: Some(365),
         denylisted_apps: vec!["com.example.synthetic".to_owned()],
+        link_previews: false,
     };
     let saved = commands::save_settings_service(&state, requested.clone())
         .await
@@ -526,6 +527,7 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "reveal_source",
             "open_settings_window",
             "export_history",
+            "get_link_preview",
         ]
     );
 
@@ -964,6 +966,140 @@ async fn an_export_refuses_a_directory_that_already_holds_something() {
             .await
             .unwrap_err(),
         "export_destination_not_empty"
+    );
+}
+
+fn link_capture(url: &str, captured_at_ms: i64) -> clipboard_core::CaptureInput {
+    clipboard_core::CaptureInput {
+        captured_at_ms,
+        kind: clipboard_core::ContentKind::Link,
+        primary_mime: "text/uri-list".to_owned(),
+        representations: vec![clipboard_core::RepresentationInput {
+            format_id: "text/uri-list".to_owned(),
+            bytes: Some(url.as_bytes().to_vec()),
+            missing_ref: None,
+        }],
+        source_app_id: None,
+        source_app_name: Some("Synthetic".to_owned()),
+        source_confidence: clipboard_core::SourceConfidence::Declared,
+        pinned: false,
+        occurrence_count: 1,
+        content_flags: clipboard_core::ContentFlags::empty(),
+        event_flags: clipboard_core::EventFlags::LOCAL_ONLY,
+        display_label: None,
+    }
+}
+
+#[tokio::test]
+async fn a_link_describes_itself_without_contacting_anything() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    // Fetching off: the answer must still say what the address is.
+    let settings = clipboard_history_app::commands::AppSettingsDto {
+        link_previews: false,
+        ..clipboard_history_app::commands::AppSettingsDto::default()
+    };
+    commands::save_settings_service(&state, settings)
+        .await
+        .unwrap();
+    let link = state
+        .store
+        .ingest(link_capture(
+            "https://www.example.invalid/some/page?q=1",
+            1_725_000_000_700,
+        ))
+        .await
+        .unwrap();
+
+    let preview = commands::get_link_preview_service(&state, link.event_id)
+        .await
+        .unwrap()
+        .expect("a link entry describes itself");
+
+    assert_eq!(preview.host, "example.invalid");
+    assert_eq!(preview.rest, "/some/page?q=1");
+    assert!(preview.local_only);
+    assert_eq!(preview.title, None);
+}
+
+#[tokio::test]
+async fn a_link_is_described_whatever_its_address_looks_like() {
+    // Two shapes that behaved differently on a real history: one with a file
+    // extension, one a plain path.
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let settings = clipboard_history_app::commands::AppSettingsDto {
+        link_previews: false,
+        ..clipboard_history_app::commands::AppSettingsDto::default()
+    };
+    commands::save_settings_service(&state, settings)
+        .await
+        .unwrap();
+
+    for (index, url) in [
+        "https://i1.kwejk.pl/k/obrazki/2016/02/a25fcbe712fe800a4f304cd8b79056f3.jpg",
+        "https://github.com/pingdotgg/t3code/pull/5227",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let link = state
+            .store
+            .ingest(link_capture(url, 1_725_000_001_000 + index as i64))
+            .await
+            .unwrap();
+        let preview = commands::get_link_preview_service(&state, link.event_id)
+            .await
+            .unwrap();
+        assert!(preview.is_some(), "{url} produced no description");
+    }
+}
+
+#[tokio::test]
+async fn asking_twice_for_a_link_answers_twice() {
+    // The pane asks again when a fetch lands. A second ask that answered with
+    // nothing would make the card appear and then vanish.
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let settings = clipboard_history_app::commands::AppSettingsDto {
+        link_previews: false,
+        ..clipboard_history_app::commands::AppSettingsDto::default()
+    };
+    commands::save_settings_service(&state, settings)
+        .await
+        .unwrap();
+    let link = state
+        .store
+        .ingest(link_capture(
+            "https://example.invalid/page",
+            1_725_000_000_900,
+        ))
+        .await
+        .unwrap();
+
+    for attempt in 0..3 {
+        let preview = commands::get_link_preview_service(&state, link.event_id)
+            .await
+            .unwrap();
+        assert!(preview.is_some(), "attempt {attempt} answered with nothing");
+    }
+}
+
+#[tokio::test]
+async fn an_entry_that_is_not_a_link_has_nothing_to_describe() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let text = state
+        .store
+        .ingest(text_capture("not a link", 1_725_000_000_800))
+        .await
+        .unwrap();
+
+    assert!(
+        commands::get_link_preview_service(&state, text.event_id)
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 

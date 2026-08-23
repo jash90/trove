@@ -66,6 +66,7 @@ export interface AppSettings {
   autostart: boolean;
   retentionDays: number | null;
   denylistedApps: string[];
+  linkPreviews: boolean;
 }
 
 export interface StorageStats {
@@ -77,6 +78,16 @@ export interface StorageStats {
 
 export interface ImportRunHandle {
   runId: string;
+}
+
+export interface LinkPreview {
+  host: string;
+  rest: string;
+  title: string | null;
+  iconMime: string | null;
+  iconBase64: string | null;
+  /** True when nothing was fetched and nothing will be. */
+  localOnly: boolean;
 }
 
 export interface ExportSummary {

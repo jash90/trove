@@ -32,6 +32,7 @@ const persistedSettings: AppSettings = {
   autostart: false,
   retentionDays: 30,
   denylistedApps: ['com.acme.private'],
+  linkPreviews: true,
 };
 
 const storageStats: StorageStats = {

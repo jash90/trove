@@ -76,6 +76,7 @@ const settings: AppSettings = {
   autostart: false,
   retentionDays: 30,
   denylistedApps: [],
+  linkPreviews: true,
 };
 
 const importProgress: ImportProgress = {
@@ -121,6 +122,7 @@ const makeGateway = (
     getImportStatus: vi.fn(async () => importProgress),
     revealSource: vi.fn(async () => undefined),
     openSettingsWindow: vi.fn(async () => undefined),
+    linkPreview: vi.fn(async () => null),
     chooseExportDirectory: vi.fn(async () => null),
     exportHistory: vi.fn(async () => ({ records: 0, images: 0, withoutPayload: 0 })),
     onHistoryChanged: vi.fn(() => () => undefined),
@@ -221,6 +223,72 @@ describe('safe preview rendering', () => {
     expect(() =>
       thumbnailDataUrl({ mimeType: 'image/png', base64: 'A'.repeat(MAX_THUMBNAIL_BASE64_BYTES + 1) }),
     ).toThrow('thumbnail_too_large');
+  });
+});
+
+describe('link previews', () => {
+  const linkPreview = (overrides = {}) => ({
+    host: 'example.invalid',
+    rest: '/synthetic/page',
+    title: null,
+    iconMime: null,
+    iconBase64: null,
+    localOnly: false,
+    ...overrides,
+  });
+
+  it('never points the window at a remote address', () => {
+    // The icon is fetched by the core and handed over as bytes. An <img> with
+    // a remote src would make the window itself reach out, which is the one
+    // thing this design does not do.
+    const { container } = render(
+      <PreviewPane
+        preview={makePreview(1, { kind: 'link', text: 'https://example.invalid/synthetic/page' })}
+        thumbnailUrl={null}
+        thumbnailStatus="idle"
+        linkPreview={linkPreview({
+          title: 'Synthetic page',
+          iconMime: 'image/png',
+          iconBase64: 'AQID',
+        })}
+      />,
+    );
+
+    expect(screen.getByText('Synthetic page')).toBeVisible();
+    expect(screen.getByText('example.invalid')).toBeVisible();
+    for (const image of container.querySelectorAll('img')) {
+      expect(image.getAttribute('src')).toMatch(/^data:image\//);
+    }
+    // Still no clickable link: a preview must not be a way to open a page by
+    // accident.
+    expect(container.querySelector('a')).toBeNull();
+  });
+
+  it('shows the address alone when fetching is off, and says so', () => {
+    render(
+      <PreviewPane
+        preview={makePreview(1, { kind: 'link', text: 'https://example.invalid/synthetic/page' })}
+        thumbnailUrl={null}
+        thumbnailStatus="idle"
+        linkPreview={linkPreview({ localOnly: true })}
+      />,
+    );
+
+    expect(screen.getByText('example.invalid')).toBeVisible();
+    expect(screen.getByText(/pobieranie podglądów stron jest wyłączone/i)).toBeVisible();
+  });
+
+  it('falls back to the raw address when nothing describes the link', () => {
+    render(
+      <PreviewPane
+        preview={makePreview(1, { kind: 'link', text: 'https://example.invalid/synthetic/page' })}
+        thumbnailUrl={null}
+        thumbnailStatus="idle"
+        linkPreview={null}
+      />,
+    );
+
+    expect(screen.getByText('https://example.invalid/synthetic/page')).toBeVisible();
   });
 });
 
