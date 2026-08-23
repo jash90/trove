@@ -41,6 +41,9 @@ pub(crate) struct VerifyOutput {
     latest_source_total: u64,
     physical_content_count: u64,
     event_count: u64,
+    imported_event_count: u64,
+    /// Events this device captured itself, which no export accounts for.
+    captured_event_count: u64,
     indexed_document_count: u64,
     missing_payload_count: u64,
     counts_by_kind: Vec<KindCount>,
@@ -119,6 +122,8 @@ fn blob_root_failure_output(expect_records: u64) -> VerifyOutput {
         latest_source_total: 0,
         physical_content_count: 0,
         event_count: 0,
+        imported_event_count: 0,
+        captured_event_count: 0,
         indexed_document_count: 0,
         missing_payload_count: 0,
         counts_by_kind: Vec::new(),
@@ -135,6 +140,7 @@ struct VerificationSnapshot {
     invalidated: bool,
     physical_content_count: i64,
     event_count: i64,
+    imported_event_count: i64,
     indexed_document_count: i64,
     missing_payload_count: i64,
     kinds: Vec<RawKindCount>,
@@ -153,6 +159,7 @@ impl VerificationSnapshot {
             invalidated: true,
             physical_content_count: 0,
             event_count: 0,
+            imported_event_count: 0,
             indexed_document_count: 0,
             missing_payload_count: 0,
             kinds: Vec::new(),
@@ -187,6 +194,12 @@ struct RawSourceSummary {
 struct ScalarClaims {
     physical_content_count: i64,
     event_count: i64,
+    /// Events that an import put there.
+    ///
+    /// Once the application captures the clipboard on its own, this stops being
+    /// the same number as `event_count`, and every reconciliation against an
+    /// export has to use this one instead.
+    imported_event_count: i64,
     indexed_document_count: i64,
     missing_payload_count: i64,
     run_status_ok: bool,
@@ -301,7 +314,7 @@ fn read_verification_snapshot_inner(
         return Ok(VerificationSnapshot::invalidated());
     };
     let EpochRead::Stable(relations_ok) = read_short_snapshot(connection, epoch, |connection| {
-        logical_relations_are_coherent(connection, claims.event_count)
+        logical_relations_are_coherent(connection, claims.imported_event_count)
     })?
     else {
         return Ok(VerificationSnapshot::invalidated());
@@ -341,6 +354,7 @@ fn read_verification_snapshot_inner(
         invalidated: false,
         physical_content_count: claims.physical_content_count,
         event_count: claims.event_count,
+        imported_event_count: claims.imported_event_count,
         indexed_document_count: claims.indexed_document_count,
         missing_payload_count: claims.missing_payload_count,
         kinds,
@@ -366,6 +380,11 @@ fn read_scalar_claims(
         )?,
         event_count: connection
             .query_row("SELECT count(*) FROM history_event", [], |row| row.get(0))?,
+        imported_event_count: connection.query_row(
+            "SELECT count(DISTINCT event_id) FROM import_record WHERE event_id IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?,
         indexed_document_count: connection.query_row(
             "SELECT count(*) FROM search_doc",
             [],
@@ -1384,9 +1403,15 @@ fn read_latest_sources(connection: &Connection) -> rusqlite::Result<Vec<RawSourc
         .collect()
 }
 
+/// Checks that imports and events agree with one another.
+///
+/// Every import record must point at an event that exists, and no two may claim
+/// the same one. The reverse does not hold: the application captures the
+/// clipboard on its own, so a history event with no import record is an
+/// ordinary local capture, not a broken link.
 fn logical_relations_are_coherent(
     connection: &Connection,
-    event_count: i64,
+    imported_event_count: i64,
 ) -> rusqlite::Result<bool> {
     let mut foreign_keys = connection.prepare("PRAGMA foreign_key_check")?;
     let foreign_keys_ok = foreign_keys.query([])?.next()?.is_none();
@@ -1397,9 +1422,9 @@ fn logical_relations_are_coherent(
            AND (SELECT count(DISTINCT event_id) FROM import_record) = ?1
            AND NOT EXISTS(
              SELECT 1
-             FROM history_event he
-             LEFT JOIN import_record ir ON ir.event_id = he.event_id
-             WHERE ir.import_record_id IS NULL
+             FROM import_record ir
+             LEFT JOIN history_event he ON he.event_id = ir.event_id
+             WHERE he.event_id IS NULL
            )
            AND NOT EXISTS(
              SELECT 1
@@ -1415,7 +1440,7 @@ fn logical_relations_are_coherent(
              SELECT 1 FROM import_record
              WHERE source_kind NOT IN ('raycast', 'supercmd')
            )",
-        [event_count],
+        [imported_event_count],
         |row| row.get::<_, bool>(0),
     )?;
     Ok(foreign_keys_ok && relations_ok)
@@ -1833,6 +1858,10 @@ fn verification_output(
     }
     let physical_content_count = checked_count(snapshot.physical_content_count)?;
     let event_count = checked_count(snapshot.event_count)?;
+    let imported_event_count = checked_count(snapshot.imported_event_count)?;
+    // Reported rather than inferred: a negative difference would mean more
+    // import records than events, which the relation check already refuses.
+    let captured_event_count = event_count.saturating_sub(imported_event_count);
     let indexed_document_count = checked_count(snapshot.indexed_document_count)?;
     let missing_payload_count = checked_count(snapshot.missing_payload_count)?;
     let counts_by_kind = snapshot
@@ -1920,7 +1949,8 @@ fn verification_output(
         .try_fold(0_u64, |total, kind| total.checked_add(kind.event_count));
     let logical_accounting_ok = snapshot.logical_ok
         && selected_sources_are_materialized
-        && selected_materialized_total == event_count;
+        && imported_event_count <= event_count
+        && selected_materialized_total == imported_event_count;
     let healthy = snapshot.integrity_ok
         && snapshot.run_status_ok
         && logical_accounting_ok
@@ -1929,7 +1959,7 @@ fn verification_output(
         && source_accounting_ok
         && one_source_each
         && latest_source_total == expect_records
-        && event_count.checked_add(selected_unmaterialized_total) == Some(expect_records)
+        && imported_event_count.checked_add(selected_unmaterialized_total) == Some(expect_records)
         && kinds_total == Some(event_count)
         && physical_content_count <= event_count;
     Ok(VerifyOutput {
@@ -1938,6 +1968,8 @@ fn verification_output(
         latest_source_total,
         physical_content_count,
         event_count,
+        imported_event_count,
+        captured_event_count,
         indexed_document_count,
         missing_payload_count,
         counts_by_kind,

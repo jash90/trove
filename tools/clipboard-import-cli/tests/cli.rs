@@ -1522,6 +1522,10 @@ fn two_source_import_repeat_and_verify_report_only_sanitized_accounting() {
     assert_eq!(value["status"], "ok");
     assert_eq!(value["latestSourceTotal"], 5);
     assert_eq!(value["eventCount"], 3);
+    // Every event here came from an import, so nothing is attributed to local
+    // capture — the two numbers only diverge once the application runs.
+    assert_eq!(value["importedEventCount"], 3);
+    assert_eq!(value["capturedEventCount"], 0);
     assert_eq!(value["physicalContentCount"], 2);
     assert_eq!(value["integrityStatus"], "ok");
     assert_eq!(value["runStatus"], "ok");
@@ -1537,10 +1541,12 @@ fn two_source_import_repeat_and_verify_report_only_sanitized_accounting() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
             "blobStatus",
+            "capturedEventCount",
             "countsByKind",
             "eventCount",
             "expectedRecords",
             "ftsStatus",
+            "importedEventCount",
             "indexedDocumentCount",
             "integrityStatus",
             "latestSourceTotal",
