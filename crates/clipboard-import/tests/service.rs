@@ -10,7 +10,7 @@ use clipboard_core::{
     CaptureInput, ContentFlags, ContentKind, EventFlags, RepresentationInput, SourceConfidence,
 };
 use clipboard_import::{
-    IMPORT_BATCH_SIZE, ImportError, ImportRunHandle, ImportRunState, ImportService,
+    IMPORT_BATCH_SIZE, ImportError, ImportProgress, ImportRunHandle, ImportRunState, ImportService,
     ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES, MAX_IMPORT_MANIFEST_BYTES,
 };
 use clipboard_store::{StoreConfig, StoreHandle};
@@ -85,10 +85,28 @@ fn write_supercmd_export(directory: &tempfile::TempDir, records: &[Value]) {
     write_json(&directory.path().join("clipboard.json"), records);
 }
 
+/// Reads a run's progress, treating "not yet written" as not yet.
+///
+/// `begin` hands the work to a detached task and returns; `status` reads the
+/// row that task writes. Between those two moments the run legitimately does
+/// not exist yet, and a poll that lands there is early rather than wrong. This
+/// machine never lost that race, a CI runner did — so unwrapping here made the
+/// helper depend on which machine ran it.
+fn poll_progress(service: &ImportService, run_id: uuid::Uuid) -> Option<ImportProgress> {
+    match service.status(run_id) {
+        Ok(progress) => Some(progress),
+        Err(ImportError::Service {
+            reason: "run_not_found",
+        }) => None,
+        Err(error) => panic!("import status failed: {error}"),
+    }
+}
+
 async fn wait_for_terminal(service: &ImportService, run_id: uuid::Uuid) {
     for _ in 0..50_000 {
-        let progress = service.status(run_id).unwrap();
-        if progress.state != ImportRunState::Running {
+        if let Some(progress) = poll_progress(service, run_id)
+            && progress.state != ImportRunState::Running
+        {
             return;
         }
         tokio::task::yield_now().await;
@@ -98,8 +116,9 @@ async fn wait_for_terminal(service: &ImportService, run_id: uuid::Uuid) {
 
 async fn wait_for_processed(service: &ImportService, run_id: uuid::Uuid, processed: u64) {
     for _ in 0..50_000 {
-        let progress = service.status(run_id).unwrap();
-        if progress.processed == processed {
+        if let Some(progress) = poll_progress(service, run_id)
+            && progress.processed == processed
+        {
             return;
         }
         tokio::task::yield_now().await;
