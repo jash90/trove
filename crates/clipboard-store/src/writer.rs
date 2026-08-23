@@ -2016,12 +2016,13 @@ fn stored_representations<'a>(
     if input.representations.is_empty() {
         return Err(StoreError::PayloadStorageUnavailable);
     }
-    let needs_compressor = !matches!(input.kind, ContentKind::Image | ContentKind::File)
-        && input.representations.iter().any(|representation| {
-            representation.bytes.as_ref().is_some_and(|bytes| {
+    let binary_entry = matches!(input.kind, ContentKind::Image | ContentKind::File);
+    let needs_compressor = input.representations.iter().any(|representation| {
+        (!binary_entry || is_textual_representation(&representation.format_id))
+            && representation.bytes.as_ref().is_some_and(|bytes| {
                 (MAX_INLINE_PAYLOAD_BYTES..=MAX_INLINE_ZSTD_PAYLOAD_BYTES).contains(&bytes.len())
             })
-        });
+    });
     let mut compressor = needs_compressor.then(bounded_zstd_compressor).transpose()?;
     let mut stored = Vec::with_capacity(input.representations.len());
     for representation in &input.representations {
@@ -2035,6 +2036,7 @@ fn stored_representations<'a>(
                 original_byte_size: bytes.len() as u64,
                 payload: PreparedPayload::Stored(classify_payload(
                     input.kind,
+                    representation.format_id.as_str(),
                     bytes,
                     cas,
                     compressor.as_mut(),
@@ -2064,15 +2066,23 @@ fn stored_representations<'a>(
     Ok(stored)
 }
 
+/// A textual representation is small whatever the entry holds. An image entry
+/// carrying a `text/uri-list` source reference must not push a fifty-byte
+/// string into the blob store just because the entry itself is binary.
+fn is_textual_representation(format_id: &str) -> bool {
+    format_id.starts_with("text/")
+}
+
 pub(crate) fn classify_payload(
     kind: ContentKind,
+    format_id: &str,
     bytes: &[u8],
     cas: &CasStore,
     compressor: Option<&mut zstd::bulk::Compressor<'static>>,
 ) -> Result<StoredPayload, StoreError> {
-    if matches!(kind, ContentKind::Image | ContentKind::File)
-        || bytes.len() > MAX_INLINE_ZSTD_PAYLOAD_BYTES
-    {
+    let binary_entry = matches!(kind, ContentKind::Image | ContentKind::File)
+        && !is_textual_representation(format_id);
+    if binary_entry || bytes.len() > MAX_INLINE_ZSTD_PAYLOAD_BYTES {
         let blob = cas.put(bytes)?;
         return Ok(StoredPayload::Cas {
             hash: blob.hash,
@@ -2469,12 +2479,13 @@ mod tests {
         let mut compressor = super::bounded_zstd_compressor().unwrap();
 
         assert!(matches!(
-            classify_payload(ContentKind::Text, b"small", &cas, None).unwrap(),
+            classify_payload(ContentKind::Text, "text/plain", b"small", &cas, None).unwrap(),
             StoredPayload::Inline(_)
         ));
         assert!(matches!(
             classify_payload(
                 ContentKind::Text,
+                "text/plain",
                 &moderately_large,
                 &cas,
                 Some(&mut compressor)
@@ -2483,8 +2494,37 @@ mod tests {
             StoredPayload::InlineZstd(_)
         ));
         assert!(matches!(
-            classify_payload(ContentKind::Image, b"image", &cas, None).unwrap(),
+            classify_payload(ContentKind::Image, "image/png", b"image", &cas, None).unwrap(),
             StoredPayload::Cas { .. }
+        ));
+    }
+
+    #[test]
+    fn a_textual_representation_of_a_binary_entry_stays_out_of_the_blob_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = CasStore::new(directory.path().join("synthetic-blobs"));
+
+        assert!(matches!(
+            classify_payload(
+                ContentKind::File,
+                "text/uri-list",
+                b"file:///synthetic/report.pdf",
+                &cas,
+                None
+            )
+            .unwrap(),
+            StoredPayload::Inline(_)
+        ));
+        assert!(matches!(
+            classify_payload(
+                ContentKind::Image,
+                "text/uri-list",
+                b"file:///synthetic/screenshot.png",
+                &cas,
+                None
+            )
+            .unwrap(),
+            StoredPayload::Inline(_)
         ));
     }
 
