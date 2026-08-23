@@ -84,6 +84,18 @@ fn file_capture(reference_uri: &str, captured_at_ms: i64) -> clipboard_core::Cap
     }
 }
 
+#[test]
+fn the_summoning_shortcut_is_command_shift_space() {
+    use tauri_plugin_global_shortcut::{Code, Modifiers};
+
+    let shortcut = clipboard_history_app::hotkey::default_shortcut();
+
+    // Space is what a launcher-style palette answers to; the added Shift keeps
+    // it clear of the input-source switcher and of Spotlight.
+    assert_eq!(shortcut.key, Code::Space);
+    assert_eq!(shortcut.mods, Modifiers::SUPER | Modifiers::SHIFT);
+}
+
 #[tokio::test]
 async fn the_application_opens_the_same_database_file_the_importer_writes() {
     let directory = tempfile::tempdir().unwrap();

@@ -49,7 +49,7 @@ export const SYNTHETIC_HISTORY_ITEMS: HistoryItem[] = [
 
 export const SYNTHETIC_SETTINGS: AppSettings = {
   schemaVersion: 1,
-  hotkey: 'CommandOrControl+Shift+V',
+  hotkey: 'CommandOrControl+Shift+Space',
   autostart: false,
   // History is unbounded unless the user deliberately enables retention.
   retentionDays: null,

@@ -13,6 +13,7 @@ tauri = { version = "2.11.5", features = [] }
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-dialog = "2.7.2"
+tauri-plugin-global-shortcut = "2.3.2"
 clipboard-core = { path = "../crates/clipboard-core" }
 clipboard-store = { path = "../crates/clipboard-store" }
 clipboard-search = { path = "../crates/clipboard-search" }

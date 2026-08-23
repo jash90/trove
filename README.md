@@ -12,7 +12,8 @@ lokalnie.
 | Model domenowy, SQLite WAL + FTS5, CAS, wyszukiwanie | gotowe |
 | Importery Raycast i SuperCmd, CLI weryfikacyjne | gotowe |
 | Paleta React, podglądy, akcje, kreator importu, ustawienia | gotowe |
-| Przechwytywanie schowka, skrót globalny, tray, wklejanie | **niezaimplementowane** |
+| Skrót globalny przywołujący paletę | gotowe |
+| Przechwytywanie schowka, tray, wklejanie | **niezaimplementowane** |
 | Retencja, odzyskiwanie blobów, adaptery Windows i Linux | **niezaimplementowane** |
 
 Zweryfikowana platforma: macOS (`aarch64-apple-darwin`). Windows i Linux nie
@@ -46,6 +47,17 @@ CLIPBOARD_HISTORY_DATA_DIR="data/dev" pnpm tauri dev
 ```
 
 Bez tej zmiennej aplikacja używa katalogu danych systemu operacyjnego.
+
+## Skrót globalny
+
+`⌘⇧Space` (na innych systemach `Ctrl+Shift+Space`) przywołuje paletę i ustawia na
+niej fokus; ponowne wciśnięcie ją chowa. Zamknięcie okna również tylko je chowa —
+aplikacja kończy działanie wyłącznie na jawne żądanie, bo menedżer schowka, który
+przestaje działać po zamknięciu okna, po cichu gubi historię.
+
+Jeśli skrót jest już zajęty przez inną aplikację, rejestracja się nie powiedzie,
+a paleta nadal działa z własnego okna. Zmiana skrótu w ustawieniach jest
+zapisywana, ale zaczyna obowiązywać po ponownym uruchomieniu.
 
 ## Bramki jakości
 
@@ -100,9 +112,13 @@ stabilny odcisk, a ponowny przebieg zwraca go jako `alreadyPresent`.
   ścieżkę jako metadaną — interfejs pokaże lokalizację i pozwoli ją otworzyć —
   ale zawartość nie trafia do magazynu.
 - **Nie zgaduje powiązań, których nie ma w danych.** Eksport SuperCmd nie
-  zawiera pola wiążącego rekord obrazu z plikiem, więc takie wpisy zostają bez
-  payloadu, z jawnym stanem braku. Dopasowanie po kolejności plików jest
-  zabronione.
+  zawiera pola wiążącego rekord obrazu z plikiem. Dopasowanie po kolejności
+  plików jest zabronione, więc takie rekordy są pomijane.
+- **Nie zachowuje wpisów prowadzących donikąd.** Rekord pliku lub obrazu trafia
+  do historii tylko wtedy, gdy jego źródło nadal istnieje. Pozostałe są
+  rozliczane jako pominięte: nic się z nimi nie stało, po prostu nie ma czego
+  pokazać ani otworzyć. Suma `zaimportowane + już obecne + pominięte + błędy`
+  zawsze równa się liczbie rekordów źródłowych.
 - **Nie odrzuca rekordów na podstawie heurystyki sekretów.** Archiwum może
   zawierać dane wrażliwe; kreator importu ostrzega o tym przed startem.
 

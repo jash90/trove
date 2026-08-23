@@ -25,7 +25,7 @@ const SECONDARY_MODIFIERS = new Map([
   ['alt', 'Alt'],
   ['shift', 'Shift'],
 ]);
-const HOTKEY_KEY_PATTERN = /^(?:[A-Z0-9]|F(?:[1-9]|1\d|2[0-4]))$/u;
+const HOTKEY_KEY_PATTERN = /^(?:[A-Z0-9]|SPACE|F(?:[1-9]|1\d|2[0-4]))$/u;
 const DENYLIST_ENTRY_PATTERN = /^[a-z0-9._-]+$/u;
 
 export const normalizePlatformHotkey = (value: string): string => {
@@ -35,8 +35,11 @@ export const normalizePlatformHotkey = (value: string): string => {
   const parts = value.split('+').map((part) => part.trim());
   if (parts.length < 2 || parts.some((part) => part.length === 0)) invalid();
 
-  const key = parts.at(-1)!.toUpperCase();
-  if (!HOTKEY_KEY_PATTERN.test(key)) invalid();
+  const upper = parts.at(-1)!.toUpperCase();
+  if (!HOTKEY_KEY_PATTERN.test(upper)) invalid();
+  // Named keys are spelled in title case by the platform shortcut syntax;
+  // single characters and function keys stay uppercase.
+  const key = upper === 'SPACE' ? 'Space' : upper;
 
   let primary: string | null = null;
   const secondary = new Set<string>();
@@ -318,8 +321,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 />
               </label>
               <p className="settings-help">
-                Aktywny skrót systemowy nie zmieni się na tym ekranie — zostanie
-                zarejestrowany dopiero po wdrożeniu integracji systemowej.
+                Aplikację przywołuje <kbd>⌘⇧Space</kbd>; ponowne wciśnięcie ją
+                chowa. Aktywny skrót systemowy nie zmieni się na tym ekranie —
+                zapisana wartość zacznie obowiązywać po ponownym uruchomieniu.
               </p>
               <label className="settings-toggle" htmlFor="settings-autostart">
                 <input

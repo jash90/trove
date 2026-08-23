@@ -77,6 +77,7 @@ const loadSettings = async (): Promise<HTMLInputElement> =>
 
 describe('settings normalization', () => {
   it.each([
+    ['commandorcontrol + shift + space', 'CommandOrControl+Shift+Space'],
     ['commandorcontrol + shift + v', 'CommandOrControl+Shift+V'],
     ['control+alt+7', 'Control+Alt+7'],
     ['Command+Shift+F12', 'Command+Shift+F12'],
