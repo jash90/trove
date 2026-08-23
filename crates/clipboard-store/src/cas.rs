@@ -1635,7 +1635,7 @@ enum TestFailure {
 mod tests {
     use std::{fs, path::Path, sync::Arc};
 
-    use super::{CasStore, TestFailure, FORBID_FULL_BLOB_ALLOCATION};
+    use super::{CasStore, FORBID_FULL_BLOB_ALLOCATION, TestFailure};
     use crate::{ReadOnlyStore, StorageBoundaryLease, StoreConfig, StoreHandle};
 
     struct FullBlobAllocationGuard;

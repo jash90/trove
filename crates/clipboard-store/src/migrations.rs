@@ -21,31 +21,106 @@ impl Migrations {
     }
 
     pub(crate) fn apply(&self, connection: &mut Connection) -> Result<(), StoreError> {
+        self.apply_with_hook(connection, || {})
+    }
+
+    fn apply_with_hook(
+        &self,
+        connection: &mut Connection,
+        before_transaction: impl FnOnce(),
+    ) -> Result<(), StoreError> {
+        before_transaction();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version =
-            connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+            transaction.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
         if version > LATEST_SCHEMA_VERSION {
             return Err(StoreError::UnsupportedSchemaVersion(version));
         }
         if version == LATEST_SCHEMA_VERSION {
-            return validate_schema_identity(connection);
+            validate_schema_identity(&transaction)?;
+            transaction.commit()?;
+            return Ok(());
         }
 
         if version < 1 {
-            let transaction =
-                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(INITIAL_MIGRATION)?;
             transaction.pragma_update(None, "user_version", 1_i64)?;
-            transaction.commit()?;
         }
         if version < 2 {
-            validate_schema_identity(connection)?;
-            let transaction =
-                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            validate_schema_identity(&transaction)?;
             transaction.execute_batch(SETTINGS_MIGRATION)?;
             transaction.pragma_update(None, "user_version", 2_i64)?;
-            transaction.commit()?;
         }
-        validate_schema_identity(connection)
+        validate_schema_identity(&transaction)?;
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Barrier},
+        thread,
+        time::Duration,
+    };
+
+    use rusqlite::Connection;
+
+    use super::{INITIAL_MIGRATION, migrations};
+
+    #[test]
+    fn concurrent_independent_connections_upgrade_revision_six_once_without_data_loss() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("history.sqlite");
+        let connection = Connection::open(&database_path).unwrap();
+        connection.execute_batch(INITIAL_MIGRATION).unwrap();
+        connection
+            .pragma_update(None, "user_version", 1_i64)
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE migration_sentinel(value TEXT NOT NULL);
+                 INSERT INTO migration_sentinel(value) VALUES ('preserved');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let rendezvous = Arc::new(Barrier::new(2));
+        let mut upgrades = Vec::new();
+        for _ in 0..2 {
+            let database_path = database_path.clone();
+            let rendezvous = Arc::clone(&rendezvous);
+            upgrades.push(thread::spawn(move || {
+                let mut connection = Connection::open(database_path).unwrap();
+                connection.busy_timeout(Duration::from_secs(5)).unwrap();
+                migrations().apply_with_hook(&mut connection, || {
+                    rendezvous.wait();
+                })
+            }));
+        }
+
+        for upgrade in upgrades {
+            upgrade.join().unwrap().unwrap();
+        }
+        let connection = Connection::open(database_path).unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let revision: i64 = connection
+            .query_row(
+                "SELECT revision FROM schema_identity WHERE identity = 'clipboard-store'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let sentinel: String = connection
+            .query_row("SELECT value FROM migration_sentinel", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(version, 2);
+        assert_eq!(revision, 6);
+        assert_eq!(sentinel, "preserved");
     }
 }
 

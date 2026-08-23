@@ -110,14 +110,64 @@ export interface ImportProgress {
 }
 
 export function validateImportProgress(progress: ImportProgress): ImportProgress {
-  if (!progress.runId) throw new Error('invalid_import_progress');
+  const invalid = (): never => {
+    throw new Error('invalid_import_progress');
+  };
+  if (progress.runId.trim().length === 0) invalid();
+  const counters = [
+    progress.processed,
+    progress.total,
+    progress.imported,
+    progress.alreadyPresent,
+    progress.skipped,
+    progress.failed,
+  ];
+  if (!counters.every((counter) => Number.isSafeInteger(counter) && counter >= 0)) invalid();
   const outcomes =
     progress.imported + progress.alreadyPresent + progress.skipped + progress.failed;
   if (progress.processed !== outcomes || progress.processed > progress.total) {
-    throw new Error('invalid_import_progress');
+    invalid();
   }
-  if (progress.state === 'completed' && outcomes !== progress.total) {
-    throw new Error('invalid_import_progress');
+
+  if (progress.state === 'running') {
+    if (progress.summary !== null || progress.errorCode !== null) invalid();
+    return progress;
+  }
+
+  if (progress.state === 'failed') {
+    if (
+      progress.summary !== null ||
+      progress.errorCode === null ||
+      progress.errorCode.trim().length === 0
+    ) {
+      invalid();
+    }
+    return progress;
+  }
+
+  if (progress.state !== 'completed') invalid();
+
+  if (progress.errorCode !== null || outcomes !== progress.total) invalid();
+  const summary = progress.summary;
+  if (summary === null) throw new Error('invalid_import_progress');
+  const summaryCounters = [
+    summary.total,
+    summary.imported,
+    summary.alreadyPresent,
+    summary.skipped,
+    summary.failed,
+  ];
+  if (!summaryCounters.every((counter) => Number.isSafeInteger(counter) && counter >= 0)) invalid();
+  if (
+    summary.runId !== progress.runId ||
+    summary.total !== progress.total ||
+    summary.imported !== progress.imported ||
+    summary.alreadyPresent !== progress.alreadyPresent ||
+    summary.skipped !== progress.skipped ||
+    summary.failed !== progress.failed ||
+    summary.imported + summary.alreadyPresent + summary.skipped + summary.failed !== summary.total
+  ) {
+    invalid();
   }
   return progress;
 }

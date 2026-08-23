@@ -284,7 +284,7 @@ fn gc_session_preserves_uncertain_corrupt_blobs() {
 mod unix_symlink_tests {
     use std::{
         fs,
-        os::unix::fs::{symlink, PermissionsExt},
+        os::unix::fs::{PermissionsExt, symlink},
     };
 
     use clipboard_store::GcStepBudget;
