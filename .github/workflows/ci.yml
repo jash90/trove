@@ -1,0 +1,70 @@
+# Runs the same gates the project is developed against, in the same order.
+#
+# macOS is the only runner: the application captures the clipboard through
+# platform-macos and builds a .app bundle, so a Linux runner would check a
+# configuration nobody ships.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The toolchain file pins 1.96.0 with clippy and rustfmt; this action
+      # reads it rather than taking a version of its own.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      - name: Types
+        run: pnpm typecheck
+
+      - name: Interface tests
+        run: pnpm test
+
+      - name: Interface build
+        run: pnpm build
+
+      # Through pnpm, not `cargo tauri`: the CLI is a devDependency here, so a
+      # runner has it after install and needs no separate cargo-install.
+      # Last because it is the slowest, and because everything above has to
+      # hold before the bundle is worth producing.
+      - name: Application bundle
+        run: pnpm tauri build --debug --no-bundle
