@@ -7,6 +7,14 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static FORBID_FULL_BLOB_ALLOCATION: Cell<bool> = const { Cell::new(false) };
+}
+
 use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
 use cap_std::fs::{Dir as CapDir, File as CapFile, OpenOptions as CapOpenOptions};
 use clipboard_core::ContentHash;
@@ -180,7 +188,7 @@ impl CasStore {
         let final_path = shard.join(&hex_hash);
 
         if self
-            .read_existing_blob(&root, &final_path, &relpath)?
+            .verify_existing_blob_for_put(&root, &final_path, &relpath, bytes.len() as u64)?
             .is_some()
         {
             return Ok(CasBlob {
@@ -211,6 +219,13 @@ impl CasStore {
         match write_result {
             Ok(()) => {
                 guard.disarm();
+                self.verify_existing_blob_for_put(
+                    &root,
+                    &final_path,
+                    &relpath,
+                    bytes.len() as u64,
+                )?
+                .ok_or_else(|| CasError::Io(io::Error::other("CAS blob is not present")))?;
                 Ok(CasBlob {
                     hash,
                     relpath,
@@ -218,7 +233,12 @@ impl CasStore {
                 })
             }
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
-                let result = match self.read_existing_blob(&root, &final_path, &relpath) {
+                let result = match self.verify_existing_blob_for_put(
+                    &root,
+                    &final_path,
+                    &relpath,
+                    bytes.len() as u64,
+                ) {
                     Ok(Some(_)) => Ok(CasBlob {
                         hash,
                         relpath,
@@ -376,7 +396,9 @@ impl CasStore {
         let shard = ensure_cap_directory(&root, shard_name)?;
         let temporary_directory = ensure_cap_directory(&root, ".tmp")?;
 
-        if read_cap_blob(&shard, OsStr::new(&hex_hash), &relpath)?.is_some() {
+        let existing =
+            verify_cap_blob_for_put(&shard, OsStr::new(&hex_hash), &relpath, bytes.len() as u64)?;
+        if existing.is_some() {
             return Ok(CasBlob {
                 hash,
                 relpath,
@@ -414,17 +436,20 @@ impl CasStore {
                 &temporary_name,
                 &shard,
                 OsStr::new(&hex_hash),
+                bytes,
             )
             .map_err(CasError::Io)
         })();
         match write_result {
             Ok(()) => {
                 guard.disarm();
-                let stored = read_cap_blob(&shard, OsStr::new(&hex_hash), &relpath)?
-                    .ok_or_else(|| CasError::Io(io::Error::other("CAS blob is not present")))?;
-                if stored.len() != bytes.len() {
-                    return Err(CasError::CorruptBlob);
-                }
+                verify_cap_blob_for_put(
+                    &shard,
+                    OsStr::new(&hex_hash),
+                    &relpath,
+                    bytes.len() as u64,
+                )?
+                .ok_or_else(|| CasError::Io(io::Error::other("CAS blob is not present")))?;
                 Ok(CasBlob {
                     hash,
                     relpath,
@@ -432,13 +457,20 @@ impl CasStore {
                 })
             }
             Err(CasError::Io(source)) if source.kind() == io::ErrorKind::AlreadyExists => {
-                let result = read_cap_blob(&shard, OsStr::new(&hex_hash), &relpath)?
-                    .ok_or(CasError::Io(source))
-                    .map(|_| CasBlob {
+                let result = match verify_cap_blob_for_put(
+                    &shard,
+                    OsStr::new(&hex_hash),
+                    &relpath,
+                    bytes.len() as u64,
+                ) {
+                    Ok(Some(_)) => Ok(CasBlob {
                         hash,
                         relpath,
                         byte_size: bytes.len() as u64,
-                    });
+                    }),
+                    Ok(None) => Err(CasError::Io(source)),
+                    Err(error) => Err(error),
+                };
                 guard.cleanup()?;
                 result
             }
@@ -607,6 +639,48 @@ impl CasStore {
         Ok(Some(bytes))
     }
 
+    fn verify_existing_blob_for_put(
+        &self,
+        root: &Path,
+        path: &Path,
+        relpath: &str,
+        expected_size: u64,
+    ) -> Result<Option<u64>, CasError> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(CasError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(CasError::FilesystemBoundary);
+        }
+        validate_private_direct_file(&metadata)?;
+        let canonical_path = fs::canonicalize(path).map_err(CasError::Io)?;
+        if !canonical_path.starts_with(root) {
+            return Err(CasError::FilesystemBoundary);
+        }
+        if metadata.len() > MAX_CAS_OBJECT_BYTES as u64 {
+            return Err(CasError::ObjectTooLarge);
+        }
+        if metadata.len() != expected_size {
+            return Err(CasError::CorruptBlob);
+        }
+        let identity = (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata));
+        let mut file = open_direct_file_nofollow(path)?;
+        let opened = file.metadata().map_err(CasError::Io)?;
+        validate_private_direct_file(&opened)?;
+        if (MetadataExt::dev(&opened), MetadataExt::ino(&opened)) != identity {
+            return Err(CasError::FilesystemBoundary);
+        }
+        verify_reader(&mut file, relpath, expected_size)?;
+        let after = fs::symlink_metadata(path).map_err(CasError::Io)?;
+        validate_private_direct_file(&after)?;
+        if (MetadataExt::dev(&after), MetadataExt::ino(&after)) != identity {
+            return Err(CasError::FilesystemBoundary);
+        }
+        Ok(Some(expected_size))
+    }
+
     fn write_sync_and_rename(
         &self,
         mut temporary: File,
@@ -659,10 +733,26 @@ impl CasStore {
         temporary_name: &OsStr,
         shard: &CapDir,
         blob_name: &OsStr,
+        _bytes: &[u8],
     ) -> io::Result<()> {
         #[cfg(test)]
         if self.should_fail(TestFailure::Rename) {
             return Err(io::Error::other("deterministic test rename failure"));
+        }
+        #[cfg(test)]
+        if self.should_fail(TestFailure::DestinationAppears) {
+            let mut options = CapOpenOptions::new();
+            options
+                .write(true)
+                .create_new(true)
+                .follow(FollowSymlinks::No);
+            #[cfg(unix)]
+            cap_std::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            shard.open_with(blob_name, &options)?.write_all(_bytes)?;
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "deterministic test destination race",
+            ));
         }
         #[cfg(any(
             target_vendor = "apple",
@@ -1184,6 +1274,38 @@ fn validate_named_cap_file(
     Ok(())
 }
 
+fn verify_cap_blob_for_put(
+    directory: &CapDir,
+    name: &OsStr,
+    relpath: &str,
+    expected_size: u64,
+) -> Result<Option<u64>, CasError> {
+    let metadata = match directory.symlink_metadata(name) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(CasError::Io(error)),
+    };
+    let identity = CapFileIdentity::from_metadata(&metadata)?;
+    if metadata.len() > MAX_CAS_OBJECT_BYTES as u64 {
+        return Err(CasError::ObjectTooLarge);
+    }
+    if metadata.len() != expected_size {
+        return Err(CasError::CorruptBlob);
+    }
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file = directory
+        .open_with(name, &options)
+        .map_err(|_| CasError::FilesystemBoundary)?;
+    let handle_identity = CapFileIdentity::from_metadata(&file.metadata().map_err(CasError::Io)?)?;
+    if handle_identity != identity {
+        return Err(CasError::FilesystemBoundary);
+    }
+    verify_reader(&mut file, relpath, expected_size)?;
+    validate_named_cap_file(directory, name, identity)?;
+    Ok(Some(expected_size))
+}
+
 fn read_cap_blob(
     directory: &CapDir,
     name: &OsStr,
@@ -1217,6 +1339,13 @@ fn read_verified_bytes(
     relpath: &str,
     expected_size: u64,
 ) -> Result<Vec<u8>, CasError> {
+    #[cfg(test)]
+    FORBID_FULL_BLOB_ALLOCATION.with(|forbidden| {
+        assert!(
+            !forbidden.get(),
+            "put validation attempted a full-blob allocation"
+        );
+    });
     let capacity = usize::try_from(expected_size).map_err(|_| CasError::ObjectTooLarge)?;
     if capacity > MAX_CAS_OBJECT_BYTES {
         return Err(CasError::ObjectTooLarge);
@@ -1397,9 +1526,79 @@ enum TestFailure {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, sync::Arc};
 
-    use super::{CasStore, TestFailure};
+    use super::{CasStore, FORBID_FULL_BLOB_ALLOCATION, TestFailure};
+    use crate::{ReadOnlyStore, StorageBoundaryLease, StoreConfig, StoreHandle};
+
+    struct FullBlobAllocationGuard;
+
+    impl FullBlobAllocationGuard {
+        fn forbid() -> Self {
+            FORBID_FULL_BLOB_ALLOCATION.with(|forbidden| {
+                assert!(!forbidden.replace(true));
+            });
+            Self
+        }
+    }
+
+    impl Drop for FullBlobAllocationGuard {
+        fn drop(&mut self) {
+            FORBID_FULL_BLOB_ALLOCATION.with(|forbidden| forbidden.set(false));
+        }
+    }
+
+    #[test]
+    fn put_validation_never_allocates_full_blob_capacity() {
+        let direct_directory = tempfile::tempdir().unwrap();
+        let direct = CasStore::new(direct_directory.path().join("blobs"));
+        {
+            let _guard = FullBlobAllocationGuard::forbid();
+            direct.put(b"synthetic direct payload").unwrap();
+            direct.put(b"synthetic direct payload").unwrap();
+        }
+        let direct_race = CasStore {
+            root: direct.root().to_path_buf(),
+            storage_boundary: None,
+            test_failures: vec![TestFailure::DestinationAppears],
+        };
+        {
+            let _guard = FullBlobAllocationGuard::forbid();
+            direct_race.put(b"synthetic direct race").unwrap();
+        }
+
+        let leased_directory = tempfile::tempdir().unwrap();
+        let config = StoreConfig::new(leased_directory.path().join("history.sqlite"))
+            .with_blob_root(leased_directory.path().join("blobs"));
+        let writer_lease = Arc::new(StorageBoundaryLease::create_writer(&config).unwrap());
+        let store = StoreHandle::open(config.clone().with_storage_boundary(writer_lease)).unwrap();
+        drop(store);
+        let read_only_lease = Arc::new(StorageBoundaryLease::open_read_only(&config).unwrap());
+        let read_only =
+            ReadOnlyStore::open_existing(config.clone().with_storage_boundary(read_only_lease))
+                .unwrap();
+        let mut leased = read_only.cas_store().unwrap();
+        {
+            let _guard = FullBlobAllocationGuard::forbid();
+            leased.put(b"synthetic leased payload").unwrap();
+            leased.put(b"synthetic leased payload").unwrap();
+        }
+        let existing_hash = blake3::hash(b"synthetic leased payload")
+            .to_hex()
+            .to_string();
+        let leased_race_payload = (0_u64..)
+            .map(|suffix| format!("synthetic leased race {suffix}").into_bytes())
+            .find(|payload| {
+                let hash = blake3::hash(payload).to_hex().to_string();
+                hash[..2] == existing_hash[..2] && hash != existing_hash
+            })
+            .unwrap();
+        leased.test_failures = vec![TestFailure::DestinationAppears];
+        {
+            let _guard = FullBlobAllocationGuard::forbid();
+            leased.put(&leased_race_payload).unwrap();
+        }
+    }
 
     #[test]
     fn failed_atomic_write_leaves_no_final_or_temporary_blob() {

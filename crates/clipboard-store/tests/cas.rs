@@ -97,6 +97,28 @@ fn cas_rejects_corrupt_existing_blobs_without_leaking_paths_or_hashes() {
 }
 
 #[test]
+fn leased_put_streaming_validation_rejects_a_corrupt_existing_blob() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = StoreConfig::new(directory.path().join("history.sqlite"))
+        .with_blob_root(directory.path().join("blobs"));
+    let writer_lease = Arc::new(StorageBoundaryLease::create_writer(&config).unwrap());
+    let store = StoreHandle::open(config.clone().with_storage_boundary(writer_lease)).unwrap();
+    drop(store);
+    let read_only_lease = Arc::new(StorageBoundaryLease::open_read_only(&config).unwrap());
+    let read_only =
+        ReadOnlyStore::open_existing(config.clone().with_storage_boundary(read_only_lease))
+            .unwrap();
+    let cas = read_only.cas_store().unwrap();
+    let blob = cas.put(b"synthetic leased payload").unwrap();
+    fs::write(cas.root().join(&blob.relpath), b"corrupt").unwrap();
+
+    let error = cas.put(b"synthetic leased payload").unwrap_err();
+
+    assert_eq!(error.to_string(), "CAS blob integrity check failed");
+    assert!(!error.to_string().contains(&blob.relpath));
+}
+
+#[test]
 fn concurrent_puts_are_idempotent() {
     let (_directory, cas) = test_cas();
     let cas = Arc::new(cas);

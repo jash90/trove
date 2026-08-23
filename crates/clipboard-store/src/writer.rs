@@ -13,8 +13,8 @@ use std::{
 };
 
 use clipboard_core::{
-    CaptureInput, ContentFlags, ContentHash, ContentKind, SourceConfidence, canonical_bytes,
-    content_hash, normalize_search_text,
+    CaptureInput, ContentFlags, ContentHash, ContentKind, SourceConfidence, canonical_byte_len,
+    content_hash, normalize_search_text_bounded,
 };
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use thiserror::Error;
@@ -22,20 +22,55 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::{
-    CasError, CasStore, StorageBoundaryError, StorageBoundaryLease, StoreConfig, migrations,
+    CasError, CasStore, StorageBoundaryError, StorageBoundaryLease, StoreConfig,
+    import_operation::ImportOperationPermit,
+    migrations,
     reader::{open_reader_connection, open_writer_connection, required_boundary},
 };
 
 pub const WRITER_QUEUE_CAPACITY: usize = 256;
 pub const MAX_STORE_READERS: usize = 8;
 pub const IMPORT_BATCH_SIZE: usize = 250;
-pub const MAX_IMPORT_BATCH_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_IMPORT_BATCH_BYTES: usize = 60 * 1024 * 1024;
+pub const MAX_IMPORT_WRITER_SCRATCH_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_IMPORT_REPRESENTATIONS: usize = 2;
 pub const MAX_SEARCH_DERIVATIONS_PER_CONTENT: usize = 16;
 pub const MAX_SEARCH_DERIVATION_BYTES: usize = 64 * 1024;
 pub const MAX_SEARCH_DOCUMENT_BYTES: usize = 512 * 1024;
 pub const MAX_PREVIEW_BYTES: usize = 512;
 const MAX_INLINE_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_INLINE_ZSTD_PAYLOAD_BYTES: usize = 256 * 1024;
+const MAX_IMPORT_ZSTD_OUTPUT_BYTES_PER_REPRESENTATION: usize = 263_168;
+const MAX_IMPORT_ZSTD_OUTPUT_BYTES: usize =
+    MAX_IMPORT_REPRESENTATIONS * MAX_IMPORT_ZSTD_OUTPUT_BYTES_PER_REPRESENTATION;
+const MAX_IMPORT_ZSTD_CODEC_BYTES: usize = 2 * 1024 * 1024;
+const MAX_IMPORT_REPRESENTATION_METADATA_BYTES: usize = 4 * 1024;
+const MAX_IMPORT_CAS_TRANSIENT_METADATA_BYTES: usize = 256 * 1024;
+const MAX_IMPORT_SEARCH_PEAK_BYTES: usize = MAX_IMPORT_ZSTD_OUTPUT_BYTES
+    + MAX_SEARCH_DERIVATION_BYTES
+    + MAX_SEARCH_DERIVATION_BYTES
+    + MAX_SEARCH_DERIVATION_BYTES
+    + 32
+    + MAX_SEARCH_DERIVATIONS_PER_CONTENT
+        * (size_of::<(Vec<u8>, String)>() + 32 + MAX_SEARCH_DERIVATION_BYTES)
+    + MAX_SEARCH_DOCUMENT_BYTES
+    + MAX_PREVIEW_BYTES
+    + crate::CAS_VERIFY_BUFFER_BYTES
+    + MAX_IMPORT_REPRESENTATION_METADATA_BYTES
+    + MAX_IMPORT_CAS_TRANSIENT_METADATA_BYTES;
+const MAX_IMPORT_COMPRESSION_PEAK_BYTES: usize = MAX_IMPORT_ZSTD_OUTPUT_BYTES
+    + MAX_IMPORT_ZSTD_CODEC_BYTES
+    + MAX_PREVIEW_BYTES
+    + crate::CAS_VERIFY_BUFFER_BYTES
+    + MAX_IMPORT_REPRESENTATION_METADATA_BYTES
+    + MAX_IMPORT_CAS_TRANSIENT_METADATA_BYTES;
+
+const _: () = assert!(
+    MAX_IMPORT_REPRESENTATIONS * (size_of::<StoredRepresentation<'static>>() + 128)
+        <= MAX_IMPORT_REPRESENTATION_METADATA_BYTES
+);
+const _: () = assert!(MAX_IMPORT_SEARCH_PEAK_BYTES <= MAX_IMPORT_WRITER_SCRATCH_BYTES);
+const _: () = assert!(MAX_IMPORT_COMPRESSION_PEAK_BYTES <= MAX_IMPORT_WRITER_SCRATCH_BYTES);
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -169,8 +204,40 @@ pub struct StoreImportCandidate {
     pub candidate_offset: u64,
     pub record_fingerprint: [u8; 32],
     pub capture: CaptureInput,
-    pub search_text: Option<String>,
+    pub search_ocr: Option<String>,
     pub source_app_original: Option<String>,
+}
+
+impl StoreImportCandidate {
+    /// Returns the heap capacity moved with this candidate, excluding its slot in the batch Vec.
+    #[doc(hidden)]
+    pub fn owned_allocation_bytes(&self) -> Option<usize> {
+        let capture = &self.capture;
+        let mut bytes = capture
+            .primary_mime
+            .capacity()
+            .checked_add(option_string_capacity(&capture.source_app_id))?
+            .checked_add(option_string_capacity(&capture.source_app_name))?
+            .checked_add(option_string_capacity(&self.search_ocr))?
+            .checked_add(option_string_capacity(&self.source_app_original))?
+            .checked_add(
+                capture
+                    .representations
+                    .capacity()
+                    .checked_mul(size_of::<clipboard_core::RepresentationInput>())?,
+            )?;
+        for representation in &capture.representations {
+            bytes = bytes
+                .checked_add(representation.format_id.capacity())?
+                .checked_add(representation.bytes.as_ref().map_or(0, Vec::capacity))?
+                .checked_add(option_string_capacity(&representation.missing_ref))?;
+        }
+        Some(bytes)
+    }
+}
+
+fn option_string_capacity(value: &Option<String>) -> usize {
+    value.as_ref().map_or(0, String::capacity)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -640,6 +707,7 @@ enum WriteCommand {
         reply: oneshot::Sender<Result<ImportWorkerLease, StoreError>>,
     },
     ImportBatch {
+        operation_permit: ImportOperationPermit,
         run_id: Uuid,
         generation: u64,
         candidates: Vec<StoreImportCandidate>,
@@ -784,18 +852,12 @@ impl StoreHandle {
 
     pub async fn import_batch(
         &self,
+        operation_permit: ImportOperationPermit,
         run_id: Uuid,
         generation: u64,
         candidates: Vec<StoreImportCandidate>,
     ) -> Result<ImportBatchOutcome, StoreError> {
-        if candidates.len() > IMPORT_BATCH_SIZE
-            || candidates
-                .iter()
-                .try_fold(0_usize, |total, candidate| {
-                    total.checked_add(store_candidate_bytes(candidate))
-                })
-                .is_none_or(|bytes| bytes > MAX_IMPORT_BATCH_BYTES)
-        {
+        if validate_import_batch(&candidates, operation_permit.reserved_bytes()).is_err() {
             return Err(StoreError::ImportBatchTooLarge);
         }
         let (reply, response) = oneshot::channel();
@@ -803,6 +865,7 @@ impl StoreHandle {
             .runtime
             .writer_sender()?
             .send(WriteCommand::ImportBatch {
+                operation_permit,
                 run_id,
                 generation,
                 candidates,
@@ -950,27 +1013,37 @@ pub(crate) fn acquire_read_runtime(
     acquire_runtime(config, boundary, false)
 }
 
-fn store_candidate_bytes(candidate: &StoreImportCandidate) -> usize {
-    let capture = &candidate.capture;
-    let mut bytes = size_of::<StoreImportCandidate>()
-        .saturating_add(capture.primary_mime.len())
-        .saturating_add(capture.source_app_id.as_ref().map_or(0, String::len))
-        .saturating_add(capture.source_app_name.as_ref().map_or(0, String::len))
-        .saturating_add(candidate.search_text.as_ref().map_or(0, String::len))
-        .saturating_add(
-            candidate
-                .source_app_original
-                .as_ref()
-                .map_or(0, String::len),
-        );
-    for representation in &capture.representations {
-        bytes = bytes
-            .saturating_add(size_of::<clipboard_core::RepresentationInput>())
-            .saturating_add(representation.format_id.len())
-            .saturating_add(representation.bytes.as_ref().map_or(0, Vec::len))
-            .saturating_add(representation.missing_ref.as_ref().map_or(0, String::len));
+fn validate_import_batch(
+    candidates: &Vec<StoreImportCandidate>,
+    reserved_operation_bytes: usize,
+) -> Result<usize, StoreError> {
+    if candidates.len() > IMPORT_BATCH_SIZE
+        || candidates
+            .iter()
+            .any(|candidate| candidate.capture.representations.len() > MAX_IMPORT_REPRESENTATIONS)
+    {
+        return Err(StoreError::ImportBatchTooLarge);
     }
-    bytes
+    let bytes = candidates
+        .capacity()
+        .checked_mul(size_of::<StoreImportCandidate>())
+        .and_then(|batch_slots| {
+            candidates.iter().try_fold(batch_slots, |total, candidate| {
+                total.checked_add(candidate.owned_allocation_bytes()?)
+            })
+        })
+        .ok_or(StoreError::ImportBatchTooLarge)?;
+    let required = if candidates.is_empty() {
+        bytes
+    } else {
+        bytes
+            .checked_add(MAX_IMPORT_WRITER_SCRATCH_BYTES)
+            .ok_or(StoreError::ImportBatchTooLarge)?
+    };
+    if bytes > MAX_IMPORT_BATCH_BYTES || required > reserved_operation_bytes {
+        return Err(StoreError::ImportBatchTooLarge);
+    }
+    Ok(bytes)
 }
 
 fn handle_command(
@@ -1015,6 +1088,7 @@ fn handle_command(
             }));
         }
         WriteCommand::ImportBatch {
+            operation_permit: _operation_permit,
             run_id,
             generation,
             candidates,
@@ -1240,7 +1314,11 @@ fn import_batch(
     generation: u64,
     candidates: &[StoreImportCandidate],
 ) -> Result<ImportBatchOutcome, StoreError> {
-    if candidates.len() > IMPORT_BATCH_SIZE {
+    if candidates.len() > IMPORT_BATCH_SIZE
+        || candidates
+            .iter()
+            .any(|candidate| candidate.capture.representations.len() > MAX_IMPORT_REPRESENTATIONS)
+    {
         return Err(StoreError::ImportBatchTooLarge);
     }
     let mut processed_candidates = 0_u64;
@@ -1311,7 +1389,7 @@ fn commit_import_candidate(
         &transaction,
         &candidate.capture,
         prepared,
-        Some(candidate.search_text.as_deref()),
+        candidate.search_ocr.as_deref(),
         candidate.source_app_original.as_deref(),
     )?;
     transaction.execute(
@@ -1486,7 +1564,7 @@ fn prepare_ingest<'a>(
                 }
                 (
                     content_hash(input.kind, &input.primary_mime, bytes),
-                    canonical_bytes(input.kind, bytes).len() as u64,
+                    canonical_byte_len(input.kind, bytes) as u64,
                     Some(bytes),
                     input.content_flags,
                 )
@@ -1518,10 +1596,10 @@ fn write_ingest(
     transaction: &Transaction<'_>,
     input: &CaptureInput,
     prepared: &PreparedIngest<'_>,
-    search_override: Option<Option<&str>>,
+    search_ocr: Option<&str>,
     source_app_original: Option<&str>,
 ) -> Result<IngestOutcome, StoreError> {
-    let normalized_text = normalized_text(input, prepared.primary_payload, search_override);
+    let normalized_text = normalized_text(input, prepared.primary_payload, search_ocr);
     transaction.execute(
         "INSERT INTO content
            (content_hash, kind, primary_mime, byte_size, preview_text, flags, created_at_ms)
@@ -1677,12 +1755,19 @@ fn retain_search_derivation(
     let mut retained = {
         let mut statement = transaction.prepare(
             "SELECT derivation_hash, normalized_text FROM search_derivation
-             WHERE content_id = ?1 ORDER BY derivation_hash
+             WHERE content_id = ?1
+               AND length(derivation_hash) = 32
+               AND length(CAST(normalized_text AS BLOB)) <= ?3
+             ORDER BY derivation_hash
              LIMIT ?2",
         )?;
         statement
             .query_map(
-                params![content_id, MAX_SEARCH_DERIVATIONS_PER_CONTENT as i64],
+                params![
+                    content_id,
+                    MAX_SEARCH_DERIVATIONS_PER_CONTENT as i64,
+                    MAX_SEARCH_DERIVATION_BYTES as i64,
+                ],
                 |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
             )?
             .collect::<Result<Vec<_>, _>>()?
@@ -1767,12 +1852,12 @@ struct StoredRepresentation<'a> {
     format_id: &'a str,
     raw_digest: ContentHash,
     original_byte_size: u64,
-    payload: PreparedPayload,
+    payload: PreparedPayload<'a>,
 }
 
-enum PreparedPayload {
+enum PreparedPayload<'a> {
     Stored(StoredPayload),
-    Missing(String),
+    Missing(&'a str),
 }
 
 impl StoredRepresentation<'_> {
@@ -1822,7 +1907,7 @@ fn stored_representations<'a>(
                 format_id: representation.format_id.as_str(),
                 raw_digest: [0; 32],
                 original_byte_size: 0,
-                payload: PreparedPayload::Missing(missing_ref.to_owned()),
+                payload: PreparedPayload::Missing(missing_ref),
             })
         })
         .collect()
@@ -1853,28 +1938,47 @@ pub fn classify_payload(
 fn normalized_text(
     input: &CaptureInput,
     primary_payload: Option<&[u8]>,
-    search_override: Option<Option<&str>>,
+    search_ocr: Option<&str>,
 ) -> Option<String> {
     if input.content_flags.contains(ContentFlags::DO_NOT_INDEX) {
         return None;
     }
-    if let Some(search_override) = search_override {
-        return search_override.map(normalize_search_text_bounded);
+    let primary = input
+        .kind
+        .is_textual()
+        .then(|| primary_payload.and_then(bounded_utf8_payload))
+        .flatten();
+    match (primary, search_ocr) {
+        (Some(primary), Some(ocr)) => Some(normalize_search_text_bounded(
+            &bounded_search_prefix(primary, ocr),
+            MAX_SEARCH_DERIVATION_BYTES,
+        )),
+        (Some(primary), None) => Some(normalize_search_text_bounded(
+            primary,
+            MAX_SEARCH_DERIVATION_BYTES,
+        )),
+        (None, Some(ocr)) => Some(normalize_search_text_bounded(
+            ocr,
+            MAX_SEARCH_DERIVATION_BYTES,
+        )),
+        (None, None) => None,
     }
-    if !input.kind.is_textual() {
-        return None;
-    }
-    primary_payload
-        .and_then(bounded_utf8_payload)
-        .map(normalize_search_text_bounded)
 }
 
-fn normalize_search_text_bounded(value: &str) -> String {
-    let boundary = utf8_boundary_at_or_before(value, MAX_SEARCH_DERIVATION_BYTES);
-    truncate_utf8(
-        normalize_search_text(&value[..boundary]),
-        MAX_SEARCH_DERIVATION_BYTES,
-    )
+fn bounded_search_prefix(primary: &str, ocr: &str) -> String {
+    let mut combined = String::with_capacity(MAX_SEARCH_DERIVATION_BYTES);
+    push_utf8_prefix(&mut combined, primary, MAX_SEARCH_DERIVATION_BYTES);
+    if combined.len() < MAX_SEARCH_DERIVATION_BYTES {
+        combined.push('\n');
+    }
+    push_utf8_prefix(&mut combined, ocr, MAX_SEARCH_DERIVATION_BYTES);
+    combined
+}
+
+fn push_utf8_prefix(output: &mut String, value: &str, max_bytes: usize) {
+    let remaining = max_bytes.saturating_sub(output.len());
+    let boundary = utf8_boundary_at_or_before(value, remaining);
+    output.push_str(&value[..boundary]);
 }
 
 fn bounded_utf8_payload(payload: &[u8]) -> Option<&str> {
@@ -2138,8 +2242,91 @@ mod tests {
     #[cfg(unix)]
     use super::{
         BeginImportRun, CasError, CasStore, ImportSourceKind, StoreError, StoreImportCandidate,
-        begin_import, import_batch, read_import_status,
+        WriteCommand, begin_import, import_batch, read_import_status,
     };
+
+    #[test]
+    fn queued_import_batch_owns_the_operation_permit_until_the_command_drops() {
+        let gate = crate::ImportOperationGate::with_capacity(1024).unwrap();
+        let permit = gate.acquire_blocking().unwrap();
+        let (reply, _response) = tokio::sync::oneshot::channel();
+        let command = WriteCommand::ImportBatch {
+            operation_permit: permit,
+            run_id: uuid::Uuid::now_v7(),
+            generation: 1,
+            candidates: Vec::new(),
+            reply,
+        };
+        let waiting_gate = gate.clone();
+        let (acquired, observed) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let permit = waiting_gate.acquire_blocking().unwrap();
+            acquired.send(permit).unwrap();
+        });
+
+        assert!(matches!(
+            observed.recv_timeout(std::time::Duration::from_millis(20)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(command);
+        drop(
+            observed
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+        );
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn rejected_or_shutdown_writer_commands_release_the_operation_permit() {
+        let rejected_gate = crate::ImportOperationGate::with_capacity(1024).unwrap();
+        let rejected_permit = rejected_gate.acquire_blocking().unwrap();
+        let (rejected_sender, rejected_receiver) = tokio::sync::mpsc::channel(1);
+        drop(rejected_receiver);
+        let (reply, _response) = tokio::sync::oneshot::channel();
+        let rejected = rejected_sender
+            .blocking_send(WriteCommand::ImportBatch {
+                operation_permit: rejected_permit,
+                run_id: uuid::Uuid::now_v7(),
+                generation: 1,
+                candidates: Vec::new(),
+                reply,
+            })
+            .map_err(|_| StoreError::WriterClosed);
+        assert!(matches!(rejected, Err(StoreError::WriterClosed)));
+        assert_eq!(rejected_gate.active_bytes(), 0);
+
+        let shutdown_gate = crate::ImportOperationGate::with_capacity(1024).unwrap();
+        let shutdown_permit = shutdown_gate.acquire_blocking().unwrap();
+        let (shutdown_sender, shutdown_receiver) = tokio::sync::mpsc::channel(1);
+        let (reply, _response) = tokio::sync::oneshot::channel();
+        shutdown_sender
+            .blocking_send(WriteCommand::ImportBatch {
+                operation_permit: shutdown_permit,
+                run_id: uuid::Uuid::now_v7(),
+                generation: 1,
+                candidates: Vec::new(),
+                reply,
+            })
+            .unwrap();
+        assert_eq!(shutdown_gate.active_bytes(), 1024);
+        drop(shutdown_receiver);
+        assert_eq!(shutdown_gate.active_bytes(), 0);
+    }
+
+    #[test]
+    fn import_writer_scratch_proof_uses_the_upstream_zstd_bound() {
+        assert_eq!(
+            zstd::zstd_safe::compress_bound(super::MAX_INLINE_ZSTD_PAYLOAD_BYTES),
+            super::MAX_IMPORT_ZSTD_OUTPUT_BYTES_PER_REPRESENTATION,
+        );
+        assert_eq!(
+            super::MAX_IMPORT_ZSTD_OUTPUT_BYTES,
+            super::MAX_IMPORT_REPRESENTATIONS
+                * super::MAX_IMPORT_ZSTD_OUTPUT_BYTES_PER_REPRESENTATION,
+        );
+        // The peak inequalities are compile-time assertions beside the constants.
+    }
 
     #[cfg(unix)]
     #[test]
@@ -2182,7 +2369,7 @@ mod tests {
                 content_flags: ContentFlags::empty(),
                 event_flags: EventFlags::empty(),
             },
-            search_text: None,
+            search_ocr: None,
             source_app_original: None,
         };
 

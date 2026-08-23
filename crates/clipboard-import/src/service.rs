@@ -10,54 +10,74 @@ use std::{
 };
 
 use clipboard_store::{
-    BeginImportRun, ImportFailureCount, ImportSourceKind, ImportWorkerLease, ResumeImportRun,
-    StoreError, StoreHandle, StoreImportCandidate, StoreImportRunState, StoreImportRunStatus,
+    BeginImportRun, ImportFailureCount, ImportOperationGate, ImportSourceKind, ImportWorkerLease,
+    ResumeImportRun, StoreError, StoreHandle, StoreImportCandidate, StoreImportRunState,
+    StoreImportRunStatus,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    FramedHasher, ImportCandidate, ImportError, ImportParseReport, ImportSource, detect_export,
-    parse_export_report,
+    FramedHasher, ImportCandidate, ImportError, ImportParseLimits, ImportParseReport, ImportSource,
+    detect::detect_export_with_permit, parse_detected_export_report_with_permit,
 };
 
 pub const IMPORT_BATCH_SIZE: usize = clipboard_store::IMPORT_BATCH_SIZE;
 pub const MAX_IMPORT_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_IMPORT_RECORD_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_IMPORT_HEADER_BYTES: usize = 64 * 1024;
 pub const MAX_IMPORT_BATCH_BYTES: usize = clipboard_store::MAX_IMPORT_BATCH_BYTES;
 pub const MAX_IMPORT_AUXILIARY_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_PREPARED_SOURCE_BYTES: usize = 128 * 1024 * 1024;
-pub const MAX_PREPARED_CACHE_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_PREPARED_CACHE_BYTES: usize = 192 * 1024 * 1024;
+pub const MAX_IMPORT_OPERATION_BYTES: usize = clipboard_store::MAX_IMPORT_OPERATION_BYTES;
+pub const MAX_IMPORT_RUNTIME_BYTES: usize = 256 * 1024 * 1024;
 pub const PREPARED_SESSION_CAPACITY: usize = 32;
 pub const PREPARED_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
-const PREPARED_SESSION_OVERHEAD_BYTES: usize = 1024;
+const PREPARED_SESSION_OVERHEAD_BYTES: usize = 16 * 1024;
+const MAX_PREPARED_SESSION_CONTROL_BYTES: usize = 16 * 1024;
 
 /// Hard admission limits shared by analyzed sessions, resume preparations, CLI imports, and
 /// active workers. Production reserves one full per-source allowance before every parse so the
 /// number and aggregate memory envelope remain finite even while parsing.
 #[derive(Clone, Copy)]
-pub struct ImportAdmissionLimits {
+pub(crate) struct ImportAdmissionLimits {
     max_sources: usize,
     max_source_bytes: usize,
-    total_bytes: usize,
+    prepared_cache_bytes: usize,
+    operation_bytes: usize,
+    runtime_bytes: usize,
 }
 
 impl ImportAdmissionLimits {
     #[doc(hidden)]
-    pub const fn new(max_sources: usize, max_source_bytes: usize, total_bytes: usize) -> Self {
+    pub(crate) const fn new(
+        max_sources: usize,
+        max_source_bytes: usize,
+        prepared_cache_bytes: usize,
+        operation_bytes: usize,
+        runtime_bytes: usize,
+    ) -> Self {
         assert!(max_sources > 0, "source admission count must be positive");
         assert!(
             max_source_bytes > 0,
             "source admission size must be positive"
         );
         assert!(
-            total_bytes >= max_source_bytes,
+            prepared_cache_bytes >= max_source_bytes,
             "aggregate admission size must fit one source"
+        );
+        assert!(operation_bytes > 0, "operation admission must be positive");
+        assert!(
+            matches!(prepared_cache_bytes.checked_add(operation_bytes), Some(total) if total <= runtime_bytes),
+            "cache and operation admissions must fit the runtime envelope"
         );
         Self {
             max_sources,
             max_source_bytes,
-            total_bytes,
+            prepared_cache_bytes,
+            operation_bytes,
+            runtime_bytes,
         }
     }
 }
@@ -68,29 +88,116 @@ impl Default for ImportAdmissionLimits {
             PREPARED_SESSION_CAPACITY,
             MAX_PREPARED_SOURCE_BYTES,
             MAX_PREPARED_CACHE_BYTES,
+            MAX_IMPORT_OPERATION_BYTES,
+            MAX_IMPORT_RUNTIME_BYTES,
         )
     }
 }
 
 #[derive(Clone)]
-pub struct ImportRuntime {
+pub(crate) struct ImportRuntime {
     admission_budget: AdmissionBudget,
-    analysis_gate: Arc<Mutex<()>>,
+    operation_gate: ImportOperationGate,
+    prepared_sessions: Arc<Mutex<PreparedSessions>>,
+    limits: ImportAdmissionLimits,
 }
 
 impl ImportRuntime {
-    fn process_wide() -> Self {
+    pub(crate) fn process_wide() -> Self {
         static RUNTIME: OnceLock<ImportRuntime> = OnceLock::new();
         RUNTIME
-            .get_or_init(|| Self::with_limits(ImportAdmissionLimits::default()))
+            .get_or_init(|| {
+                Self::with_limits_and_gate(
+                    ImportAdmissionLimits::default(),
+                    ImportOperationGate::process_wide(),
+                )
+            })
             .clone()
     }
 
-    #[doc(hidden)]
-    pub fn with_limits(limits: ImportAdmissionLimits) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_limits(limits: ImportAdmissionLimits) -> Self {
+        let operation_gate = ImportOperationGate::with_capacity(limits.operation_bytes)
+            .expect("validated operation admission is non-zero");
+        Self::with_limits_and_gate(limits, operation_gate)
+    }
+
+    fn with_limits_and_gate(
+        limits: ImportAdmissionLimits,
+        operation_gate: ImportOperationGate,
+    ) -> Self {
         Self {
             admission_budget: AdmissionBudget::new(limits),
-            analysis_gate: Arc::new(Mutex::new(())),
+            operation_gate,
+            prepared_sessions: Arc::new(Mutex::new(PreparedSessions::default())),
+            limits,
+        }
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> (usize, usize) {
+        let retained_bytes = self
+            .admission_budget
+            .ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retained_bytes;
+        (retained_bytes, self.operation_gate.active_bytes())
+    }
+
+    pub(crate) fn acquire_operation_blocking(
+        &self,
+    ) -> Result<clipboard_store::ImportOperationPermit, ImportError> {
+        debug_assert_eq!(self.operation_gate.capacity(), self.limits.operation_bytes);
+        debug_assert!(
+            self.limits
+                .prepared_cache_bytes
+                .checked_add(self.limits.operation_bytes)
+                .is_some_and(|bytes| bytes <= self.limits.runtime_bytes)
+        );
+        self.operation_gate
+            .acquire_blocking()
+            .map_err(|_| ImportError::service("analysis_unavailable"))
+    }
+
+    pub(crate) fn reserve_preparation(&self) -> Result<AdmissionReservation, ImportError> {
+        self.prepared_sessions
+            .lock()
+            .map_err(|_| ImportError::service("analysis_unavailable"))?
+            .evict_expired(Instant::now());
+        loop {
+            if let Some(reservation) = self.admission_budget.try_reserve()? {
+                return Ok(reservation);
+            }
+            let evicted = self
+                .prepared_sessions
+                .lock()
+                .map_err(|_| ImportError::service("analysis_unavailable"))?
+                .evict_oldest_available();
+            if !evicted {
+                return Err(ImportError::service("analysis_capacity_full"));
+            }
+        }
+    }
+
+    fn parse_limits(&self) -> ImportParseLimits {
+        let json_record_bytes = self
+            .limits
+            .operation_bytes
+            .saturating_sub(crate::JSON_READER_BUFFER_BYTES)
+            .clamp(1, MAX_IMPORT_RECORD_BYTES);
+        let csv_fixed_bytes =
+            crate::CSV_INPUT_BUFFER_BYTES.saturating_add(crate::CSV_DRAIN_BUFFER_BYTES);
+        let csv_available = self.limits.operation_bytes.saturating_sub(csv_fixed_bytes);
+        let header_bytes = MAX_IMPORT_HEADER_BYTES
+            .min(csv_available / (size_of::<usize>() + 1))
+            .max(1);
+        ImportParseLimits {
+            manifest_bytes: MAX_IMPORT_MANIFEST_BYTES.min(self.limits.max_source_bytes),
+            record_bytes: json_record_bytes,
+            header_bytes,
+            source_bytes: self.limits.max_source_bytes,
+            auxiliary_bytes: MAX_IMPORT_AUXILIARY_BYTES.min(self.limits.max_source_bytes),
         }
     }
 }
@@ -285,9 +392,13 @@ impl Default for ImportWorkerPolicy {
 pub struct ImportService {
     store: StoreHandle,
     worker_policy: Arc<ImportWorkerPolicy>,
-    prepared_sessions: Arc<Mutex<PreparedSessions>>,
     runtime: ImportRuntime,
+    owner: ServiceOwnerToken,
+    owner_lifetime: Arc<()>,
 }
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct ServiceOwnerToken(Uuid);
 
 impl ImportService {
     pub fn new(store: StoreHandle) -> Self {
@@ -298,8 +409,8 @@ impl ImportService {
         )
     }
 
-    #[doc(hidden)]
-    pub fn with_runtime(store: StoreHandle, runtime: ImportRuntime) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_runtime(store: StoreHandle, runtime: ImportRuntime) -> Self {
         Self::with_runtime_and_policy(store, runtime, ImportWorkerPolicy::default())
     }
 
@@ -308,8 +419,8 @@ impl ImportService {
         Self::with_runtime_and_policy(store, ImportRuntime::process_wide(), worker_policy)
     }
 
-    #[doc(hidden)]
-    pub fn with_worker_policy_and_limits(
+    #[cfg(test)]
+    pub(crate) fn with_worker_policy_and_limits(
         store: StoreHandle,
         worker_policy: ImportWorkerPolicy,
         admission_limits: ImportAdmissionLimits,
@@ -329,8 +440,9 @@ impl ImportService {
         Self {
             store,
             worker_policy: Arc::new(worker_policy),
-            prepared_sessions: Arc::new(Mutex::new(PreparedSessions::default())),
             runtime,
+            owner: ServiceOwnerToken(Uuid::now_v7()),
+            owner_lifetime: Arc::new(()),
         }
     }
 
@@ -345,10 +457,11 @@ impl ImportService {
         let failed = source.source.initial_failed_records();
         let analysis_id = Uuid::now_v7();
         let analysis_id = self
+            .runtime
             .prepared_sessions
             .lock()
             .map_err(|_| ImportError::service("analysis_unavailable"))?
-            .insert(analysis_id, source, Instant::now());
+            .insert(self.owner, analysis_id, source, Instant::now());
         Ok(ImportAnalysis {
             analysis_id,
             total,
@@ -359,10 +472,11 @@ impl ImportService {
 
     pub async fn begin(&self, analysis_id: Uuid) -> Result<ImportRunHandle, ImportError> {
         let action = self
+            .runtime
             .prepared_sessions
             .lock()
             .map_err(|_| ImportError::service("analysis_unavailable"))?
-            .begin(analysis_id, Instant::now());
+            .begin(self.owner, analysis_id, Instant::now());
         let completion = match action {
             BeginPreparedSession::Start { source, completion } => {
                 let handoff = self.clone();
@@ -375,26 +489,20 @@ impl ImportService {
                 completion
             }
             BeginPreparedSession::Wait(completion) => completion,
+            BeginPreparedSession::Ready(handle) => return Ok(handle),
             BeginPreparedSession::Missing => {
-                return match self.status(analysis_id) {
-                    Ok(_) => Ok(ImportRunHandle {
-                        run_id: analysis_id,
-                    }),
-                    Err(ImportError::Service {
-                        reason: "run_not_found",
-                    }) => Err(ImportError::service("analysis_not_found")),
-                    Err(error) => Err(error),
-                };
+                return Err(ImportError::service("analysis_not_found"));
             }
         };
         completion.wait().await
     }
 
     pub fn discard_analysis(&self, analysis_id: Uuid) -> Result<(), ImportError> {
-        self.prepared_sessions
+        self.runtime
+            .prepared_sessions
             .lock()
             .map_err(|_| ImportError::service("analysis_unavailable"))?
-            .discard(analysis_id, Instant::now())
+            .discard(self.owner, analysis_id, Instant::now())
     }
 
     pub fn status(&self, run_id: Uuid) -> Result<ImportProgress, ImportError> {
@@ -471,38 +579,15 @@ impl ImportService {
     }
 
     fn prepare(&self, path: &Path) -> Result<PreparedSourceEnvelope, ImportError> {
-        let _analysis_permit = self
-            .runtime
-            .analysis_gate
-            .lock()
-            .map_err(|_| ImportError::service("analysis_unavailable"))?;
-        let mut reservation = self.reserve_preparation()?;
-        let source = prepare_source(path)?;
+        let operation_permit = self.runtime.acquire_operation_blocking()?;
+        let mut reservation = self.runtime.reserve_preparation()?;
+        let limits = self.runtime.parse_limits();
+        let source = prepare_source_with_permit(path, &operation_permit, limits)?;
         reservation.resize(source.retained_bytes())?;
         Ok(PreparedSourceEnvelope {
             source,
             _reservation: reservation,
         })
-    }
-
-    fn reserve_preparation(&self) -> Result<AdmissionReservation, ImportError> {
-        self.prepared_sessions
-            .lock()
-            .map_err(|_| ImportError::service("analysis_unavailable"))?
-            .evict_expired(Instant::now());
-        loop {
-            if let Some(reservation) = self.runtime.admission_budget.try_reserve()? {
-                return Ok(reservation);
-            }
-            let evicted = self
-                .prepared_sessions
-                .lock()
-                .map_err(|_| ImportError::service("analysis_unavailable"))?
-                .evict_oldest_available();
-            if !evicted {
-                return Err(ImportError::service("analysis_capacity_full"));
-            }
-        }
     }
 
     async fn persist_and_start(
@@ -545,42 +630,51 @@ impl ImportService {
                     let offset = match usize::try_from(lease.next_candidate_offset) {
                         Ok(offset) if offset <= source.source.candidates.len() => offset,
                         _ => {
-                            if let Ok(mut sessions) = self.prepared_sessions.lock() {
-                                sessions.restore(analysis_id, source, Instant::now());
+                            if let Ok(mut sessions) = self.runtime.prepared_sessions.lock() {
+                                sessions.restore(self.owner, analysis_id, source, Instant::now());
                             }
                             completion.finish(Err("invalid_run_state"));
                             return;
                         }
                     };
                     let marked_started = self
+                        .runtime
                         .prepared_sessions
                         .lock()
-                        .map(|mut sessions| sessions.mark_started(analysis_id));
+                        .map(|mut sessions| sessions.mark_started(self.owner, analysis_id));
                     if !matches!(marked_started, Ok(true)) {
-                        if let Ok(mut sessions) = self.prepared_sessions.lock() {
-                            sessions.restore(analysis_id, source, Instant::now());
+                        if let Ok(mut sessions) = self.runtime.prepared_sessions.lock() {
+                            sessions.restore(self.owner, analysis_id, source, Instant::now());
                         }
                         completion.finish(Err("analysis_unavailable"));
                         return;
                     }
                     let worker = self.clone();
                     tokio::spawn(async move {
-                        let _ = worker
-                            .run_worker(analysis_id, lease.generation, source, offset)
-                            .await;
+                        let completed = matches!(
+                            worker
+                                .run_worker(analysis_id, lease.generation, source, offset)
+                                .await,
+                            Ok(WorkerCompletion::Completed)
+                        );
+                        if let Ok(mut sessions) = worker.runtime.prepared_sessions.lock() {
+                            sessions.finish_started(
+                                worker.owner,
+                                analysis_id,
+                                completed,
+                                Instant::now(),
+                            );
+                        }
                     });
-                    if let Ok(mut sessions) = self.prepared_sessions.lock() {
-                        sessions.finish_started(analysis_id);
-                    }
-                } else if let Ok(mut sessions) = self.prepared_sessions.lock() {
-                    sessions.finish_persisting(analysis_id);
+                } else if let Ok(mut sessions) = self.runtime.prepared_sessions.lock() {
+                    sessions.finish_completed(self.owner, analysis_id, handle, Instant::now());
                 }
                 completion.finish(Ok(handle));
             }
             Err(error) => {
                 let reason = import_error_reason(&error);
-                if let Ok(mut sessions) = self.prepared_sessions.lock() {
-                    sessions.restore(analysis_id, source, Instant::now());
+                if let Ok(mut sessions) = self.runtime.prepared_sessions.lock() {
+                    sessions.restore(self.owner, analysis_id, source, Instant::now());
                 }
                 completion.finish(Err(reason));
             }
@@ -611,14 +705,39 @@ impl ImportService {
         let mut pending = None;
         let mut completed_batches = 0_usize;
         loop {
+            if pending.is_none() && remaining.size_hint().0 == 0 {
+                break;
+            }
+            let operation_gate = self.runtime.operation_gate.clone();
+            let operation_permit =
+                tokio::task::spawn_blocking(move || operation_gate.acquire_blocking())
+                    .await
+                    .map_err(|_| ImportError::service("analysis_unavailable"))?
+                    .map_err(|_| ImportError::service("analysis_unavailable"))?;
+            let batch_slots_bytes = IMPORT_BATCH_SIZE
+                .checked_mul(size_of::<StoreImportCandidate>())
+                .ok_or_else(|| ImportError::service("batch_too_large"))?;
+            if batch_slots_bytes > MAX_IMPORT_BATCH_BYTES {
+                return Err(ImportError::service("batch_too_large"));
+            }
             let mut batch = Vec::with_capacity(IMPORT_BATCH_SIZE);
-            let mut batch_bytes = 0_usize;
+            let mut batch_bytes = batch_slots_bytes;
             while batch.len() < IMPORT_BATCH_SIZE {
                 let Some(candidate) = pending.take().or_else(|| remaining.next()) else {
                     break;
                 };
-                let candidate_bytes = store_candidate_retained_bytes(&candidate);
-                if candidate_bytes > MAX_IMPORT_BATCH_BYTES {
+                if candidate.capture.representations.len()
+                    > clipboard_store::MAX_IMPORT_REPRESENTATIONS
+                {
+                    return Err(ImportError::service("batch_too_large"));
+                }
+                let candidate_bytes = candidate
+                    .owned_allocation_bytes()
+                    .ok_or_else(|| ImportError::service("batch_too_large"))?;
+                let candidate_total = batch_bytes.checked_add(candidate_bytes);
+                if candidate_total.is_none_or(|bytes| bytes > MAX_IMPORT_BATCH_BYTES)
+                    && batch.is_empty()
+                {
                     #[cfg(test)]
                     self.worker_policy.before_failure();
                     if let Err(error) = self
@@ -630,20 +749,22 @@ impl ImportService {
                     }
                     return Err(ImportError::service("batch_too_large"));
                 }
-                if !batch.is_empty()
-                    && batch_bytes.saturating_add(candidate_bytes) > MAX_IMPORT_BATCH_BYTES
-                {
+                if candidate_total.is_none_or(|bytes| bytes > MAX_IMPORT_BATCH_BYTES) {
                     pending = Some(candidate);
                     break;
                 }
-                batch_bytes = batch_bytes.saturating_add(candidate_bytes);
+                batch_bytes = candidate_total.expect("the checked batch total was validated");
                 batch.push(candidate);
             }
             if batch.is_empty() {
                 break;
             }
             let expected = batch.len() as u64;
-            let outcome = match self.store.import_batch(run_id, generation, batch).await {
+            let outcome = match self
+                .store
+                .import_batch(operation_permit, run_id, generation, batch)
+                .await
+            {
                 Ok(outcome) => outcome,
                 Err(StoreError::ImportWorkerSuperseded) => {
                     return Ok(WorkerCompletion::Superseded);
@@ -720,6 +841,19 @@ impl ImportService {
     }
 }
 
+impl Drop for ImportService {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.owner_lifetime) != 1 {
+            return;
+        }
+        self.runtime
+            .prepared_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove_owner(self.owner);
+    }
+}
+
 #[derive(Clone)]
 struct AdmissionBudget {
     ledger: Arc<Mutex<AdmissionLedger>>,
@@ -746,7 +880,7 @@ impl AdmissionBudget {
             return Ok(None);
         };
         if ledger.source_count >= self.limits.max_sources
-            || retained_bytes > self.limits.total_bytes
+            || retained_bytes > self.limits.prepared_cache_bytes
         {
             return Ok(None);
         }
@@ -766,7 +900,7 @@ struct AdmissionLedger {
     retained_bytes: usize,
 }
 
-struct AdmissionReservation {
+pub(crate) struct AdmissionReservation {
     ledger: Arc<Mutex<AdmissionLedger>>,
     limits: ImportAdmissionLimits,
     retained_bytes: usize,
@@ -788,7 +922,7 @@ impl AdmissionReservation {
         let resized_total = without_reservation
             .checked_add(retained_bytes)
             .ok_or_else(|| ImportError::service("analysis_capacity_full"))?;
-        if resized_total > self.limits.total_bytes {
+        if resized_total > self.limits.prepared_cache_bytes {
             return Err(ImportError::service("analysis_capacity_full"));
         }
         ledger.retained_bytes = resized_total;
@@ -830,11 +964,35 @@ impl Default for PreparedSessions {
 }
 
 impl PreparedSessions {
-    fn insert(&mut self, analysis_id: Uuid, source: PreparedSourceEnvelope, now: Instant) -> Uuid {
+    fn remove_owner(&mut self, owner: ServiceOwnerToken) {
+        while let Some(analysis_id) = self
+            .sessions
+            .iter()
+            .find_map(|(analysis_id, session)| (session.owner == owner).then_some(*analysis_id))
+        {
+            self.sessions.remove(&analysis_id);
+            self.insertion_order
+                .retain(|candidate| *candidate != analysis_id);
+        }
+    }
+
+    fn insert(
+        &mut self,
+        owner: ServiceOwnerToken,
+        analysis_id: Uuid,
+        source: PreparedSourceEnvelope,
+        now: Instant,
+    ) -> Uuid {
         self.evict_expired(now);
+        while self.sessions.len() >= PREPARED_SESSION_CAPACITY {
+            if !self.evict_oldest_available() {
+                break;
+            }
+        }
         self.sessions.insert(
             analysis_id,
             PreparedSession {
+                owner,
                 created_at: now,
                 state: PreparedSessionState::Available(source),
             },
@@ -843,8 +1001,20 @@ impl PreparedSessions {
         analysis_id
     }
 
-    fn begin(&mut self, analysis_id: Uuid, now: Instant) -> BeginPreparedSession {
+    fn begin(
+        &mut self,
+        owner: ServiceOwnerToken,
+        analysis_id: Uuid,
+        now: Instant,
+    ) -> BeginPreparedSession {
         self.evict_expired(now);
+        if !self
+            .sessions
+            .get(&analysis_id)
+            .is_some_and(|session| session.owner == owner)
+        {
+            return BeginPreparedSession::Missing;
+        }
         let Some(session) = self.sessions.remove(&analysis_id) else {
             return BeginPreparedSession::Missing;
         };
@@ -856,6 +1026,7 @@ impl PreparedSessions {
                 self.sessions.insert(
                     analysis_id,
                     PreparedSession {
+                        owner: session.owner,
                         created_at: session.created_at,
                         state: PreparedSessionState::Persisting(completion.clone()),
                     },
@@ -866,6 +1037,7 @@ impl PreparedSessions {
                 self.sessions.insert(
                     analysis_id,
                     PreparedSession {
+                        owner: session.owner,
                         created_at: session.created_at,
                         state: PreparedSessionState::Persisting(completion.clone()),
                     },
@@ -876,16 +1048,35 @@ impl PreparedSessions {
                 self.sessions.insert(
                     analysis_id,
                     PreparedSession {
+                        owner: session.owner,
                         created_at: session.created_at,
                         state: PreparedSessionState::Started(completion.clone()),
                     },
                 );
                 BeginPreparedSession::Wait(completion)
             }
+            PreparedSessionState::Completed(handle) => {
+                self.sessions.insert(
+                    analysis_id,
+                    PreparedSession {
+                        owner: session.owner,
+                        created_at: session.created_at,
+                        state: PreparedSessionState::Completed(handle),
+                    },
+                );
+                BeginPreparedSession::Ready(handle)
+            }
         }
     }
 
-    fn mark_started(&mut self, analysis_id: Uuid) -> bool {
+    fn mark_started(&mut self, owner: ServiceOwnerToken, analysis_id: Uuid) -> bool {
+        if !self
+            .sessions
+            .get(&analysis_id)
+            .is_some_and(|session| session.owner == owner)
+        {
+            return false;
+        }
         let Some(session) = self.sessions.remove(&analysis_id) else {
             return false;
         };
@@ -896,6 +1087,7 @@ impl PreparedSessions {
         self.sessions.insert(
             analysis_id,
             PreparedSession {
+                owner: session.owner,
                 created_at: session.created_at,
                 state: PreparedSessionState::Started(completion),
             },
@@ -903,11 +1095,18 @@ impl PreparedSessions {
         true
     }
 
-    fn restore(&mut self, analysis_id: Uuid, source: PreparedSourceEnvelope, now: Instant) {
+    fn restore(
+        &mut self,
+        owner: ServiceOwnerToken,
+        analysis_id: Uuid,
+        source: PreparedSourceEnvelope,
+        now: Instant,
+    ) {
         self.sessions.remove(&analysis_id);
         self.sessions.insert(
             analysis_id,
             PreparedSession {
+                owner,
                 created_at: now,
                 state: PreparedSessionState::Available(source),
             },
@@ -923,12 +1122,75 @@ impl PreparedSessions {
             .retain(|candidate| *candidate != analysis_id);
     }
 
-    fn finish_started(&mut self, analysis_id: Uuid) {
-        self.finish_persisting(analysis_id);
+    fn finish_started(
+        &mut self,
+        owner: ServiceOwnerToken,
+        analysis_id: Uuid,
+        completed: bool,
+        now: Instant,
+    ) {
+        if !self
+            .sessions
+            .get(&analysis_id)
+            .is_some_and(|session| session.owner == owner)
+        {
+            return;
+        }
+        if completed {
+            self.finish_completed(
+                owner,
+                analysis_id,
+                ImportRunHandle {
+                    run_id: analysis_id,
+                },
+                now,
+            );
+        } else {
+            self.finish_persisting(analysis_id);
+        }
     }
 
-    fn discard(&mut self, analysis_id: Uuid, now: Instant) -> Result<(), ImportError> {
+    fn finish_completed(
+        &mut self,
+        owner: ServiceOwnerToken,
+        analysis_id: Uuid,
+        handle: ImportRunHandle,
+        now: Instant,
+    ) {
+        if !self
+            .sessions
+            .get(&analysis_id)
+            .is_some_and(|session| session.owner == owner)
+        {
+            return;
+        }
+        self.sessions.insert(
+            analysis_id,
+            PreparedSession {
+                owner,
+                created_at: now,
+                state: PreparedSessionState::Completed(handle),
+            },
+        );
+        if !self.insertion_order.contains(&analysis_id) {
+            self.insertion_order.push_back(analysis_id);
+        }
+    }
+
+    fn discard(
+        &mut self,
+        owner: ServiceOwnerToken,
+        analysis_id: Uuid,
+        now: Instant,
+    ) -> Result<(), ImportError> {
         self.evict_expired(now);
+        if !self
+            .sessions
+            .get(&analysis_id)
+            .is_some_and(|session| session.owner == owner)
+        {
+            return Err(ImportError::service("analysis_not_found"));
+        }
         match self
             .sessions
             .get(&analysis_id)
@@ -944,34 +1206,35 @@ impl PreparedSessions {
             Some(PreparedSessionState::Started(_)) => {
                 Err(ImportError::service("analysis_in_progress"))
             }
+            Some(PreparedSessionState::Completed(_)) => {
+                self.finish_persisting(analysis_id);
+                Ok(())
+            }
             None => Err(ImportError::service("analysis_not_found")),
         }
     }
 
     fn evict_expired(&mut self, now: Instant) {
-        let expired = self
-            .insertion_order
-            .iter()
-            .copied()
-            .filter(|analysis_id| {
-                self.sessions.get(analysis_id).is_some_and(|session| {
-                    matches!(session.state, PreparedSessionState::Available(_))
-                        && now.saturating_duration_since(session.created_at) >= self.ttl
-                })
+        while let Some(analysis_id) = self.insertion_order.iter().copied().find(|analysis_id| {
+            self.sessions.get(analysis_id).is_some_and(|session| {
+                matches!(
+                    session.state,
+                    PreparedSessionState::Available(_) | PreparedSessionState::Completed(_)
+                ) && now.saturating_duration_since(session.created_at) >= self.ttl
             })
-            .collect::<Vec<_>>();
-        for analysis_id in expired {
+        }) {
             self.finish_persisting(analysis_id);
         }
     }
 
     fn evict_oldest_available(&mut self) -> bool {
         while let Some(analysis_id) = self.insertion_order.pop_front() {
-            if self
-                .sessions
-                .get(&analysis_id)
-                .is_some_and(|session| matches!(session.state, PreparedSessionState::Available(_)))
-            {
+            if self.sessions.get(&analysis_id).is_some_and(|session| {
+                matches!(
+                    session.state,
+                    PreparedSessionState::Available(_) | PreparedSessionState::Completed(_)
+                )
+            }) {
                 self.finish_persisting(analysis_id);
                 return true;
             }
@@ -981,6 +1244,7 @@ impl PreparedSessions {
 }
 
 struct PreparedSession {
+    owner: ServiceOwnerToken,
     created_at: Instant,
     state: PreparedSessionState,
 }
@@ -989,7 +1253,14 @@ enum PreparedSessionState {
     Available(PreparedSourceEnvelope),
     Persisting(Arc<PersistenceCompletion>),
     Started(Arc<PersistenceCompletion>),
+    Completed(ImportRunHandle),
 }
+
+const _: () = assert!(
+    PREPARED_SESSION_CAPACITY
+        * (size_of::<Uuid>() + size_of::<PreparedSession>() + size_of::<Uuid>() + 128)
+        <= MAX_PREPARED_SESSION_CONTROL_BYTES
+);
 
 enum BeginPreparedSession {
     Start {
@@ -997,6 +1268,7 @@ enum BeginPreparedSession {
         completion: Arc<PersistenceCompletion>,
     },
     Wait(Arc<PersistenceCompletion>),
+    Ready(ImportRunHandle),
     Missing,
 }
 
@@ -1092,7 +1364,6 @@ impl PreparedSource {
                 )
                 .saturating_add(option_string_capacity(&capture.source_app_id))
                 .saturating_add(option_string_capacity(&capture.source_app_name))
-                .saturating_add(option_string_capacity(&candidate.primary_text))
                 .saturating_add(option_string_capacity(&candidate.search_ocr))
                 .saturating_add(option_string_capacity(&candidate.source_application_path));
             for representation in &capture.representations {
@@ -1113,18 +1384,24 @@ fn option_string_capacity(value: &Option<String>) -> usize {
     value.as_ref().map_or(0, String::capacity)
 }
 
-fn prepare_source(path: &Path) -> Result<PreparedSource, ImportError> {
-    prepare_source_with_hook(path, || {})
+fn prepare_source_with_permit(
+    path: &Path,
+    permit: &clipboard_store::ImportOperationPermit,
+    limits: ImportParseLimits,
+) -> Result<PreparedSource, ImportError> {
+    prepare_source_with_hook(path, permit, limits, || {})
 }
 
 fn prepare_source_with_hook(
     path: &Path,
+    permit: &clipboard_store::ImportOperationPermit,
+    limits: ImportParseLimits,
     after_initial_detection: impl FnOnce(),
 ) -> Result<PreparedSource, ImportError> {
-    let detected = detect_export(path)?;
+    let detected = detect_export_with_permit(path, permit, limits)?;
     after_initial_detection();
-    let report = parse_export_report(path);
-    let verified = detect_export(path);
+    let report = parse_detected_export_report_with_permit(&detected, permit, limits);
+    let verified = detect_export_with_permit(path, permit, limits);
     let source_is_unchanged = verified.as_ref().is_ok_and(|verified| {
         verified.source == detected.source
             && verified.source_fingerprint == detected.source_fingerprint
@@ -1200,48 +1477,12 @@ fn store_source(source: ImportSource) -> ImportSourceKind {
 }
 
 fn store_candidate(candidate_offset: u64, candidate: ImportCandidate) -> StoreImportCandidate {
-    let search_text = combined_search_text(
-        candidate.primary_text.as_deref(),
-        candidate.search_ocr.as_deref(),
-    );
     StoreImportCandidate {
         candidate_offset,
         record_fingerprint: candidate.record_fingerprint,
         capture: candidate.capture,
-        search_text,
+        search_ocr: candidate.search_ocr,
         source_app_original: candidate.source_application_path,
-    }
-}
-
-fn store_candidate_retained_bytes(candidate: &StoreImportCandidate) -> usize {
-    let capture = &candidate.capture;
-    let mut bytes = size_of::<StoreImportCandidate>()
-        .saturating_add(capture.primary_mime.len())
-        .saturating_add(capture.source_app_id.as_ref().map_or(0, String::len))
-        .saturating_add(capture.source_app_name.as_ref().map_or(0, String::len))
-        .saturating_add(candidate.search_text.as_ref().map_or(0, String::len))
-        .saturating_add(
-            candidate
-                .source_app_original
-                .as_ref()
-                .map_or(0, String::len),
-        );
-    for representation in &capture.representations {
-        bytes = bytes
-            .saturating_add(size_of::<clipboard_core::RepresentationInput>())
-            .saturating_add(representation.format_id.len())
-            .saturating_add(representation.bytes.as_ref().map_or(0, Vec::len))
-            .saturating_add(representation.missing_ref.as_ref().map_or(0, String::len));
-    }
-    bytes
-}
-
-fn combined_search_text(primary_text: Option<&str>, search_ocr: Option<&str>) -> Option<String> {
-    match (primary_text, search_ocr) {
-        (Some(primary), Some(ocr)) => Some(format!("{primary}\n{ocr}")),
-        (Some(primary), None) => Some(primary.to_owned()),
-        (None, Some(ocr)) => Some(ocr.to_owned()),
-        (None, None) => None,
     }
 }
 
@@ -1326,6 +1567,207 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+
+    fn assert_runtime_envelope(runtime: &ImportRuntime) -> (usize, usize) {
+        let (retained_bytes, operation_bytes) = runtime.snapshot();
+        assert!(retained_bytes <= runtime.limits.prepared_cache_bytes);
+        assert!(operation_bytes <= runtime.limits.operation_bytes);
+        assert!(
+            retained_bytes
+                .checked_add(operation_bytes)
+                .is_some_and(|bytes| bytes <= runtime.limits.runtime_bytes)
+        );
+        (retained_bytes, operation_bytes)
+    }
+
+    #[tokio::test]
+    async fn runtime_memory_services_share_eviction_but_not_session_authority() {
+        let first_database = tempfile::tempdir().unwrap();
+        let second_database = tempfile::tempdir().unwrap();
+        let first_export = synthetic_export();
+        let second_export = synthetic_export();
+        let runtime = ImportRuntime::with_limits(ImportAdmissionLimits::new(
+            1,
+            64 * 1024,
+            64 * 1024,
+            16 * 1024,
+            80 * 1024,
+        ));
+        let first = ImportService::with_runtime(
+            StoreHandle::open(StoreConfig::new(
+                first_database.path().join("history.sqlite"),
+            ))
+            .unwrap(),
+            runtime.clone(),
+        );
+        let second = ImportService::with_runtime(
+            StoreHandle::open(StoreConfig::new(
+                second_database.path().join("history.sqlite"),
+            ))
+            .unwrap(),
+            runtime.clone(),
+        );
+
+        let first_analysis = first.analyze(first_export.path()).unwrap();
+        let (first_retained, first_operation) = assert_runtime_envelope(&runtime);
+        assert!(first_retained > 0);
+        assert_eq!(first_operation, 0);
+
+        let second_analysis = second.analyze(second_export.path()).unwrap();
+        assert_runtime_envelope(&runtime);
+        assert!(matches!(
+            first.begin(first_analysis.analysis_id).await,
+            Err(ImportError::Service {
+                reason: "analysis_not_found"
+            })
+        ));
+        assert!(matches!(
+            second.begin(first_analysis.analysis_id).await,
+            Err(ImportError::Service {
+                reason: "analysis_not_found"
+            })
+        ));
+        assert!(matches!(
+            second.discard_analysis(first_analysis.analysis_id),
+            Err(ImportError::Service {
+                reason: "analysis_not_found"
+            })
+        ));
+        second
+            .discard_analysis(second_analysis.analysis_id)
+            .unwrap();
+        assert_eq!(assert_runtime_envelope(&runtime), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn runtime_memory_completion_keeps_only_an_owner_scoped_tombstone() {
+        let database = tempfile::tempdir().unwrap();
+        let export = synthetic_export();
+        let runtime = ImportRuntime::with_limits(ImportAdmissionLimits::new(
+            2,
+            64 * 1024,
+            96 * 1024,
+            5 * 1024 * 1024,
+            5 * 1024 * 1024 + 96 * 1024,
+        ));
+        let store =
+            StoreHandle::open(StoreConfig::new(database.path().join("history.sqlite"))).unwrap();
+        let owner = ImportService::with_runtime(store.clone(), runtime.clone());
+        let stranger = ImportService::with_runtime(store, runtime.clone());
+        let analysis = owner.analyze(export.path()).unwrap();
+        let handle = owner.begin(analysis.analysis_id).await.unwrap();
+
+        for _ in 0..50_000 {
+            if owner.status(handle.run_id).unwrap().state != ImportRunState::Running {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            owner.status(handle.run_id).unwrap().state,
+            ImportRunState::Completed
+        );
+        for _ in 0..50_000 {
+            if runtime.snapshot().0 == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(assert_runtime_envelope(&runtime), (0, 0));
+        assert_eq!(owner.begin(analysis.analysis_id).await.unwrap(), handle);
+        assert!(matches!(
+            stranger.begin(analysis.analysis_id).await,
+            Err(ImportError::Service {
+                reason: "analysis_not_found"
+            })
+        ));
+        assert!(matches!(
+            stranger.discard_analysis(analysis.analysis_id),
+            Err(ImportError::Service {
+                reason: "analysis_not_found"
+            })
+        ));
+        owner.discard_analysis(analysis.analysis_id).unwrap();
+        assert!(matches!(
+            owner.begin(analysis.analysis_id).await,
+            Err(ImportError::Service {
+                reason: "analysis_not_found"
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn runtime_memory_persistence_failure_restores_the_exact_reserved_snapshot() {
+        let database = tempfile::tempdir().unwrap();
+        let export = synthetic_export();
+        let limits = ImportAdmissionLimits::new(
+            2,
+            64 * 1024,
+            96 * 1024,
+            5 * 1024 * 1024,
+            5 * 1024 * 1024 + 96 * 1024,
+        );
+        let service = ImportService::with_worker_policy_and_limits(
+            StoreHandle::open(StoreConfig::new(database.path().join("history.sqlite"))).unwrap(),
+            ImportWorkerPolicy::fail_next_persistence(),
+            limits,
+        );
+        let runtime = service.runtime.clone();
+        let analysis = service.analyze(export.path()).unwrap();
+        let before = assert_runtime_envelope(&runtime);
+        assert!(before.0 > 0);
+
+        let error = service.begin(analysis.analysis_id).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            ImportError::Service {
+                reason: "store_failure"
+            }
+        ));
+        assert_eq!(assert_runtime_envelope(&runtime), before);
+        let handle = service.begin(analysis.analysis_id).await.unwrap();
+        for _ in 0..50_000 {
+            if service.status(handle.run_id).unwrap().state != ImportRunState::Running {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            service.status(handle.run_id).unwrap().state,
+            ImportRunState::Completed
+        );
+        for _ in 0..50_000 {
+            if runtime.snapshot().0 == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(assert_runtime_envelope(&runtime), (0, 0));
+    }
+
+    #[test]
+    fn runtime_memory_last_service_drop_releases_owned_available_sessions() {
+        let database = tempfile::tempdir().unwrap();
+        let export = synthetic_export();
+        let runtime = ImportRuntime::with_limits(ImportAdmissionLimits::new(
+            2,
+            64 * 1024,
+            96 * 1024,
+            16 * 1024,
+            112 * 1024,
+        ));
+        let service = ImportService::with_runtime(
+            StoreHandle::open(StoreConfig::new(database.path().join("history.sqlite"))).unwrap(),
+            runtime.clone(),
+        );
+        service.analyze(export.path()).unwrap();
+        assert!(assert_runtime_envelope(&runtime).0 > 0);
+
+        drop(service);
+
+        assert_eq!(assert_runtime_envelope(&runtime), (0, 0));
+    }
 
     #[test]
     fn private_storage_store_errors_keep_their_service_reason() {
@@ -1516,6 +1958,8 @@ mod tests {
             1,
             MAX_PREPARED_SOURCE_BYTES,
             MAX_PREPARED_SOURCE_BYTES,
+            MAX_IMPORT_OPERATION_BYTES,
+            MAX_IMPORT_RUNTIME_BYTES,
         ));
         admitted_source(&mut PreparedSessions::default(), &budget, source)
     }
@@ -1569,20 +2013,23 @@ mod tests {
         )
         .unwrap();
 
-        let result = prepare_source_with_hook(export.path(), || {
-            fs::write(
-                &manifest,
-                serde_json::to_vec(&[json!({
-                    "createdAt": "2026-08-22T12:00:00Z",
-                    "modifiedAt": "2026-08-22T12:00:00Z",
-                    "category": "text",
-                    "copyCount": 1,
-                    "text": "synthetic after",
-                })])
-                .unwrap(),
-            )
-            .unwrap();
-        });
+        let gate = ImportOperationGate::with_capacity(MAX_IMPORT_OPERATION_BYTES).unwrap();
+        let permit = gate.acquire_blocking().unwrap();
+        let result =
+            prepare_source_with_hook(export.path(), &permit, ImportParseLimits::default(), || {
+                fs::write(
+                    &manifest,
+                    serde_json::to_vec(&[json!({
+                        "createdAt": "2026-08-22T12:00:00Z",
+                        "modifiedAt": "2026-08-22T12:00:00Z",
+                        "category": "text",
+                        "copyCount": 1,
+                        "text": "synthetic after",
+                    })])
+                    .unwrap(),
+                )
+                .unwrap();
+            });
 
         assert!(matches!(
             result,
@@ -1597,10 +2044,13 @@ mod tests {
         let mut sessions = PreparedSessions::default();
         let budget = AdmissionBudget::new(ImportAdmissionLimits::new(
             PREPARED_SESSION_CAPACITY,
+            32 * 1024,
+            PREPARED_SESSION_CAPACITY * 32 * 1024,
             4 * 1024,
-            PREPARED_SESSION_CAPACITY * 4 * 1024,
+            PREPARED_SESSION_CAPACITY * 32 * 1024 + 4 * 1024,
         ));
         let now = Instant::now();
+        let owner = ServiceOwnerToken(Uuid::now_v7());
         let mut first = None;
         let mut newest = None;
         for index in 0..=PREPARED_SESSION_CAPACITY {
@@ -1609,6 +2059,7 @@ mod tests {
             let source = empty_source(fingerprint_byte);
             let envelope = admitted_source(&mut sessions, &budget, source);
             sessions.insert(
+                owner,
                 analysis_id,
                 envelope,
                 now + Duration::from_millis(index as u64),
@@ -1625,14 +2076,21 @@ mod tests {
     #[test]
     fn prepared_session_cache_expires_available_entries_at_the_fixed_ttl() {
         let mut sessions = PreparedSessions::default();
-        let budget = AdmissionBudget::new(ImportAdmissionLimits::new(1, 4 * 1024, 4 * 1024));
+        let budget = AdmissionBudget::new(ImportAdmissionLimits::new(
+            1,
+            32 * 1024,
+            32 * 1024,
+            4 * 1024,
+            36 * 1024,
+        ));
         let now = Instant::now();
+        let owner = ServiceOwnerToken(Uuid::now_v7());
         let analysis_id = Uuid::now_v7();
         let source = admitted_source(&mut sessions, &budget, empty_source(1));
-        sessions.insert(analysis_id, source, now);
+        sessions.insert(owner, analysis_id, source, now);
 
         assert!(matches!(
-            sessions.begin(analysis_id, now + PREPARED_SESSION_TTL),
+            sessions.begin(owner, analysis_id, now + PREPARED_SESSION_TTL),
             BeginPreparedSession::Missing
         ));
         let ledger = budget.ledger.lock().unwrap();
@@ -1648,16 +2106,19 @@ mod tests {
             8,
             retained_bytes,
             retained_bytes.saturating_mul(2).saturating_sub(1),
+            retained_bytes,
+            retained_bytes.saturating_mul(3).saturating_sub(1),
         ));
         let mut sessions = PreparedSessions::default();
         let now = Instant::now();
+        let owner = ServiceOwnerToken(Uuid::now_v7());
         let first = Uuid::now_v7();
         let second = Uuid::now_v7();
         let first_source = admitted_source(&mut sessions, &budget, source);
-        sessions.insert(first, first_source, now);
+        sessions.insert(owner, first, first_source, now);
 
         let second_source = admitted_source(&mut sessions, &budget, empty_source(2));
-        sessions.insert(second, second_source, now + Duration::from_millis(1));
+        sessions.insert(owner, second, second_source, now + Duration::from_millis(1));
 
         assert!(!sessions.sessions.contains_key(&first));
         assert!(sessions.sessions.contains_key(&second));
@@ -1673,6 +2134,8 @@ mod tests {
             8,
             retained_bytes - 1,
             retained_bytes.saturating_mul(2),
+            retained_bytes,
+            retained_bytes.saturating_mul(3),
         ));
         let mut reservation = budget.try_reserve().unwrap().unwrap();
         let error = reservation.resize(source.retained_bytes()).unwrap_err();
@@ -1738,7 +2201,6 @@ mod tests {
                     content_flags: clipboard_core::ContentFlags::empty(),
                     event_flags: clipboard_core::EventFlags::IMPORTED,
                 },
-                primary_text: None,
                 search_ocr: None,
                 missing_payload: false,
                 source_application_path: None,

@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::BTreeSet,
     fmt,
     io::Read,
@@ -20,9 +21,10 @@ use serde::{
 };
 
 use crate::{
-    FramedHasher, ImportCandidate, ImportError, ImportParseReport, ImportRecordFailure,
-    ImportSource, MAX_IMPORT_AUXILIARY_BYTES, MAX_IMPORT_RECORD_BYTES, MAX_PREPARED_SOURCE_BYTES,
-    canonical_fingerprint, record_failure, stream_json_records,
+    CSV_DRAIN_BUFFER_BYTES, CSV_INPUT_BUFFER_BYTES, FramedHasher, ImportCandidate, ImportError,
+    ImportParseLimits, ImportParseReport, ImportRecordFailure, ImportSource, JsonRecord,
+    MAX_IMPORT_AUXILIARY_BYTES, canonical_fingerprint, record_failure,
+    stream_json_records_path_with_limits,
 };
 
 /// The auxiliary image search is intentionally finite even for adversarial directory trees.
@@ -46,23 +48,29 @@ impl Default for TraversalLimits {
 }
 
 #[derive(Deserialize)]
-struct SuperCmdRecord {
+struct SuperCmdRecord<'a> {
     #[serde(alias = "copiedAt")]
-    copied_at: String,
+    #[serde(borrow)]
+    copied_at: Cow<'a, str>,
     #[serde(rename = "type")]
-    content_type: String,
+    #[serde(borrow)]
+    content_type: Cow<'a, str>,
     #[serde(default, alias = "sourceApp")]
-    source_app: Option<String>,
+    #[serde(borrow)]
+    source_app: Option<Cow<'a, str>>,
     #[serde(default, alias = "bundleId")]
-    bundle_id: Option<String>,
+    #[serde(borrow)]
+    bundle_id: Option<Cow<'a, str>>,
     #[serde(default, deserialize_with = "deserialize_zero_one_bool")]
     pinned: bool,
     #[serde(default, alias = "fileUrl")]
-    file_url: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_nullable_string")]
-    text: String,
+    #[serde(borrow)]
+    file_url: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    text: Option<Cow<'a, str>>,
     #[serde(default, alias = "ocrText")]
-    ocr_text: Option<String>,
+    #[serde(borrow)]
+    ocr_text: Option<Cow<'a, str>>,
     #[serde(
         default,
         alias = "hasImage",
@@ -70,14 +78,8 @@ struct SuperCmdRecord {
     )]
     has_image: bool,
     #[serde(default, alias = "imageHash", alias = "hash")]
-    image_hash: Option<String>,
-}
-
-fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Option::<String>::deserialize(deserializer).map(Option::unwrap_or_default)
+    #[serde(borrow)]
+    image_hash: Option<Cow<'a, str>>,
 }
 
 fn deserialize_zero_one_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -134,47 +136,168 @@ where
     deserializer.deserialize_any(ZeroOneBoolVisitor)
 }
 
-pub fn parse_supercmd(
-    export_root: impl AsRef<Path>,
-    path: impl AsRef<Path>,
-) -> Result<Vec<ImportCandidate>, ImportError> {
-    parse_supercmd_report(export_root, path)?.into_strict()
-}
-
-pub fn parse_supercmd_report(
-    export_root: impl AsRef<Path>,
-    path: impl AsRef<Path>,
+pub(crate) fn parse_supercmd_csv_report_with_permit(
+    path: &Path,
+    permit: &clipboard_store::ImportOperationPermit,
+    limits: ImportParseLimits,
 ) -> Result<ImportParseReport, ImportError> {
-    parse_supercmd_report_with_limits(export_root, path, TraversalLimits::default())
+    limits.ensure_csv_operation(permit)?;
+    let root_path = path.parent().unwrap_or_else(|| Path::new("."));
+    let root = open_export_root(root_path)?;
+    let file = std::fs::File::open(path)
+        .map_err(|_| ImportError::export(ImportSource::SuperCmd.as_str(), "unreadable_export"))?;
+    let mut auxiliary_bytes_remaining = limits.auxiliary_bytes.min(
+        limits.source_bytes.saturating_sub(
+            usize::try_from(
+                file.metadata()
+                    .map_err(|_| {
+                        ImportError::export(ImportSource::SuperCmd.as_str(), "unreadable_export")
+                    })?
+                    .len(),
+            )
+            .map_err(|_| ImportError::service("analysis_too_large"))?,
+        ),
+    );
+    let mut columns = None;
+    let mut report = ImportParseReport::with_source_limit(0, limits.source_bytes);
+    stream_csv_records_from_reader_with_limits(
+        file,
+        limits.manifest_bytes,
+        limits.header_bytes,
+        limits.record_bytes,
+        |record_index, framed| {
+            if record_index == 0 {
+                let CsvFramedRecord::Complete { bytes, ends } = framed else {
+                    return Err(ImportError::service("analysis_too_large"));
+                };
+                columns = Some(CsvColumns::from_header(bytes, ends)?);
+                return Ok(true);
+            }
+            report.total = record_index;
+            let result = match framed {
+                CsvFramedRecord::TooLarge => Err(record_failure(
+                    ImportSource::SuperCmd,
+                    record_index,
+                    "record_too_large",
+                )),
+                CsvFramedRecord::InvalidFieldCount => Err(record_failure(
+                    ImportSource::SuperCmd,
+                    record_index,
+                    "invalid_record",
+                )),
+                CsvFramedRecord::Complete { bytes, ends } => {
+                    let columns = columns.as_ref().ok_or_else(|| {
+                        ImportError::export(ImportSource::SuperCmd.as_str(), "invalid_document")
+                    })?;
+                    if ends.len() != columns.field_count {
+                        Err(record_failure(
+                            ImportSource::SuperCmd,
+                            record_index,
+                            "invalid_record",
+                        ))
+                    } else {
+                        report.ensure_transient_capacity(
+                            bytes
+                                .len()
+                                .saturating_mul(2)
+                                .saturating_add(limits.auxiliary_bytes),
+                        )?;
+                        parse_csv_supercmd_record(bytes, ends, columns, record_index).and_then(
+                            |record| {
+                                map_record(
+                                    &root,
+                                    record,
+                                    record_index,
+                                    &mut auxiliary_bytes_remaining,
+                                    TraversalLimits::default(),
+                                )
+                            },
+                        )
+                    }
+                }
+            };
+            report.push(result)?;
+            Ok(true)
+        },
+    )?;
+    if columns.is_none() {
+        return Err(ImportError::export(
+            ImportSource::SuperCmd.as_str(),
+            "invalid_document",
+        ));
+    }
+    Ok(report)
 }
 
-fn parse_supercmd_report_with_limits(
+pub(crate) fn parse_supercmd_report_with_permit(
     export_root: impl AsRef<Path>,
-    path: impl AsRef<Path>,
+    path: &Path,
+    permit: &clipboard_store::ImportOperationPermit,
+    limits: ImportParseLimits,
+) -> Result<ImportParseReport, ImportError> {
+    parse_supercmd_report_with_permit_and_traversal(
+        export_root,
+        path,
+        permit,
+        limits,
+        TraversalLimits::default(),
+    )
+}
+
+fn parse_supercmd_report_with_permit_and_traversal(
+    export_root: impl AsRef<Path>,
+    path: &Path,
+    permit: &clipboard_store::ImportOperationPermit,
+    limits: ImportParseLimits,
     traversal_limits: TraversalLimits,
 ) -> Result<ImportParseReport, ImportError> {
+    limits.ensure_json_operation(permit)?;
     let root = open_export_root(export_root.as_ref())?;
-    let mut auxiliary_bytes_remaining = auxiliary_budget(path.as_ref())?;
-    let mut report = ImportParseReport::new(0);
-    stream_json_records(
-        path.as_ref(),
+    let manifest_bytes = usize::try_from(
+        std::fs::metadata(path)
+            .map_err(|_| ImportError::export(ImportSource::SuperCmd.as_str(), "unreadable_export"))?
+            .len(),
+    )
+    .map_err(|_| ImportError::service("analysis_too_large"))?;
+    let mut auxiliary_bytes_remaining = limits
+        .auxiliary_bytes
+        .min(limits.source_bytes.saturating_sub(manifest_bytes));
+    let mut report = ImportParseReport::with_source_limit(0, limits.source_bytes);
+    stream_json_records_path_with_limits(
+        path,
         ImportSource::SuperCmd.as_str(),
-        |record, bytes| {
+        limits.manifest_bytes,
+        limits.record_bytes,
+        |record, framed| {
             report.total = record;
-            report.ensure_transient_capacity(
-                bytes.len().saturating_add(MAX_IMPORT_AUXILIARY_BYTES),
-            )?;
-            let result = serde_json::from_slice(bytes)
-                .map_err(|_| record_failure(ImportSource::SuperCmd, record, "invalid_record"))
-                .and_then(|record_value| {
-                    map_record(
-                        &root,
-                        record_value,
-                        record,
-                        &mut auxiliary_bytes_remaining,
-                        traversal_limits,
-                    )
-                });
+            let result = match framed {
+                JsonRecord::TooLarge => Err(record_failure(
+                    ImportSource::SuperCmd,
+                    record,
+                    "record_too_large",
+                )),
+                JsonRecord::Complete(bytes) => {
+                    report.ensure_transient_capacity(
+                        bytes
+                            .len()
+                            .saturating_mul(2)
+                            .saturating_add(limits.auxiliary_bytes),
+                    )?;
+                    serde_json::from_slice(bytes)
+                        .map_err(|_| {
+                            record_failure(ImportSource::SuperCmd, record, "invalid_record")
+                        })
+                        .and_then(|record_value| {
+                            map_record(
+                                &root,
+                                record_value,
+                                record,
+                                &mut auxiliary_bytes_remaining,
+                                traversal_limits,
+                            )
+                        })
+                }
+            };
             report.push(result)?;
             Ok(true)
         },
@@ -182,61 +305,294 @@ fn parse_supercmd_report_with_limits(
     Ok(report)
 }
 
-pub(crate) fn parse_supercmd_csv_report(path: &Path) -> Result<ImportParseReport, ImportError> {
-    let root_path = path.parent().unwrap_or_else(|| Path::new("."));
-    let root = open_export_root(root_path)?;
+pub(crate) fn detect_supercmd_csv_with_permit(
+    path: &Path,
+    permit: &clipboard_store::ImportOperationPermit,
+    limits: ImportParseLimits,
+) -> Result<bool, ImportError> {
+    limits.ensure_csv_operation(permit)?;
     let file = std::fs::File::open(path)
-        .map_err(|_| ImportError::export(ImportSource::SuperCmd.as_str(), "unreadable_export"))?;
-    let mut auxiliary_bytes_remaining = auxiliary_budget(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(false)
-        .from_reader(file);
-    let headers = reader
-        .byte_headers()
-        .map_err(|_| ImportError::export(ImportSource::SuperCmd.as_str(), "invalid_document"))?
-        .clone();
-    let mut report = ImportParseReport::new(0);
-    for (index, result) in reader.byte_records().enumerate() {
-        report.total += 1;
-        let result = match result {
-            Ok(record) => {
-                let record_bytes = record.iter().map(<[u8]>::len).sum::<usize>();
-                if record_bytes > MAX_IMPORT_RECORD_BYTES {
-                    Err(record_failure(
-                        ImportSource::SuperCmd,
-                        index + 1,
-                        "record_too_large",
-                    ))
+        .map_err(|_| ImportError::export("detection", "unreadable_export"))?;
+    let mut detected = false;
+    stream_csv_records_from_reader_with_limits(
+        file,
+        limits.manifest_bytes,
+        limits.header_bytes,
+        limits.record_bytes,
+        |record_index, framed| {
+            if record_index != 0 {
+                return Ok(false);
+            }
+            let CsvFramedRecord::Complete { bytes, ends } = framed else {
+                return Err(ImportError::service("analysis_too_large"));
+            };
+            detected = CsvColumns::from_header(bytes, ends).is_ok();
+            Ok(false)
+        },
+    )?;
+    Ok(detected)
+}
+
+enum CsvFramedRecord<'a> {
+    Complete { bytes: &'a [u8], ends: &'a [usize] },
+    TooLarge,
+    InvalidFieldCount,
+}
+
+fn stream_csv_records_from_reader_with_limits<R: Read>(
+    mut reader: R,
+    manifest_limit: usize,
+    header_limit: usize,
+    record_limit: usize,
+    mut on_record: impl FnMut(usize, CsvFramedRecord<'_>) -> Result<bool, ImportError>,
+) -> Result<(), ImportError> {
+    if manifest_limit == 0 || header_limit == 0 || record_limit == 0 {
+        return Err(ImportError::service("analysis_too_large"));
+    }
+    let mut parser = csv_core::Reader::new();
+    let mut input = vec![0_u8; CSV_INPUT_BUFFER_BYTES];
+    let mut output = vec![0_u8; header_limit.max(record_limit)];
+    let mut ends = vec![0_usize; header_limit.saturating_add(1)];
+    let mut drain_output = vec![0_u8; CSV_DRAIN_BUFFER_BYTES];
+    let mut drain_ends = [0_usize; 256];
+    let mut input_start = 0_usize;
+    let mut input_end = 0_usize;
+    let mut bytes_read = 0_usize;
+    let mut eof = false;
+    let mut record_index = 0_usize;
+
+    loop {
+        let current_limit = if record_index == 0 {
+            header_limit
+        } else {
+            record_limit
+        };
+        let mut output_len = 0_usize;
+        let mut ends_len = 0_usize;
+        let mut output_at_limit = false;
+        let mut too_large = false;
+        let mut ends_overflow = false;
+        loop {
+            if input_start == input_end && !eof {
+                let remaining = manifest_limit
+                    .checked_add(1)
+                    .and_then(|limit| limit.checked_sub(bytes_read))
+                    .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+                let requested = input.len().min(remaining);
+                let read = reader.read(&mut input[..requested]).map_err(|_| {
+                    ImportError::export(ImportSource::SuperCmd.as_str(), "unreadable_export")
+                })?;
+                if read == 0 {
+                    eof = true;
                 } else {
-                    report.ensure_transient_capacity(
-                        record_bytes.saturating_add(MAX_IMPORT_AUXILIARY_BYTES),
-                    )?;
-                    record
-                        .deserialize(Some(&headers))
-                        .map_err(|_| {
-                            record_failure(ImportSource::SuperCmd, index + 1, "invalid_record")
-                        })
-                        .and_then(|record| {
-                            map_record(
-                                &root,
-                                record,
-                                index + 1,
-                                &mut auxiliary_bytes_remaining,
-                                TraversalLimits::default(),
-                            )
-                        })
+                    bytes_read = bytes_read
+                        .checked_add(read)
+                        .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+                    if bytes_read > manifest_limit {
+                        return Err(ImportError::service("analysis_too_large"));
+                    }
+                    input_start = 0;
+                    input_end = read;
                 }
             }
-            Err(_) => Err(record_failure(
-                ImportSource::SuperCmd,
-                index + 1,
-                "invalid_record",
-            )),
-        };
-        report.push(result)?;
+
+            let input_bytes = if eof && input_start == input_end {
+                &[][..]
+            } else {
+                &input[input_start..input_end]
+            };
+            let draining_output = output_at_limit || too_large;
+            let output_bytes = if draining_output {
+                drain_output.as_mut_slice()
+            } else {
+                &mut output[output_len..current_limit]
+            };
+            let output_ends = if ends_overflow {
+                drain_ends.as_mut_slice()
+            } else {
+                &mut ends[ends_len..]
+            };
+            let (result, consumed, written, ended) =
+                parser.read_record(input_bytes, output_bytes, output_ends);
+            input_start = input_start
+                .checked_add(consumed)
+                .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+            if draining_output {
+                if written != 0 {
+                    too_large = true;
+                }
+            } else {
+                output_len = output_len
+                    .checked_add(written)
+                    .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+            }
+            if !ends_overflow {
+                ends_len = ends_len
+                    .checked_add(ended)
+                    .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+            }
+
+            match result {
+                csv_core::ReadRecordResult::InputEmpty => {
+                    if eof && input_start == input_end {
+                        return Err(ImportError::export(
+                            ImportSource::SuperCmd.as_str(),
+                            "invalid_document",
+                        ));
+                    }
+                }
+                csv_core::ReadRecordResult::OutputFull => {
+                    if output_at_limit {
+                        too_large = true;
+                    }
+                    output_at_limit = true;
+                }
+                csv_core::ReadRecordResult::OutputEndsFull => {
+                    ends_overflow = true;
+                }
+                csv_core::ReadRecordResult::Record => {
+                    let framed = if too_large {
+                        CsvFramedRecord::TooLarge
+                    } else if ends_overflow {
+                        CsvFramedRecord::InvalidFieldCount
+                    } else {
+                        CsvFramedRecord::Complete {
+                            bytes: &output[..output_len],
+                            ends: &ends[..ends_len],
+                        }
+                    };
+                    if !on_record(record_index, framed)? {
+                        return Ok(());
+                    }
+                    record_index = record_index
+                        .checked_add(1)
+                        .ok_or_else(|| ImportError::service("source_too_large"))?;
+                    break;
+                }
+                csv_core::ReadRecordResult::End => return Ok(()),
+            }
+        }
     }
-    Ok(report)
+}
+
+#[derive(Default)]
+struct CsvColumns {
+    field_count: usize,
+    copied_at: Option<usize>,
+    content_type: Option<usize>,
+    source_app: Option<usize>,
+    bundle_id: Option<usize>,
+    pinned: Option<usize>,
+    file_url: Option<usize>,
+    text: Option<usize>,
+    ocr_text: Option<usize>,
+    has_image: Option<usize>,
+    image_hash: Option<usize>,
+}
+
+impl CsvColumns {
+    fn from_header(bytes: &[u8], ends: &[usize]) -> Result<Self, ImportError> {
+        let mut columns = Self {
+            field_count: ends.len(),
+            ..Self::default()
+        };
+        for index in 0..ends.len() {
+            let name = std::str::from_utf8(csv_field(bytes, ends, index)).map_err(|_| {
+                ImportError::export(ImportSource::SuperCmd.as_str(), "invalid_document")
+            })?;
+            let slot = match name {
+                "copied_at" | "copiedAt" => Some(&mut columns.copied_at),
+                "type" => Some(&mut columns.content_type),
+                "source_app" | "sourceApp" => Some(&mut columns.source_app),
+                "bundle_id" | "bundleId" => Some(&mut columns.bundle_id),
+                "pinned" => Some(&mut columns.pinned),
+                "file_url" | "fileUrl" => Some(&mut columns.file_url),
+                "text" => Some(&mut columns.text),
+                "ocr_text" | "ocrText" => Some(&mut columns.ocr_text),
+                "has_image" | "hasImage" => Some(&mut columns.has_image),
+                "image_hash" | "imageHash" | "hash" => Some(&mut columns.image_hash),
+                _ => None,
+            };
+            if let Some(slot) = slot
+                && slot.replace(index).is_some()
+            {
+                return Err(ImportError::export(
+                    ImportSource::SuperCmd.as_str(),
+                    "invalid_document",
+                ));
+            }
+        }
+        if columns.copied_at.is_none() || columns.content_type.is_none() {
+            return Err(ImportError::export(
+                ImportSource::SuperCmd.as_str(),
+                "unknown_schema",
+            ));
+        }
+        Ok(columns)
+    }
+}
+
+fn csv_field<'a>(bytes: &'a [u8], ends: &[usize], index: usize) -> &'a [u8] {
+    let start = index.checked_sub(1).map_or(0, |previous| ends[previous]);
+    &bytes[start..ends[index]]
+}
+
+fn csv_string<'a>(
+    bytes: &'a [u8],
+    ends: &[usize],
+    index: Option<usize>,
+    record: usize,
+) -> Result<Option<&'a str>, ImportRecordFailure> {
+    let Some(index) = index else {
+        return Ok(None);
+    };
+    let value = std::str::from_utf8(csv_field(bytes, ends, index))
+        .map_err(|_| record_failure(ImportSource::SuperCmd, record, "invalid_record"))?;
+    Ok((!value.is_empty()).then_some(value))
+}
+
+fn csv_bool(
+    bytes: &[u8],
+    ends: &[usize],
+    index: Option<usize>,
+    record: usize,
+) -> Result<bool, ImportRecordFailure> {
+    let Some(index) = index else {
+        return Ok(false);
+    };
+    match std::str::from_utf8(csv_field(bytes, ends, index)) {
+        Ok("") | Ok("false" | "0") => Ok(false),
+        Ok("true" | "1") => Ok(true),
+        _ => Err(record_failure(
+            ImportSource::SuperCmd,
+            record,
+            "invalid_record",
+        )),
+    }
+}
+
+fn parse_csv_supercmd_record<'a>(
+    bytes: &'a [u8],
+    ends: &[usize],
+    columns: &CsvColumns,
+    record: usize,
+) -> Result<SuperCmdRecord<'a>, ImportRecordFailure> {
+    let copied_at =
+        Cow::Borrowed(csv_string(bytes, ends, columns.copied_at, record)?.unwrap_or_default());
+    let content_type =
+        Cow::Borrowed(csv_string(bytes, ends, columns.content_type, record)?.unwrap_or_default());
+    Ok(SuperCmdRecord {
+        copied_at,
+        content_type,
+        source_app: csv_string(bytes, ends, columns.source_app, record)?.map(Cow::Borrowed),
+        bundle_id: csv_string(bytes, ends, columns.bundle_id, record)?.map(Cow::Borrowed),
+        pinned: csv_bool(bytes, ends, columns.pinned, record)?,
+        file_url: csv_string(bytes, ends, columns.file_url, record)?.map(Cow::Borrowed),
+        text: csv_string(bytes, ends, columns.text, record)?.map(Cow::Borrowed),
+        ocr_text: csv_string(bytes, ends, columns.ocr_text, record)?.map(Cow::Borrowed),
+        has_image: csv_bool(bytes, ends, columns.has_image, record)?,
+        image_hash: csv_string(bytes, ends, columns.image_hash, record)?.map(Cow::Borrowed),
+    })
 }
 
 fn open_export_root(path: &Path) -> Result<Dir, ImportError> {
@@ -247,7 +603,7 @@ fn open_export_root(path: &Path) -> Result<Dir, ImportError> {
 
 fn map_record(
     root: &Dir,
-    record: SuperCmdRecord,
+    record: SuperCmdRecord<'_>,
     index: usize,
     auxiliary_bytes_remaining: &mut usize,
     traversal_limits: TraversalLimits,
@@ -255,12 +611,11 @@ fn map_record(
     let captured_at_ms = parse_timestamp_ms(&record.copied_at)
         .ok_or_else(|| record_failure(ImportSource::SuperCmd, index, "invalid_timestamp"))?;
     let kind = content_kind(&record.content_type, record.has_image, index)?;
-    let primary_text = kind.is_textual().then_some(record.text.clone());
+    let primary_text = kind
+        .is_textual()
+        .then(|| record.text.as_deref().unwrap_or_default());
     let mut content_flags = ContentFlags::empty();
-    if primary_text
-        .as_deref()
-        .is_some_and(|text| text.trim().is_empty())
-    {
+    if primary_text.is_some_and(|text| text.trim().is_empty()) {
         content_flags.insert(ContentFlags::DO_NOT_INDEX);
     }
 
@@ -280,27 +635,26 @@ fn map_record(
     if missing_payload {
         content_flags.insert(ContentFlags::MISSING_PAYLOAD);
     }
-    let stable_reference =
-        missing_reference(&record, captured_at_ms, kind, primary_text.as_deref());
+    let stable_reference = missing_reference(&record, captured_at_ms, kind, primary_text);
     let pinned = record.pinned.to_string();
     let has_image = record.has_image.to_string();
     let fingerprint = {
         let primary_fingerprint_bytes = match (&image_bytes, missing_payload) {
             (Some(bytes), _) => bytes.as_slice(),
             (None, true) => stable_reference.as_bytes(),
-            (None, false) => primary_text.as_deref().unwrap_or_default().as_bytes(),
+            (None, false) => primary_text.unwrap_or_default().as_bytes(),
         };
         canonical_fingerprint(
             ImportSource::SuperCmd,
             captured_at_ms,
             kind,
             [
-                Some(record.content_type.as_str()),
+                Some(record.content_type.as_ref()),
                 record.source_app.as_deref(),
                 record.bundle_id.as_deref(),
                 Some(pinned.as_str()),
                 record.file_url.as_deref(),
-                Some(record.text.as_str()),
+                Some(record.text.as_deref().unwrap_or_default()),
                 record.ocr_text.as_deref(),
                 Some(has_image.as_str()),
                 record.image_hash.as_deref(),
@@ -317,7 +671,13 @@ fn map_record(
     } else {
         vec![RepresentationInput {
             format_id: primary_mime(kind).to_owned(),
-            bytes: Some(primary_text.clone().unwrap_or_default().into_bytes()),
+            bytes: Some(
+                record
+                    .text
+                    .map(Cow::into_owned)
+                    .unwrap_or_default()
+                    .into_bytes(),
+            ),
             missing_ref: None,
         }]
     };
@@ -330,16 +690,15 @@ fn map_record(
             kind,
             primary_mime: primary_mime(kind).to_owned(),
             representations,
-            source_app_id: record.bundle_id,
-            source_app_name: record.source_app,
+            source_app_id: record.bundle_id.map(Cow::into_owned),
+            source_app_name: record.source_app.map(Cow::into_owned),
             source_confidence: SourceConfidence::Declared,
             pinned: record.pinned,
             occurrence_count: 1,
             content_flags,
             event_flags: EventFlags::IMPORTED,
         },
-        primary_text,
-        search_ocr: record.ocr_text,
+        search_ocr: record.ocr_text.map(Cow::into_owned),
         missing_payload,
         source_application_path: None,
     })
@@ -396,6 +755,24 @@ fn resolve_payload(
     auxiliary_bytes_remaining: &mut usize,
     traversal_limits: TraversalLimits,
 ) -> Option<Vec<u8>> {
+    resolve_payload_with_hook(
+        root,
+        file_url,
+        image_hash,
+        auxiliary_bytes_remaining,
+        traversal_limits,
+        |_| {},
+    )
+}
+
+fn resolve_payload_with_hook(
+    root: &Dir,
+    file_url: Option<&str>,
+    image_hash: Option<&str>,
+    auxiliary_bytes_remaining: &mut usize,
+    traversal_limits: TraversalLimits,
+    after_charge: impl FnOnce(usize),
+) -> Option<Vec<u8>> {
     if file_url.is_some_and(|value| !is_safe_relative_reference(value)) {
         return None;
     }
@@ -416,26 +793,22 @@ fn resolve_payload(
     if byte_size > MAX_IMPORT_AUXILIARY_BYTES || byte_size > *auxiliary_bytes_remaining {
         return None;
     }
-    let mut bytes = Vec::new();
-    (&mut file)
-        .take((MAX_IMPORT_AUXILIARY_BYTES as u64) + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() > MAX_IMPORT_AUXILIARY_BYTES {
+    *auxiliary_bytes_remaining = auxiliary_bytes_remaining.checked_sub(byte_size)?;
+    after_charge(*auxiliary_bytes_remaining);
+    let mut bytes = vec![0_u8; byte_size];
+    if file.read_exact(&mut bytes).is_err() {
+        *auxiliary_bytes_remaining = auxiliary_bytes_remaining.checked_add(byte_size)?;
         return None;
     }
-    *auxiliary_bytes_remaining = auxiliary_bytes_remaining.checked_sub(bytes.len())?;
+    let mut growth_probe = [0_u8; 1];
+    match file.read(&mut growth_probe) {
+        Ok(0) => {}
+        Ok(_) | Err(_) => {
+            *auxiliary_bytes_remaining = auxiliary_bytes_remaining.checked_add(byte_size)?;
+            return None;
+        }
+    }
     Some(bytes)
-}
-
-fn auxiliary_budget(path: &Path) -> Result<usize, ImportError> {
-    let manifest_bytes = usize::try_from(
-        std::fs::metadata(path)
-            .map_err(|_| ImportError::export(ImportSource::SuperCmd.as_str(), "unreadable_export"))?
-            .len(),
-    )
-    .map_err(|_| ImportError::service("analysis_too_large"))?;
-    Ok(MAX_PREPARED_SOURCE_BYTES.saturating_sub(manifest_bytes))
 }
 
 fn is_safe_relative_reference(value: &str) -> bool {
@@ -510,7 +883,7 @@ fn basename(value: &str) -> Option<&str> {
 }
 
 fn missing_reference(
-    record: &SuperCmdRecord,
+    record: &SuperCmdRecord<'_>,
     captured_at_ms: i64,
     kind: ContentKind,
     primary_text: Option<&str>,
@@ -523,12 +896,12 @@ fn missing_reference(
         Some(ImportSource::SuperCmd.as_str()),
         Some(captured_at_ms.as_str()),
         Some(kind.as_str()),
-        Some(record.content_type.as_str()),
+        Some(record.content_type.as_ref()),
         record.source_app.as_deref(),
         record.bundle_id.as_deref(),
         Some(pinned.as_str()),
         record.file_url.as_deref(),
-        Some(record.text.as_str()),
+        Some(record.text.as_deref().unwrap_or_default()),
         record.ocr_text.as_deref(),
         Some(has_image.as_str()),
         record.image_hash.as_deref(),
@@ -554,6 +927,120 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    fn csv_escape(value: &str) -> String {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    }
+
+    fn parse_with_traversal(
+        root: &Path,
+        path: &Path,
+        traversal_limits: TraversalLimits,
+    ) -> ImportParseReport {
+        let gate =
+            clipboard_store::ImportOperationGate::with_capacity(crate::MAX_IMPORT_OPERATION_BYTES)
+                .unwrap();
+        let permit = gate.acquire_blocking().unwrap();
+        parse_supercmd_report_with_permit_and_traversal(
+            root,
+            path,
+            &permit,
+            ImportParseLimits::default(),
+            traversal_limits,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bounded_supercmd_csv_drains_one_byte_overflow_and_keeps_a_multiline_later_row() {
+        let export = tempfile::tempdir().unwrap();
+        let path = export.path().join("clipboard.csv");
+        let record_limit = 128;
+        let fixed_field_bytes =
+            "2026-01-02T03:04:05Z".len() + "text".len() + "false".len() + "false".len();
+        assert_eq!(fixed_field_bytes, 34);
+        let prefix = "first line\nsecond, \"quoted\" ";
+        let exact_text = format!(
+            "{prefix}{}",
+            "x".repeat(record_limit - fixed_field_bytes - prefix.len())
+        );
+        assert_eq!(fixed_field_bytes + exact_text.len(), record_limit);
+        let oversized_text = format!("{exact_text}x");
+        let document = format!(
+            "copied_at,type,source_app,bundle_id,pinned,file_url,text,ocr_text,has_image\n2026-01-02T03:04:05Z,text,,,false,,{},,false\n2026-01-02T03:04:05Z,text,,,false,,{},,false\n2026-01-02T03:06:05Z,text,,,false,,{},,false\n",
+            csv_escape(&exact_text),
+            csv_escape(&oversized_text),
+            csv_escape("later\nmultiline"),
+        );
+        fs::write(&path, document.as_bytes()).unwrap();
+        let limits = crate::ImportParseLimits {
+            manifest_bytes: document.len(),
+            record_bytes: record_limit,
+            header_bytes: 1024,
+            source_bytes: 64 * 1024,
+            auxiliary_bytes: 1024,
+        };
+        let gate = clipboard_store::ImportOperationGate::with_capacity(64 * 1024).unwrap();
+        let permit = gate.acquire_blocking().unwrap();
+
+        let report = parse_supercmd_csv_report_with_permit(&path, &permit, limits).unwrap();
+
+        assert_eq!(report.total, 3);
+        assert_eq!(report.candidates.len(), 2);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].record, 2);
+        assert_eq!(report.failures[0].reason, "record_too_large");
+        assert_eq!(
+            report.candidates[1].capture.representations[0]
+                .bytes
+                .as_deref(),
+            Some(b"later\nmultiline".as_slice())
+        );
+    }
+
+    #[test]
+    fn auxiliary_capacity_is_charged_before_allocation_and_source_growth_is_rejected() {
+        use std::io::Write as _;
+
+        let export = tempfile::tempdir().unwrap();
+        fs::create_dir(export.path().join("images")).unwrap();
+        let payload_path = export.path().join("images/synthetic.png");
+        fs::write(&payload_path, b"owned-before").unwrap();
+        let root = open_export_root(export.path()).unwrap();
+        let original_size = b"owned-before".len();
+        let mut remaining = 64_usize;
+
+        let rejected = resolve_payload_with_hook(
+            &root,
+            Some("synthetic.png"),
+            None,
+            &mut remaining,
+            TraversalLimits::default(),
+            |charged_remaining| {
+                assert_eq!(charged_remaining, 64 - original_size);
+                let mut file = fs::OpenOptions::new()
+                    .append(true)
+                    .open(&payload_path)
+                    .unwrap();
+                file.write_all(b"-grew").unwrap();
+            },
+        );
+
+        assert!(rejected.is_none());
+        assert_eq!(remaining, 64);
+
+        fs::write(&payload_path, b"stable-snapshot").unwrap();
+        let analyzed = resolve_payload(
+            &root,
+            Some("synthetic.png"),
+            None,
+            &mut remaining,
+            TraversalLimits::default(),
+        )
+        .unwrap();
+        fs::write(&payload_path, b"changed-after-analysis").unwrap();
+        assert_eq!(analyzed, b"stable-snapshot");
+    }
 
     #[test]
     fn auxiliary_lookup_stops_after_the_second_ambiguous_match() {
@@ -593,15 +1080,14 @@ mod tests {
         )
         .unwrap();
 
-        let report = parse_supercmd_report_with_limits(
+        let report = parse_with_traversal(
             export.path(),
             &manifest,
             TraversalLimits {
                 max_depth: 8,
                 max_entries: 1_024,
             },
-        )
-        .unwrap();
+        );
 
         assert_eq!(report.total, 1);
         assert_eq!(report.candidates.len(), 1);
@@ -621,15 +1107,14 @@ mod tests {
         )
         .unwrap();
 
-        let report = parse_supercmd_report_with_limits(
+        let report = parse_with_traversal(
             export.path(),
             &manifest,
             TraversalLimits {
                 max_depth: 8,
                 max_entries: 0,
             },
-        )
-        .unwrap();
+        );
 
         assert_eq!(report.total, 1);
         assert_eq!(report.candidates.len(), 1);

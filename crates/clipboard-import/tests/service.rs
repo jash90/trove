@@ -4,9 +4,8 @@ use clipboard_core::{
     CaptureInput, ContentFlags, ContentKind, EventFlags, RepresentationInput, SourceConfidence,
 };
 use clipboard_import::{
-    IMPORT_BATCH_SIZE, ImportAdmissionLimits, ImportError, ImportRunHandle, ImportRunState,
-    ImportRuntime, ImportService, ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES,
-    MAX_IMPORT_BATCH_BYTES, MAX_IMPORT_MANIFEST_BYTES, MAX_IMPORT_RECORD_BYTES,
+    IMPORT_BATCH_SIZE, ImportError, ImportRunHandle, ImportRunState, ImportService,
+    ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES, MAX_IMPORT_MANIFEST_BYTES,
 };
 use clipboard_store::{StoreConfig, StoreHandle};
 use serde_json::{Value, json};
@@ -197,14 +196,6 @@ async fn begin_consumes_the_exact_prepared_snapshot_once_without_reparsing() {
     );
     let store = open_store(&database);
     let service = ImportService::new(store.clone());
-    let parsed = clipboard_import::parse_export_report(export.path()).unwrap();
-    assert_eq!(
-        parsed.candidates[0].capture.representations[0]
-            .bytes
-            .as_deref(),
-        Some(b"analyzed image bytes".as_slice())
-    );
-
     let analysis = service.analyze(export.path()).unwrap();
     fs::write(&image_path, b"changed after analysis").unwrap();
     let handle = service.begin(analysis.analysis_id).await.unwrap();
@@ -420,156 +411,6 @@ async fn concurrent_begin_and_lost_response_retries_share_one_persisted_run() {
         })
         .unwrap();
     assert_eq!(run_count, 1);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn active_worker_reservation_blocks_every_preparation_entry_point_until_release() {
-    let first_export = tempfile::tempdir().unwrap();
-    let second_export = tempfile::tempdir().unwrap();
-    let database = tempfile::tempdir().unwrap();
-    write_raycast_export(&first_export, &[raycast_record(0)]);
-    write_raycast_export(&second_export, &[raycast_record(1)]);
-    let store = open_store(&database);
-    let start_gate = Arc::new(Notify::new());
-    let worker_finished = Arc::new(Notify::new());
-    let service = ImportService::with_worker_policy_and_limits(
-        store,
-        ImportWorkerPolicy::wait_before_work(start_gate.clone(), worker_finished.clone()),
-        ImportAdmissionLimits::new(1, 64 * 1024, 64 * 1024),
-    );
-    let first = service.analyze(first_export.path()).unwrap();
-    let handle = service.begin(first.analysis_id).await.unwrap();
-
-    let analyze_error = service.analyze(second_export.path()).unwrap_err();
-    assert!(matches!(
-        analyze_error,
-        ImportError::Service {
-            reason: "analysis_capacity_full"
-        }
-    ));
-    let resume_error = service
-        .resume(uuid::Uuid::now_v7(), second_export.path())
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        resume_error,
-        ImportError::Service {
-            reason: "analysis_capacity_full"
-        }
-    ));
-    let cli_error = service
-        .run_to_completion(second_export.path())
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        cli_error,
-        ImportError::Service {
-            reason: "analysis_capacity_full"
-        }
-    ));
-
-    start_gate.notify_one();
-    worker_finished.notified().await;
-    wait_for_terminal(&service, handle.run_id).await;
-    let admitted = service.analyze(second_export.path()).unwrap();
-    service.discard_analysis(admitted.analysis_id).unwrap();
-}
-
-#[test]
-fn independent_services_share_one_injected_runtime_admission_envelope() {
-    let first_export = tempfile::tempdir().unwrap();
-    let second_export = tempfile::tempdir().unwrap();
-    let first_database = tempfile::tempdir().unwrap();
-    let second_database = tempfile::tempdir().unwrap();
-    write_raycast_export(&first_export, &[raycast_record(0)]);
-    write_raycast_export(&second_export, &[raycast_record(1)]);
-    let runtime = ImportRuntime::with_limits(ImportAdmissionLimits::new(1, 64 * 1024, 64 * 1024));
-    let first = ImportService::with_runtime(open_store(&first_database), runtime.clone());
-    let second = ImportService::with_runtime(open_store(&second_database), runtime);
-
-    let held = first.analyze(first_export.path()).unwrap();
-    let error = second.analyze(second_export.path()).unwrap_err();
-    assert!(matches!(
-        error,
-        ImportError::Service {
-            reason: "analysis_capacity_full"
-        }
-    ));
-
-    first.discard_analysis(held.analysis_id).unwrap();
-    let admitted = second.analyze(second_export.path()).unwrap();
-    second.discard_analysis(admitted.analysis_id).unwrap();
-}
-
-#[test]
-fn streaming_json_rejects_one_oversized_record_with_a_stable_error() {
-    assert!(std::hint::black_box(MAX_IMPORT_BATCH_BYTES) < 256 * 1024 * 1024);
-    let export = tempfile::tempdir().unwrap();
-    let manifest = export.path().join("clipboard.json");
-    let mut record = raycast_record(0);
-    record["text"] = json!("x".repeat(MAX_IMPORT_RECORD_BYTES + 1));
-    write_json(&manifest, &[record]);
-    let database = tempfile::tempdir().unwrap();
-    let service = ImportService::with_runtime(
-        open_store(&database),
-        ImportRuntime::with_limits(ImportAdmissionLimits::new(
-            1,
-            2 * MAX_IMPORT_RECORD_BYTES,
-            2 * MAX_IMPORT_RECORD_BYTES,
-        )),
-    );
-
-    let error = service.analyze(export.path()).unwrap_err();
-    assert!(matches!(
-        error,
-        ImportError::Service {
-            reason: "record_too_large"
-        }
-    ));
-    assert!(!error.to_string().contains("clipboard.json"));
-}
-
-#[tokio::test]
-async fn oversized_sources_are_rejected_for_resume_and_cli_without_persisting_runs() {
-    let export = tempfile::tempdir().unwrap();
-    let database = tempfile::tempdir().unwrap();
-    let mut oversized = raycast_record(0);
-    oversized["text"] = json!("x".repeat(16 * 1024));
-    write_raycast_export(&export, &[oversized]);
-    let store = open_store(&database);
-    let service = ImportService::with_worker_policy_and_limits(
-        store.clone(),
-        ImportWorkerPolicy::unbounded(),
-        ImportAdmissionLimits::new(2, 4 * 1024, 8 * 1024),
-    );
-
-    for error in [
-        service
-            .resume(uuid::Uuid::now_v7(), export.path())
-            .await
-            .unwrap_err(),
-        service.run_to_completion(export.path()).await.unwrap_err(),
-    ] {
-        assert!(matches!(
-            error,
-            ImportError::Service {
-                reason: "analysis_too_large"
-            }
-        ));
-        assert!(
-            !error
-                .to_string()
-                .contains(export.path().to_string_lossy().as_ref())
-        );
-    }
-    let run_count = store
-        .with_reader(|connection| {
-            connection.query_row("SELECT count(*) FROM import_run", [], |row| {
-                row.get::<_, i64>(0)
-            })
-        })
-        .unwrap();
-    assert_eq!(run_count, 0);
 }
 
 #[test]

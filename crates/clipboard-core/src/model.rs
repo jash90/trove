@@ -115,40 +115,113 @@ impl fmt::Debug for CaptureInput {
 }
 
 pub fn canonical_text_bytes(value: &str) -> Vec<u8> {
-    use unicode_normalization::UnicodeNormalization;
-
-    value
-        .replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .nfc()
-        .collect::<String>()
-        .into_bytes()
+    let bytes = value.as_bytes();
+    let mut canonical = Vec::with_capacity(canonical_byte_len(ContentKind::Text, bytes));
+    update_canonical_bytes(ContentKind::Text, bytes, |chunk| {
+        canonical.extend_from_slice(chunk);
+    });
+    canonical
 }
 
 pub fn canonical_bytes(kind: ContentKind, bytes: &[u8]) -> Vec<u8> {
-    if kind.is_textual()
-        && let Ok(value) = std::str::from_utf8(bytes)
-    {
-        return canonical_text_bytes(value);
+    let mut canonical = Vec::with_capacity(canonical_byte_len(kind, bytes));
+    update_canonical_bytes(kind, bytes, |chunk| canonical.extend_from_slice(chunk));
+    canonical
+}
+
+pub fn canonical_byte_len(kind: ContentKind, bytes: &[u8]) -> usize {
+    let mut byte_len = 0_usize;
+    update_canonical_bytes(kind, bytes, |chunk| {
+        byte_len = byte_len.saturating_add(chunk.len());
+    });
+    byte_len
+}
+
+pub fn update_canonical_bytes(kind: ContentKind, bytes: &[u8], mut update: impl FnMut(&[u8])) {
+    use unicode_normalization::UnicodeNormalization;
+
+    let Some(value) = kind
+        .is_textual()
+        .then(|| std::str::from_utf8(bytes).ok())
+        .flatten()
+    else {
+        update(bytes);
+        return;
+    };
+    let mut previous_was_cr = false;
+    let newline_normalized = value.chars().filter_map(move |character| {
+        if character == '\n' && previous_was_cr {
+            previous_was_cr = false;
+            return None;
+        }
+        previous_was_cr = character == '\r';
+        Some(if character == '\r' { '\n' } else { character })
+    });
+    let mut encoded = [0_u8; 4];
+    for character in newline_normalized.nfc() {
+        update(character.encode_utf8(&mut encoded).as_bytes());
     }
-    bytes.to_vec()
+}
+
+/// Normalizes a UTF-8 search prefix without ever growing the result beyond `max_bytes`.
+pub fn normalize_search_text_bounded(value: &str, max_bytes: usize) -> String {
+    use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
+
+    let mut normalized = String::with_capacity(max_bytes);
+    let lowered = value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|character| if character == 'ł' { 'l' } else { character });
+    for character in lowered
+        .nfd()
+        .filter(|character| !is_combining_mark(*character))
+    {
+        if normalized
+            .len()
+            .checked_add(character.len_utf8())
+            .is_none_or(|length| length > max_bytes)
+        {
+            break;
+        }
+        normalized.push(character);
+    }
+    normalized
 }
 
 pub fn content_hash(kind: ContentKind, primary_mime: &str, bytes: &[u8]) -> ContentHash {
-    let bytes = canonical_bytes(kind, bytes);
     let mut hasher = blake3::Hasher::new();
     hasher.update(kind.as_str().as_bytes());
     hasher.update(&[0]);
     hasher.update(primary_mime.as_bytes());
     hasher.update(&[0]);
-    hasher.update(&bytes);
+    update_canonical_bytes(kind, bytes, |chunk| {
+        hasher.update(chunk);
+    });
     *hasher.finalize().as_bytes()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{canonical_text_bytes, content_hash};
+    use crate::{
+        canonical_byte_len, canonical_text_bytes, content_hash, normalize_search_text_bounded,
+        update_canonical_bytes,
+    };
+
+    #[test]
+    fn canonical_streaming_reports_length_before_emitting_matching_chunks() {
+        let input = "e\u{301}\r\nbrace { and text".as_bytes();
+        let expected = "é\nbrace { and text".as_bytes();
+        let mut streamed = Vec::new();
+
+        let byte_len = canonical_byte_len(ContentKind::Text, input);
+        update_canonical_bytes(ContentKind::Text, input, |chunk| {
+            streamed.extend_from_slice(chunk);
+        });
+
+        assert_eq!(byte_len, expected.len());
+        assert_eq!(streamed, expected);
+    }
 
     #[test]
     fn canonical_text_normalizes_newlines_but_preserves_spaces() {
@@ -185,6 +258,15 @@ mod tests {
                 canonical_text_bytes("a\r\n").as_slice()
             ),
         );
+    }
+
+    #[test]
+    fn bounded_search_normalization_never_grows_past_its_preallocated_capacity() {
+        let normalized = normalize_search_text_bounded("ŁÓDŹ ÉÉÉ", 7);
+
+        assert_eq!(normalized, "lodz ee");
+        assert!(normalized.len() <= 7);
+        assert!(normalized.capacity() <= 7);
     }
 
     #[test]

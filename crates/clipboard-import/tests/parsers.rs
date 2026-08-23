@@ -1,3 +1,7 @@
+#![allow(unused_imports, unused_macros)]
+
+macro_rules! relocated_parser_tests {
+() => {
 use std::{
     collections::BTreeSet,
     fs,
@@ -5,16 +9,96 @@ use std::{
 };
 
 use clipboard_core::{ContentFlags, ContentKind};
-use clipboard_import::{
-    ImportSource, detect_export, parse_export, parse_export_report, parse_raycast,
-    parse_raycast_report, parse_supercmd, parse_supercmd_report,
-};
+use crate::{ImportParseLimits, ImportParseReport, ImportSource};
+use crate::detect::{DetectedExport, detect_export_with_permit};
 use tempfile::TempDir;
+
+fn with_parser_permit<T>(
+    operation: impl FnOnce(&clipboard_store::ImportOperationPermit) -> Result<T, crate::ImportError>,
+) -> Result<T, crate::ImportError> {
+    let gate = clipboard_store::ImportOperationGate::with_capacity(
+        crate::MAX_IMPORT_OPERATION_BYTES,
+    )
+    .unwrap();
+    let permit = gate.acquire_blocking().unwrap();
+    operation(&permit)
+}
+
+fn detect_export(path: impl AsRef<Path>) -> Result<DetectedExport, crate::ImportError> {
+    with_parser_permit(|permit| {
+        detect_export_with_permit(path.as_ref(), permit, ImportParseLimits::default())
+    })
+}
+
+fn parse_export_report(path: impl AsRef<Path>) -> Result<ImportParseReport, crate::ImportError> {
+    with_parser_permit(|permit| {
+        let detected =
+            detect_export_with_permit(path.as_ref(), permit, ImportParseLimits::default())?;
+        crate::parse_detected_export_report_with_permit(
+            &detected,
+            permit,
+            ImportParseLimits::default(),
+        )
+    })
+}
+
+fn parse_export(path: impl AsRef<Path>) -> Result<Vec<crate::ImportCandidate>, crate::ImportError> {
+    parse_export_report(path)?.into_strict()
+}
+
+fn parse_raycast_report(
+    path: impl AsRef<Path>,
+) -> Result<ImportParseReport, crate::ImportError> {
+    with_parser_permit(|permit| {
+        crate::raycast::parse_raycast_report_with_permit(
+            path,
+            permit,
+            ImportParseLimits::default(),
+        )
+    })
+}
+
+fn parse_raycast(
+    path: impl AsRef<Path>,
+) -> Result<Vec<crate::ImportCandidate>, crate::ImportError> {
+    parse_raycast_report(path)?.into_strict()
+}
+
+fn parse_supercmd_report(
+    export_root: impl AsRef<Path>,
+    path: impl AsRef<Path>,
+) -> Result<ImportParseReport, crate::ImportError> {
+    with_parser_permit(|permit| {
+        crate::supercmd::parse_supercmd_report_with_permit(
+            export_root,
+            path.as_ref(),
+            permit,
+            ImportParseLimits::default(),
+        )
+    })
+}
+
+fn parse_supercmd(
+    export_root: impl AsRef<Path>,
+    path: impl AsRef<Path>,
+) -> Result<Vec<crate::ImportCandidate>, crate::ImportError> {
+    parse_supercmd_report(export_root, path)?.into_strict()
+}
 
 fn fixture(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(path)
+}
+
+fn candidate_primary_text(candidate: &crate::ImportCandidate) -> Option<&str> {
+    candidate
+        .capture
+        .kind
+        .is_textual()
+        .then(|| candidate.capture.representations.first()?.bytes.as_deref())
+        .flatten()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
 }
 
 #[test]
@@ -64,7 +148,7 @@ fn maps_supercmd_ocr_without_replacing_original_text() {
     let records = parse_supercmd(fixture("supercmd"), fixture("supercmd/clipboard.json")).unwrap();
 
     assert_eq!(records[0].search_ocr.as_deref(), Some("invoice 2026"));
-    assert_eq!(records[0].primary_text.as_deref(), Some("original caption"));
+    assert_eq!(candidate_primary_text(&records[0]), Some("original caption"));
     assert!(records[0].capture.pinned);
     assert_eq!(
         records[0].capture.source_app_id.as_deref(),
@@ -89,7 +173,7 @@ fn parses_supercmd_zero_one_flags_and_nullable_text() {
     assert_eq!(report.candidates.len(), 2);
     assert!(report.failures.is_empty());
     assert!(!report.candidates[0].capture.pinned);
-    assert_eq!(report.candidates[0].primary_text.as_deref(), Some(""));
+    assert_eq!(candidate_primary_text(&report.candidates[0]), Some(""));
     assert!(
         report.candidates[0]
             .capture
@@ -167,7 +251,7 @@ fn parses_multiline_csv_with_rfc4180_rules() {
     let records = parse_export(fixture("supercmd/clipboard.csv")).unwrap();
 
     assert_eq!(
-        records[0].primary_text.as_deref(),
+        candidate_primary_text(&records[0]),
         Some("first line\nsecond line")
     );
 }
@@ -211,7 +295,7 @@ fn detect_and_parse_accept_a_supercmd_export_directory() {
         ImportSource::SuperCmd
     );
     assert_eq!(
-        parse_export(directory).unwrap()[0].primary_text.as_deref(),
+        candidate_primary_text(&parse_export(directory).unwrap()[0]),
         Some("original caption")
     );
 }
@@ -242,7 +326,7 @@ fn directory_with_multiple_unnamed_manifests_is_rejected() {
 fn preserves_whitespace_only_text_without_indexing() {
     let records = parse_supercmd(fixture("supercmd"), fixture("supercmd/clipboard.json")).unwrap();
 
-    assert!(records[1].primary_text.is_none());
+    assert!(candidate_primary_text(&records[1]).is_none());
     assert!(records[2].missing_payload);
 
     let dir = TempDir::new().unwrap();
@@ -250,7 +334,7 @@ fn preserves_whitespace_only_text_without_indexing() {
       \"copied_at\": \"2026-01-02T03:04:05Z\", \"type\": \"text\", \"text\": \"   \", \"has_image\": false
     }]");
     let record = parse_supercmd(dir.path(), path).unwrap().remove(0);
-    assert_eq!(record.primary_text.as_deref(), Some("   "));
+    assert_eq!(candidate_primary_text(&record), Some("   "));
     assert!(
         record
             .capture
@@ -373,7 +457,7 @@ fn supercmd_json_report_keeps_good_records_after_a_bad_record() {
     assert_eq!(report.failures.len(), 1);
     assert_eq!(report.failures[0].record, 2);
     assert_eq!(report.failures[0].reason, "invalid_timestamp");
-    assert_eq!(report.candidates[1].primary_text.as_deref(), Some("later"));
+    assert_eq!(candidate_primary_text(&report.candidates[1]), Some("later"));
 }
 
 #[test]
@@ -388,7 +472,7 @@ fn supercmd_csv_report_keeps_good_records_after_a_bad_row() {
     assert_eq!(report.failures.len(), 1);
     assert_eq!(report.failures[0].record, 2);
     assert_eq!(report.failures[0].reason, "invalid_timestamp");
-    assert_eq!(report.candidates[1].primary_text.as_deref(), Some("later"));
+    assert_eq!(candidate_primary_text(&report.candidates[1]), Some("later"));
 }
 
 #[test]
@@ -577,10 +661,10 @@ fn supercmd_csv_reports_an_unequal_column_row_and_keeps_later_rows() {
     assert_eq!(report.failures.len(), 1);
     assert_eq!(report.failures[0].record, 2);
     assert_eq!(report.failures[0].reason, "invalid_record");
-    assert_eq!(report.candidates[1].primary_text.as_deref(), Some("later"));
+    assert_eq!(candidate_primary_text(&report.candidates[1]), Some("later"));
 }
 
-fn candidate_fingerprints(report: &clipboard_import::ImportParseReport) -> Vec<[u8; 32]> {
+fn candidate_fingerprints(report: &crate::ImportParseReport) -> Vec<[u8; 32]> {
     report
         .candidates
         .iter()
@@ -589,13 +673,13 @@ fn candidate_fingerprints(report: &clipboard_import::ImportParseReport) -> Vec<[
 }
 
 fn fingerprints_for_text(
-    report: &clipboard_import::ImportParseReport,
+    report: &crate::ImportParseReport,
     text: &str,
 ) -> BTreeSet<[u8; 32]> {
     report
         .candidates
         .iter()
-        .filter(|candidate| candidate.primary_text.as_deref() == Some(text))
+        .filter(|candidate| candidate_primary_text(candidate) == Some(text))
         .map(|candidate| candidate.record_fingerprint)
         .collect()
 }
@@ -643,3 +727,7 @@ fn write_export(root: &Path, contents: &str) -> PathBuf {
     fs::write(&path, contents).unwrap();
     path
 }
+};
+}
+
+pub(crate) use relocated_parser_tests;

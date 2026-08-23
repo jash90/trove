@@ -4,7 +4,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{ImportError, ImportSource, MAX_IMPORT_MANIFEST_BYTES, stream_json_records};
+use serde::de::{IgnoredAny, MapAccess, Visitor};
+
+use crate::{
+    ImportError, ImportParseLimits, ImportSource, JsonRecord, stream_json_records_path_with_limits,
+};
 
 /// Maximum number of top-level directory entries inspected while discovering an unnamed export
 /// manifest. Named `clipboard.json` / `clipboard.csv` files bypass discovery entirely.
@@ -26,29 +30,39 @@ impl fmt::Debug for DetectedExport {
     }
 }
 
-pub fn detect_export(path: impl AsRef<Path>) -> Result<DetectedExport, ImportError> {
+pub(crate) fn detect_export_with_permit(
+    path: impl AsRef<Path>,
+    permit: &clipboard_store::ImportOperationPermit,
+    limits: ImportParseLimits,
+) -> Result<DetectedExport, ImportError> {
     let path = path.as_ref();
     if path.is_dir() {
-        return detect_directory(path);
+        return detect_directory(path, permit, limits);
     }
-    detect_file(path)
+    detect_file(path, permit, limits)
 }
 
-fn detect_directory(directory: &Path) -> Result<DetectedExport, ImportError> {
-    detect_directory_with_limit(directory, MAX_MANIFEST_DISCOVERY_ENTRIES)
+fn detect_directory(
+    directory: &Path,
+    permit: &clipboard_store::ImportOperationPermit,
+    limits: ImportParseLimits,
+) -> Result<DetectedExport, ImportError> {
+    detect_directory_with_limit(directory, MAX_MANIFEST_DISCOVERY_ENTRIES, permit, limits)
 }
 
 fn detect_directory_with_limit(
     directory: &Path,
     max_examined_entries: usize,
+    permit: &clipboard_store::ImportOperationPermit,
+    limits: ImportParseLimits,
 ) -> Result<DetectedExport, ImportError> {
     let json = directory.join("clipboard.json");
     let csv = directory.join("clipboard.csv");
     if json.is_file() {
-        match detect_file(&json) {
+        match detect_file(&json, permit, limits) {
             Ok(detected) => return Ok(detected),
             Err(json_error) if csv.is_file() => {
-                if let Ok(detected) = detect_file(&csv) {
+                if let Ok(detected) = detect_file(&csv, permit, limits) {
                     return Ok(detected);
                 }
                 return Err(json_error);
@@ -57,7 +71,7 @@ fn detect_directory_with_limit(
         }
     }
     if csv.is_file() {
-        return detect_file(&csv);
+        return detect_file(&csv, permit, limits);
     }
 
     let entries = fs::read_dir(directory)
@@ -69,7 +83,7 @@ fn detect_directory_with_limit(
             })
         });
     match select_unnamed_manifest(entries, max_examined_entries) {
-        Ok(Some(manifest)) => detect_file(&manifest),
+        Ok(Some(manifest)) => detect_file(&manifest, permit, limits),
         Ok(None) => Err(ImportError::export("detection", "manifest_not_found")),
         Err(reason) => Err(ImportError::export("detection", reason)),
     }
@@ -105,15 +119,29 @@ fn select_unnamed_manifest(
     Ok(manifest)
 }
 
-fn detect_file(path: &Path) -> Result<DetectedExport, ImportError> {
+fn detect_file(
+    path: &Path,
+    permit: &clipboard_store::ImportOperationPermit,
+    limits: ImportParseLimits,
+) -> Result<DetectedExport, ImportError> {
     let source = match path.extension().and_then(|extension| extension.to_str()) {
-        Some("csv") => detect_csv_source(path)?,
+        Some("csv") => detect_csv_source(path, permit, limits)?,
         Some("json") => {
+            limits.ensure_json_operation(permit)?;
             let mut detected = None;
-            stream_json_records(path, "detection", |_, bytes| {
-                detected = Some(detect_json_source(bytes)?);
-                Ok(false)
-            })?;
+            stream_json_records_path_with_limits(
+                path,
+                "detection",
+                limits.manifest_bytes,
+                limits.record_bytes,
+                |_, framed| match framed {
+                    JsonRecord::Complete(bytes) => {
+                        detected = Some(detect_json_source(bytes)?);
+                        Ok(false)
+                    }
+                    JsonRecord::TooLarge => Err(ImportError::service("record_too_large")),
+                },
+            )?;
             detected.ok_or_else(|| ImportError::export("detection", "invalid_document"))?
         }
         _ => return Err(ImportError::export("detection", "unsupported_format")),
@@ -121,39 +149,29 @@ fn detect_file(path: &Path) -> Result<DetectedExport, ImportError> {
     Ok(DetectedExport {
         source,
         export_path: path.to_path_buf(),
-        source_fingerprint: source_fingerprint(source, path)?,
+        source_fingerprint: source_fingerprint(source, path, limits.manifest_bytes)?,
     })
 }
 
-fn detect_csv_source(path: &Path) -> Result<ImportSource, ImportError> {
-    let metadata =
-        fs::metadata(path).map_err(|_| ImportError::export("detection", "unreadable_export"))?;
-    if metadata.len() > MAX_IMPORT_MANIFEST_BYTES as u64 {
-        return Err(ImportError::service("analysis_too_large"));
-    }
-    let file =
-        fs::File::open(path).map_err(|_| ImportError::export("detection", "unreadable_export"))?;
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(false)
-        .from_reader(file);
-    let headers = reader
-        .headers()
-        .map_err(|_| ImportError::export("detection", "invalid_document"))?;
-    if headers
-        .iter()
-        .any(|header| matches!(header, "copied_at" | "copiedAt"))
-        && headers.iter().any(|header| header == "type")
-    {
+fn detect_csv_source(
+    path: &Path,
+    permit: &clipboard_store::ImportOperationPermit,
+    limits: ImportParseLimits,
+) -> Result<ImportSource, ImportError> {
+    if crate::supercmd::detect_supercmd_csv_with_permit(path, permit, limits)? {
         return Ok(ImportSource::SuperCmd);
     }
     Err(ImportError::export("detection", "unknown_schema"))
 }
 
-fn source_fingerprint(source: ImportSource, path: &Path) -> Result<[u8; 32], ImportError> {
+fn source_fingerprint(
+    source: ImportSource,
+    path: &Path,
+    manifest_limit: usize,
+) -> Result<[u8; 32], ImportError> {
     let metadata =
         fs::metadata(path).map_err(|_| ImportError::export("detection", "unreadable_export"))?;
-    if metadata.len() > MAX_IMPORT_MANIFEST_BYTES as u64 {
+    if metadata.len() > manifest_limit as u64 {
         return Err(ImportError::service("analysis_too_large"));
     }
     let mut file =
@@ -164,8 +182,13 @@ fn source_fingerprint(source: ImportSource, path: &Path) -> Result<[u8; 32], Imp
     let mut read_bytes = 0_usize;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
+        let remaining = manifest_limit
+            .checked_add(1)
+            .and_then(|limit| limit.checked_sub(read_bytes))
+            .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+        let requested = buffer.len().min(remaining);
         let read = file
-            .read(&mut buffer)
+            .read(&mut buffer[..requested])
             .map_err(|_| ImportError::export("detection", "unreadable_export"))?;
         if read == 0 {
             break;
@@ -173,7 +196,7 @@ fn source_fingerprint(source: ImportSource, path: &Path) -> Result<[u8; 32], Imp
         read_bytes = read_bytes
             .checked_add(read)
             .ok_or_else(|| ImportError::service("analysis_too_large"))?;
-        if read_bytes > MAX_IMPORT_MANIFEST_BYTES {
+        if read_bytes > manifest_limit {
             return Err(ImportError::service("analysis_too_large"));
         }
         hasher.update(&buffer[..read]);
@@ -182,13 +205,48 @@ fn source_fingerprint(source: ImportSource, path: &Path) -> Result<[u8; 32], Imp
 }
 
 fn detect_json_source(bytes: &[u8]) -> Result<ImportSource, ImportError> {
-    let record = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(bytes)
+    #[derive(Default)]
+    struct SchemaFields {
+        created_at: bool,
+        category: bool,
+        copied_at: bool,
+    }
+
+    struct SchemaVisitor;
+
+    impl<'de> Visitor<'de> for SchemaVisitor {
+        type Value = SchemaFields;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an export record object")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut fields = SchemaFields::default();
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "createdAt" => fields.created_at = true,
+                    "category" => fields.category = true,
+                    "copied_at" | "copiedAt" => fields.copied_at = true,
+                    _ => {}
+                }
+                map.next_value::<IgnoredAny>()?;
+            }
+            Ok(fields)
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let fields = serde::de::Deserializer::deserialize_map(&mut deserializer, SchemaVisitor)
         .map_err(|_| ImportError::export("detection", "invalid_document"))?;
 
-    if record.contains_key("createdAt") && record.contains_key("category") {
+    if fields.created_at && fields.category {
         return Ok(ImportSource::Raycast);
     }
-    if record.contains_key("copied_at") || record.contains_key("copiedAt") {
+    if fields.copied_at {
         return Ok(ImportSource::SuperCmd);
     }
     Err(ImportError::export("detection", "unknown_schema"))
@@ -240,8 +298,17 @@ mod tests {
     fn unnamed_manifest_discovery_has_a_path_free_entry_budget_error() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("synthetic.txt"), b"synthetic").unwrap();
+        let gate = clipboard_store::ImportOperationGate::with_capacity(64 * 1024).unwrap();
+        let permit = gate.acquire_blocking().unwrap();
+        let limits = ImportParseLimits {
+            manifest_bytes: 1024,
+            record_bytes: 1024,
+            header_bytes: 1024,
+            source_bytes: 4096,
+            auxiliary_bytes: 1024,
+        };
 
-        let error = detect_directory_with_limit(directory.path(), 0).unwrap_err();
+        let error = detect_directory_with_limit(directory.path(), 0, &permit, limits).unwrap_err();
 
         assert_eq!(error.to_string(), "detection export: export_too_large");
         assert!(

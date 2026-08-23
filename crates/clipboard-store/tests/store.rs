@@ -2,7 +2,7 @@ use clipboard_core::{
     CaptureInput, ContentFlags, ContentKind, EventFlags, RepresentationInput, SourceConfidence,
 };
 use clipboard_store::{
-    BeginImportRun, ImportSourceKind, MAX_SEARCH_DERIVATION_BYTES,
+    BeginImportRun, ImportOperationGate, ImportSourceKind, MAX_SEARCH_DERIVATION_BYTES,
     MAX_SEARCH_DERIVATIONS_PER_CONTENT, MAX_SEARCH_DOCUMENT_BYTES, ReadOnlyStore,
     StorageBoundaryLease, StoreConfig, StoreError, StoreHandle, StoreImportCandidate,
     WRITER_QUEUE_CAPACITY, migrations,
@@ -10,9 +10,123 @@ use clipboard_store::{
 
 use std::{
     fs,
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, mpsc},
     thread,
+    time::Duration,
 };
+
+fn import_operation_permit() -> clipboard_store::ImportOperationPermit {
+    ImportOperationGate::process_wide()
+        .acquire_blocking()
+        .unwrap()
+}
+
+#[test]
+fn import_operation_permit_serializes_and_releases_its_reserved_capacity() {
+    let gate = ImportOperationGate::with_capacity(4 * 1024).unwrap();
+    let first = gate.acquire_blocking().unwrap();
+    assert_eq!(gate.active_bytes(), 4 * 1024);
+
+    let waiting_gate = gate.clone();
+    let (acquired_tx, acquired_rx) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let second = waiting_gate.acquire_blocking().unwrap();
+        acquired_tx.send(()).unwrap();
+        second
+    });
+
+    assert!(matches!(
+        acquired_rx.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    drop(first);
+    acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let second = waiter.join().unwrap();
+    assert_eq!(gate.active_bytes(), 4 * 1024);
+    drop(second);
+    assert_eq!(gate.active_bytes(), 0);
+}
+
+#[tokio::test]
+async fn import_operation_permit_is_consumed_by_store_batch() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+    let run = store
+        .begin_import(BeginImportRun {
+            run_id: uuid::Uuid::now_v7(),
+            source_kind: ImportSourceKind::Raycast,
+            source_fingerprint: [91; 32],
+            total_records: 0,
+            candidate_records: 0,
+            initial_failures: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let gate = ImportOperationGate::with_capacity(4 * 1024).unwrap();
+    let permit = gate.acquire_blocking().unwrap();
+
+    let outcome = store
+        .import_batch(permit, run.run_id, run.generation, Vec::new())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.processed_candidates, 0);
+    assert_eq!(gate.active_bytes(), 0);
+}
+
+#[tokio::test]
+async fn import_operation_permit_rejects_unproven_candidate_shape_before_enqueue() {
+    assert_eq!(
+        clipboard_store::MAX_IMPORT_BATCH_BYTES
+            .checked_add(clipboard_store::MAX_IMPORT_WRITER_SCRATCH_BYTES),
+        Some(clipboard_store::MAX_IMPORT_OPERATION_BYTES)
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+    let run = store
+        .begin_import(BeginImportRun {
+            run_id: uuid::Uuid::now_v7(),
+            source_kind: ImportSourceKind::Raycast,
+            source_fingerprint: [92; 32],
+            total_records: 1,
+            candidate_records: 1,
+            initial_failures: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let mut capture = text_capture("bounded", 1_000);
+    capture.representations.push(RepresentationInput {
+        format_id: "text/html".to_owned(),
+        bytes: Some(b"bounded html".to_vec()),
+        missing_ref: None,
+    });
+    capture.representations.push(RepresentationInput {
+        format_id: "text/rtf".to_owned(),
+        bytes: Some(b"bounded rtf".to_vec()),
+        missing_ref: None,
+    });
+    let candidates = vec![StoreImportCandidate {
+        candidate_offset: 0,
+        record_fingerprint: [93; 32],
+        capture,
+        search_ocr: None,
+        source_app_original: None,
+    }];
+    let nested_capacity = candidates[0].owned_allocation_bytes().unwrap();
+    assert!(nested_capacity > 0);
+    let permit = import_operation_permit();
+
+    let error = store
+        .import_batch(permit, run.run_id, run.generation, candidates)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, StoreError::ImportBatchTooLarge));
+    let status = store.import_status(run.run_id).unwrap();
+    assert_eq!(status.next_candidate_offset, 0);
+}
 
 #[cfg(unix)]
 fn secure_existing_database(data_root: &std::path::Path, database: &std::path::Path) {
@@ -68,13 +182,18 @@ async fn import_search_derivations(store: &StoreHandle, source_seed: u8, derivat
                 candidate_offset: offset as u64,
                 record_fingerprint,
                 capture: text_capture("shared bounded payload", 1_000 + offset as i64),
-                search_text: Some(derivation.clone()),
+                search_ocr: Some(derivation.clone()),
                 source_app_original: None,
             }
         })
         .collect::<Vec<_>>();
     store
-        .import_batch(run.run_id, run.generation, candidates)
+        .import_batch(
+            import_operation_permit(),
+            run.run_id,
+            run.generation,
+            candidates,
+        )
         .await
         .unwrap();
     store
@@ -83,8 +202,36 @@ async fn import_search_derivations(store: &StoreHandle, source_seed: u8, derivat
         .unwrap();
 }
 
+#[tokio::test]
+async fn import_search_derives_primary_and_ocr_inside_the_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+
+    import_search_derivations(&store, 61, &["secondary ocr phrase".to_owned()]).await;
+
+    let matches = store
+        .with_reader(|connection| {
+            Ok((
+                connection.query_row(
+                    "SELECT count(*) FROM search_fts WHERE search_fts MATCH 'bounded'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                connection.query_row(
+                    "SELECT count(*) FROM search_fts WHERE search_fts MATCH 'secondary'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(matches, (1, 1));
+}
+
 fn search_derivation_test_hash(value: &str) -> [u8; 32] {
-    let normalized = clipboard_core::normalize_search_text(value);
+    let normalized =
+        clipboard_core::normalize_search_text(&format!("shared bounded payload\n{value}"));
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"clipboard-store.search-derivation-v1");
     hasher.update(&(normalized.len() as u64).to_be_bytes());
@@ -686,7 +833,10 @@ async fn long_multibyte_derivation_is_truncated_only_at_a_utf8_boundary() {
         })
         .unwrap();
     assert!(retained.len() <= MAX_SEARCH_DERIVATION_BYTES);
-    assert!(retained.chars().all(|character| character == 'z'));
+    let suffix = retained
+        .strip_prefix("shared bounded payload\n")
+        .expect("the imported search document keeps the bounded primary prefix");
+    assert!(suffix.chars().all(|character| character == 'z'));
 }
 
 #[tokio::test]
@@ -845,16 +995,26 @@ async fn replaying_a_committed_same_run_offset_cannot_advance_or_double_count_it
         candidate_offset: 0,
         record_fingerprint: [9; 32],
         capture: text_capture("synthetic imported value", 1_000),
-        search_text: Some("synthetic imported value".to_owned()),
+        search_ocr: None,
         source_app_original: None,
     };
 
     store
-        .import_batch(run.run_id, run.generation, vec![candidate()])
+        .import_batch(
+            import_operation_permit(),
+            run.run_id,
+            run.generation,
+            vec![candidate()],
+        )
         .await
         .unwrap();
     let error = store
-        .import_batch(run.run_id, run.generation, vec![candidate()])
+        .import_batch(
+            import_operation_permit(),
+            run.run_id,
+            run.generation,
+            vec![candidate()],
+        )
         .await
         .unwrap_err();
 
@@ -917,13 +1077,14 @@ async fn preallocated_import_run_id_is_exactly_idempotent_and_conflicts_fail_clo
 
     store
         .import_batch(
+            import_operation_permit(),
             first.run_id,
             first.generation,
             vec![StoreImportCandidate {
                 candidate_offset: 0,
                 record_fingerprint: [19; 32],
                 capture: text_capture("synthetic terminal lease", 1_000),
-                search_text: Some("synthetic terminal lease".to_owned()),
+                search_ocr: None,
                 source_app_original: None,
             }],
         )
@@ -963,11 +1124,16 @@ async fn import_run_deletion_cannot_erase_global_idempotency_claims() {
         candidate_offset: 0,
         record_fingerprint: [41; 32],
         capture: text_capture("synthetic retained claim", 1_000),
-        search_text: Some("synthetic retained claim".to_owned()),
+        search_ocr: None,
         source_app_original: None,
     };
     store
-        .import_batch(first_run.run_id, first_run.generation, vec![candidate()])
+        .import_batch(
+            import_operation_permit(),
+            first_run.run_id,
+            first_run.generation,
+            vec![candidate()],
+        )
         .await
         .unwrap();
     store
@@ -998,7 +1164,12 @@ async fn import_run_deletion_cannot_erase_global_idempotency_claims() {
         .await
         .unwrap();
     store
-        .import_batch(second_run.run_id, second_run.generation, vec![candidate()])
+        .import_batch(
+            import_operation_permit(),
+            second_run.run_id,
+            second_run.generation,
+            vec![candidate()],
+        )
         .await
         .unwrap();
     let completed = store
@@ -1352,13 +1523,14 @@ async fn import_batch_propagates_private_storage_without_recording_a_candidate_f
 
     let error = store
         .import_batch(
+            import_operation_permit(),
             run.run_id,
             run.generation,
             vec![StoreImportCandidate {
                 candidate_offset: 0,
                 record_fingerprint: [43; 32],
                 capture,
-                search_text: None,
+                search_ocr: None,
                 source_app_original: None,
             }],
         )

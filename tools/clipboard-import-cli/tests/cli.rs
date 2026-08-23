@@ -370,6 +370,28 @@ fn analyze_emits_only_explicit_sanitized_count_fields() {
 }
 
 #[test]
+fn bounded_analyze_rejects_an_oversized_manifest_before_parsing() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let source = sandbox.path().join("bounded-analysis-sentinel");
+    fs::create_dir_all(&source).unwrap();
+    let manifest = source.join("clipboard.json");
+    fs::File::create(&manifest)
+        .unwrap()
+        .set_len((clipboard_import::MAX_IMPORT_MANIFEST_BYTES as u64) + 1)
+        .unwrap();
+
+    let output = cli(&["analyze", "--source", source.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    let (_, stderr) = utf8_output(&output);
+    assert_eq!(
+        serde_json::from_str::<Value>(stderr).unwrap()["code"],
+        "analysis_too_large"
+    );
+    assert_redacted(&output, &["bounded-analysis-sentinel", "clipboard.json"]);
+}
+
+#[test]
 fn analyze_reports_missing_payload_counts_by_kind() {
     let sandbox = tempfile::tempdir().unwrap();
     let source = sandbox.path().join("analysis-source");

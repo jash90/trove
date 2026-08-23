@@ -3,13 +3,10 @@
 mod path_policy;
 mod verify;
 
-use std::{collections::BTreeMap, io, io::Write, path::PathBuf};
+use std::{io, io::Write, path::PathBuf};
 
 use clap::{Parser, Subcommand, error::ErrorKind};
-use clipboard_core::ContentKind;
-use clipboard_import::{
-    ImportError, ImportParseReport, ImportService, ImportSource, detect_export, parse_export_report,
-};
+use clipboard_import::{ImportError, ImportService, analyze_export};
 use clipboard_store::{CasError, StorageBoundaryError, StoreError, StoreHandle};
 use serde::Serialize;
 
@@ -168,19 +165,24 @@ async fn execute(command: Commands) -> Result<CommandExecution, CliFailure> {
 
 fn analyze(source: &std::path::Path) -> Result<AnalyzeOutput, CliFailure> {
     let source = path_policy::canonical_source(source)?;
-    let detected = detect_export(&source).map_err(import_failure)?;
-    let report = parse_export_report(&source).map_err(import_failure)?;
-    let (counts_by_kind, available_image_records, missing_image_records) =
-        analyzed_counts(&report)?;
+    let analysis = analyze_export(&source).map_err(import_failure)?;
     Ok(AnalyzeOutput {
         status: "ok",
-        source_kind: source_name(detected.source),
-        total: count_from_usize(report.total)?,
-        candidate_records: count_from_usize(report.candidates.len())?,
-        failed: count_from_usize(report.failures.len())?,
-        counts_by_kind,
-        available_image_records,
-        missing_image_records,
+        source_kind: analysis.source.as_str(),
+        total: analysis.total,
+        candidate_records: analysis.candidate_records,
+        failed: analysis.failed,
+        counts_by_kind: analysis
+            .counts_by_kind
+            .into_iter()
+            .map(|count| KindCount {
+                kind: count.kind.as_str(),
+                event_count: count.event_count,
+                missing_payload_count: count.missing_payload_count,
+            })
+            .collect(),
+        available_image_records: analysis.available_image_records,
+        missing_image_records: analysis.missing_image_records,
     })
 }
 
@@ -204,58 +206,6 @@ async fn import(
         skipped: summary.skipped,
         failed: summary.failed,
     })
-}
-
-fn analyzed_counts(report: &ImportParseReport) -> Result<(Vec<KindCount>, u64, u64), CliFailure> {
-    let mut kind_counts = BTreeMap::<&'static str, (u64, u64)>::new();
-    let mut available_images = 0_u64;
-    let mut missing_images = 0_u64;
-    for candidate in &report.candidates {
-        let kind = candidate.capture.kind.as_str();
-        let (event_count, missing_payload_count) = kind_counts.entry(kind).or_default();
-        *event_count = event_count
-            .checked_add(1)
-            .ok_or_else(|| CliFailure::new("count_overflow"))?;
-        if candidate.missing_payload {
-            *missing_payload_count = missing_payload_count
-                .checked_add(1)
-                .ok_or_else(|| CliFailure::new("count_overflow"))?;
-        }
-        if candidate.capture.kind == ContentKind::Image {
-            if candidate.missing_payload {
-                missing_images = missing_images
-                    .checked_add(1)
-                    .ok_or_else(|| CliFailure::new("count_overflow"))?;
-            } else {
-                available_images = available_images
-                    .checked_add(1)
-                    .ok_or_else(|| CliFailure::new("count_overflow"))?;
-            }
-        }
-    }
-    Ok((
-        kind_counts
-            .into_iter()
-            .map(|(kind, (event_count, missing_payload_count))| KindCount {
-                kind,
-                event_count,
-                missing_payload_count,
-            })
-            .collect(),
-        available_images,
-        missing_images,
-    ))
-}
-
-const fn source_name(source: ImportSource) -> &'static str {
-    match source {
-        ImportSource::Raycast => "raycast",
-        ImportSource::SuperCmd => "supercmd",
-    }
-}
-
-fn count_from_usize(value: usize) -> Result<u64, CliFailure> {
-    u64::try_from(value).map_err(|_| CliFailure::new("count_overflow"))
 }
 
 fn import_failure(error: ImportError) -> CliFailure {
