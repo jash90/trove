@@ -25,6 +25,16 @@ export const useHistorySearch = (gateway: ClipboardGateway): UseHistorySearchRes
     page: null,
   });
   const requestId = useRef(0);
+  // Bumped when the core records something, to re-run the same query rather
+  // than make the user retype to see what they just copied.
+  const [revision, setRevision] = useState(0);
+
+  useEffect(() => setRevision((value) => value + 1), []);
+
+  useEffect(
+    () => gateway.onHistoryChanged?.(() => setRevision((value) => value + 1)),
+    [gateway],
+  );
 
   useEffect(() => {
     const id = ++requestId.current;
@@ -53,7 +63,7 @@ export const useHistorySearch = (gateway: ClipboardGateway): UseHistorySearchRes
         requestId.current += 1;
       }
     };
-  }, [gateway, query]);
+  }, [gateway, query, revision]);
 
   return {
     query,

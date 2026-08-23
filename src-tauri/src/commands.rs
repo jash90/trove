@@ -7,6 +7,7 @@ use clipboard_search::{HistoryPage, SearchError, SearchRequest, SearchStoreExt};
 use clipboard_store::{CasError, StoreError, StoreHandle};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use uuid::Uuid;
 
@@ -343,6 +344,12 @@ pub async fn copy_event<R: tauri::Runtime>(
     plain_text: bool,
 ) -> Result<CopyResultDto, String> {
     let text = prepare_copy_text_service(state.inner(), event_id, plain_text).await?;
+    // Putting an entry back changes the clipboard, and the monitor would
+    // otherwise record our own paste as a fresh copy. Arm the suppression
+    // before the write so the change cannot land first.
+    if let Some(control) = app.try_state::<crate::monitor::MonitorControl>() {
+        control.suppress_next_change(current_time_ms());
+    }
     app.clipboard()
         .write_text(text)
         .map_err(|_| "clipboard_unavailable".to_owned())?;
@@ -583,6 +590,25 @@ pub async fn get_thumbnail(
     event_id: i64,
 ) -> Result<Option<ThumbnailDto>, String> {
     get_thumbnail_service(state.inner(), event_id).await
+}
+
+/// Reads the applications the user asked to be left out of the history.
+///
+/// An unreadable settings row yields an empty list, which records everything.
+/// The alternative — treating a read failure as "deny all" — would silently
+/// stop recording, and a clipboard manager that quietly keeps nothing is worse
+/// than one that keeps too much.
+fn current_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+pub fn denylisted_apps(store: &StoreHandle) -> Vec<String> {
+    get_settings_blocking(store)
+        .map(|settings| settings.denylisted_apps)
+        .unwrap_or_default()
 }
 
 pub async fn get_settings_service(state: &AppState) -> Result<AppSettingsDto, String> {

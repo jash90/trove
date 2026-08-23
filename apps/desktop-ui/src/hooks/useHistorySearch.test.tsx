@@ -45,6 +45,36 @@ const gatewayWithSearch = (
   ({ search }) as ClipboardGateway;
 
 describe('useHistorySearch', () => {
+  it('re-runs the current query when the core records something new', async () => {
+    let notify = (): void => undefined;
+    const search = vi.fn(async () => ({
+      items: [],
+      nextCursor: null,
+      rankedTruncated: false,
+    }));
+    const gateway = {
+      search,
+      onHistoryChanged: (listener: () => void) => {
+        notify = listener;
+        return () => undefined;
+      },
+    } as unknown as ClipboardGateway;
+
+    renderHook(() => useHistorySearch(gateway));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(search).toHaveBeenCalledTimes(1);
+
+    // A copy landing in the core must reach an open palette without the user
+    // retyping the query they already have.
+    act(() => notify());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(search).toHaveBeenCalledTimes(2);
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
   });

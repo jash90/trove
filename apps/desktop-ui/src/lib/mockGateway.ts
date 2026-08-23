@@ -74,6 +74,8 @@ export const mockGateway: ClipboardGateway = {
   revealSource: async () => {
     throw new Error('source_unavailable');
   },
+  // The browser preview has no core behind it, so nothing ever changes.
+  onHistoryChanged: () => () => undefined,
   getThumbnail: async (eventId) =>
     eventId === 103 ? { mimeType: 'image/png', base64: 'c3ludGhldGlj' } : null,
   getSettings: async () => ({ ...settings, denylistedApps: [...settings.denylistedApps] }),

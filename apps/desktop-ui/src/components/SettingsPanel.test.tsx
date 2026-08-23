@@ -63,6 +63,7 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
       throw new Error('unused');
     }),
     revealSource: vi.fn(async () => undefined),
+    onHistoryChanged: vi.fn(() => () => undefined),
     getThumbnail: vi.fn(async () => null),
     getSettings: vi.fn(async () => persistedSettings),
     saveSettings: vi.fn(async (nextSettings) => nextSettings),

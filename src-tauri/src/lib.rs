@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod hotkey;
+pub mod monitor;
 pub mod state;
 
 use tauri::Manager;
@@ -23,6 +24,9 @@ pub fn run() {
             if hotkey::install(app.handle()).is_err() {
                 eprintln!("clipboard-history: global shortcut unavailable");
             }
+            let control = monitor::MonitorControl::new();
+            app.manage(control.clone());
+            monitor::start(app.handle(), control);
             Ok(())
         })
         .on_window_event(|window, event| {

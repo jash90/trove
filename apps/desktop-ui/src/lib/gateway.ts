@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { disable, enable, isEnabled } from '@tauri-apps/plugin-autostart';
 import { open } from '@tauri-apps/plugin-dialog';
 import { createContext, createElement, useContext, type ReactNode } from 'react';
@@ -33,6 +34,15 @@ export interface ClipboardGateway {
   discardImportAnalysis(analysisId: string): Promise<void>;
   getImportStatus(runId: string): Promise<ImportProgress>;
   revealSource(eventId: number): Promise<void>;
+  /**
+   * Calls back whenever the core records something new. Returns a function
+   * that stops listening; without it the palette would show a history that is
+   * already out of date the moment the user copies anything.
+   *
+   * Optional: a gateway with no live core behind it — the browser preview —
+   * has nothing to report.
+   */
+  onHistoryChanged?(listener: () => void): () => void;
   getThumbnail(eventId: number): Promise<Thumbnail | null>;
   getSettings(): Promise<AppSettings>;
   isAutostartEnabled(): Promise<boolean>;
@@ -71,6 +81,12 @@ export const tauriGateway: ClipboardGateway = {
       validateImportProgress(progress, runId),
     ),
   revealSource: (eventId) => invoke<void>('reveal_source', { eventId }),
+  onHistoryChanged: (listener) => {
+    const unlisten = listen('history-changed', () => listener());
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  },
   getThumbnail: (eventId) => invoke<Thumbnail | null>('get_thumbnail', { eventId }),
   getSettings: () => invoke<AppSettings>('get_settings'),
   isAutostartEnabled: () => isEnabled(),

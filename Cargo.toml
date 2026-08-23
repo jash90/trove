@@ -7,6 +7,7 @@ members = [
   "crates/clipboard-search",
   "crates/clipboard-images",
   "crates/clipboard-import",
+  "crates/platform-macos",
   "crates/clipboard-zstd-bound",
   "tools/clipboard-import-cli",
 ]
