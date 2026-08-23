@@ -127,6 +127,18 @@ impl LinkPreviewFetcher {
             if !status.is_success() {
                 return Err(LinkPreviewError::Refused);
             }
+            // A link can point straight at a picture rather than at a page
+            // describing one. Reading those bytes as markup finds nothing, and
+            // the entry ends up remembered as having no preview at all — while
+            // the preview was the whole response.
+            if let Some(mime) = image_content_type(&response) {
+                let bytes = read_bounded_bytes(response, MAX_IMAGE_BYTES).await?;
+                return Ok(LinkPreview {
+                    image: (!bytes.is_empty()).then_some(bytes),
+                    image_mime: Some(mime),
+                    ..LinkPreview::default()
+                });
+            }
             let document = read_document_head(response).await?;
             let metadata = html::read_metadata(&document);
             let icon = self
@@ -164,7 +176,10 @@ impl LinkPreviewFetcher {
         let address = resolve_public_address(host, port)?;
         client_for(Some((host, address)))?
             .get(url.clone())
-            .header(reqwest::header::ACCEPT, "text/html")
+            // Html preferred, anything accepted: a link may point at a page or
+            // at the picture itself, and refusing the second would be a way of
+            // not seeing it.
+            .header(reqwest::header::ACCEPT, "text/html,*/*;q=0.8")
             .send()
             .await
             .map_err(|_| LinkPreviewError::Unreachable)
@@ -287,6 +302,20 @@ async fn read_bounded_bytes(
     Ok(bytes)
 }
 
+/// The image type a response declares, when it declares one.
+fn image_content_type(response: &reqwest::Response) -> Option<String> {
+    let mime = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
+    mime.starts_with("image/").then_some(mime)
+}
+
 /// Reads a page as far as its head, and no further.
 ///
 /// Stopping at `</head>` keeps the usual page to a few kilobytes while still
@@ -398,6 +427,47 @@ mod tests {
         assert!(find_head_close(b"</HEAD>"));
         assert!(find_head_close(b"</Head>"));
         assert!(!find_head_close(b"<html><head><title>never closed"));
+    }
+
+    #[test]
+    fn a_declared_image_type_is_recognised_however_it_is_written() {
+        // Reading a JPEG as markup finds no title and no picture, so a link
+        // that is a picture was remembered as having no preview at all.
+        for header in [
+            "image/jpeg",
+            "image/png",
+            "IMAGE/JPEG",
+            "image/jpeg; charset=binary",
+            "image/webp ",
+        ] {
+            let mime = header
+                .split(';')
+                .next()
+                .unwrap()
+                .trim()
+                .to_ascii_lowercase();
+            assert!(mime.starts_with("image/"), "{header}");
+        }
+        for header in ["text/html", "text/html; charset=utf-8", "application/pdf"] {
+            let mime = header
+                .split(';')
+                .next()
+                .unwrap()
+                .trim()
+                .to_ascii_lowercase();
+            assert!(!mime.starts_with("image/"), "{header}");
+        }
+    }
+
+    #[test]
+    fn a_preview_holding_only_a_picture_still_counts_as_something() {
+        let preview = LinkPreview {
+            image: Some(vec![1, 2, 3]),
+            image_mime: Some("image/jpeg".to_owned()),
+            ..LinkPreview::default()
+        };
+
+        assert!(!preview.is_empty());
     }
 
     #[test]

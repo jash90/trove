@@ -262,6 +262,8 @@ Granice, które obowiązują zawsze:
   i bez wykonywania JavaScriptu,
 - czytany jest wyłącznie `<title>`, odnośnik do ikony i `og:image` (obraz, który
   strona sama sobie przypisuje); nic więcej nie jest parsowane ani przechowywane,
+- link prowadzący wprost do obrazu jest rozpoznawany po typie odpowiedzi i sam
+  staje się miniaturą,
 - obraz strony jest zmniejszany przed zapisaniem, żeby historia linków nie stała
   się archiwum zdjęć,
 - czytana jest tylko sekcja `<head>` — do `</head>`, nie dalej,
