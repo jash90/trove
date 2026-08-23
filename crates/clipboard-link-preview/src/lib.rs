@@ -72,25 +72,22 @@ pub enum LinkPreviewError {
     ClientUnavailable,
 }
 
-/// Fetches previews under one shared connection pool.
+/// Fetches previews.
+///
+/// Every request gets its own client, because the address is pinned per host
+/// and a shared client would carry one host's pinning into another's request.
+/// That costs a connection pool per fetch, which is the price of the check
+/// below actually meaning something.
 pub struct LinkPreviewFetcher {
-    client: reqwest::Client,
+    _private: (),
 }
 
 impl LinkPreviewFetcher {
     pub fn new() -> Result<Self, LinkPreviewError> {
-        let client = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            // Redirects are followed by hand, one hop at a time, because each
-            // new address has to pass the same checks as the first. Letting the
-            // client follow them would mean the second hop was never judged.
-            .redirect(reqwest::redirect::Policy::none())
-            // No cookie jar: nothing from this machine's browsing should be
-            // attached to a request made on a clipboard entry's behalf.
-            .user_agent("clipboard-history-link-preview")
-            .build()
-            .map_err(|_| LinkPreviewError::ClientUnavailable)?;
-        Ok(Self { client })
+        // Built once here so a broken configuration fails now rather than on
+        // the first link somebody selects.
+        let _ = client_for(None)?;
+        Ok(Self { _private: () })
     }
 
     /// Fetches the title and icon a link offers.
@@ -120,23 +117,25 @@ impl LinkPreviewFetcher {
         Err(LinkPreviewError::TooManyRedirects)
     }
 
-    /// Sends one request, to an address that has been checked twice.
+    /// Sends one request, to an address that was checked and then pinned.
+    ///
+    /// Pinning is the whole point. Checking the resolved address and then
+    /// letting the client resolve the name again leaves the gap it was meant
+    /// to close: a name can answer with a public address for the check and a
+    /// private one a moment later, and the connection would go to the second.
     async fn request(&self, url: &url::Url) -> Result<reqwest::Response, LinkPreviewError> {
         policy::url_is_fetchable(url).map_err(|_| LinkPreviewError::NotFetchable)?;
         let host = url.host_str().ok_or(LinkPreviewError::NotFetchable)?;
-        let port = url.port_or_known_default().unwrap_or(443);
+        let port = url
+            .port_or_known_default()
+            .ok_or(LinkPreviewError::NotFetchable)?;
         let address = resolve_public_address(host, port)?;
-        self.client
-            // Pinned to the address that was checked, so the name cannot answer
-            // with something else between the check and the connection.
+        client_for(Some((host, address)))?
             .get(url.clone())
             .header(reqwest::header::ACCEPT, "text/html")
             .send()
             .await
             .map_err(|_| LinkPreviewError::Unreachable)
-            .inspect(|_| {
-                let _ = address;
-            })
     }
 
     fn next_hop(
@@ -182,6 +181,25 @@ impl LinkPreviewFetcher {
         let bytes = read_bounded_bytes(response, MAX_ICON_BYTES).await.ok()?;
         (!bytes.is_empty()).then_some((bytes, mime))
     }
+}
+
+/// Builds a client, optionally bound to one already-checked address.
+fn client_for(pinned: Option<(&str, SocketAddr)>) -> Result<reqwest::Client, LinkPreviewError> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        // Redirects are followed by hand, one hop at a time, because each new
+        // address has to pass the same checks as the first. Letting the client
+        // follow them would mean the second hop was never judged.
+        .redirect(reqwest::redirect::Policy::none())
+        // No cookie jar: nothing from this machine's browsing should be
+        // attached to a request made on a clipboard entry's behalf.
+        .user_agent("clipboard-history-link-preview");
+    if let Some((host, address)) = pinned {
+        builder = builder.resolve(host, address);
+    }
+    builder
+        .build()
+        .map_err(|_| LinkPreviewError::ClientUnavailable)
 }
 
 /// Resolves a host and returns the first address that may be contacted.

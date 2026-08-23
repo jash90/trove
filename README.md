@@ -249,10 +249,15 @@ zapamiętywany na stałe, także nieudany, więc ta sama strona jest pytana raz.
 Granice, które obowiązują zawsze:
 
 - tylko `http` i `https`; żaden inny schemat nie jest pobierany,
-- **nigdy** adresy lokalne i prywatne (`localhost`, `127.0.0.0/8`, `10/8`,
-  `172.16/12`, `192.168/16`, `169.254/16`, `.local`, ULA IPv6) — sprawdzane
-  zarówno w nazwie, jak i w adresie zwróconym przez DNS, **po każdym
-  przekierowaniu**, żeby podgląd nie stał się skanerem Twojej sieci,
+- **tylko porty 80 i 443** — inaczej wpis w schowku byłby sposobem na pukanie do
+  każdej usługi, jaką ta maszyna widzi,
+- **nigdy** adresy lokalne i prywatne (`localhost`, `0.0.0.0/8`, `127.0.0.0/8`,
+  `10/8`, `172.16/12`, `192.168/16`, `169.254/16`, `.local`, ULA IPv6, a także
+  adresy IPv4 przemycone w IPv6 przez 6to4, Teredo i NAT64) — sprawdzane zarówno
+  w nazwie, jak i w adresie zwróconym przez DNS, **po każdym przekierowaniu**,
+  żeby podgląd nie stał się skanerem Twojej sieci,
+- sprawdzony adres jest **przypinany do połączenia**, więc nazwa nie może
+  odpowiedzieć czym innym pomiędzy sprawdzeniem a połączeniem,
 - twarde limity czasu, rozmiaru odpowiedzi i liczby przekierowań; bez ciasteczek
   i bez wykonywania JavaScriptu,
 - czytany jest wyłącznie `<title>` i odnośnik do ikony; nic więcej nie jest
