@@ -51,6 +51,8 @@ describe('useHistorySearch', () => {
   });
 
   afterEach(() => {
+    window.onunhandledrejection = null;
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -213,6 +215,122 @@ describe('useHistorySearch', () => {
     await vi.advanceTimersByTimeAsync(150);
 
     expect(search).not.toHaveBeenCalled();
+  });
+
+  it('ignores an in-flight success after unmount without reporting a state leak', async () => {
+    const request = deferred<HistoryPage>();
+    const search = vi.fn<ClipboardGateway['search']>(() => request.promise);
+    const gateway = gatewayWithSearch(search);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { result, unmount } = renderHook(() => useHistorySearch(gateway));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    const stateAtUnmount = result.current;
+    unmount();
+
+    await act(async () => {
+      request.resolve(makePage('ignored after unmount'));
+      await Promise.resolve();
+    });
+
+    expect(search).toHaveBeenCalledOnce();
+    expect(result.current).toBe(stateAtUnmount);
+    expect(result.current.status).toBe('loading');
+    expect(result.current.items).toEqual([]);
+    expect(result.current).not.toHaveProperty('error');
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('safely ignores an in-flight rejection after unmount', async () => {
+    const request = deferred<HistoryPage>();
+    const gateway = gatewayWithSearch(() => request.promise);
+    const unhandledRejection = vi.fn();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    window.onunhandledrejection = unhandledRejection;
+    const { result, unmount } = renderHook(() => useHistorySearch(gateway));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    const stateAtUnmount = result.current;
+    unmount();
+
+    await act(async () => {
+      request.reject(new Error('synthetic_sensitive_failure'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current).toBe(stateAtUnmount);
+    expect(result.current.status).toBe('loading');
+    expect(result.current.items).toEqual([]);
+    expect(result.current).not.toHaveProperty('error');
+    expect(unhandledRejection).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('ignores an older rejection after the query is cleared', async () => {
+    const queryRequest = deferred<HistoryPage>();
+    const defaultRequest = deferred<HistoryPage>();
+    const gateway = gatewayWithSearch((request) =>
+      request.query === '' ? defaultRequest.promise : queryRequest.promise,
+    );
+    const { result } = renderHook(() => useHistorySearch(gateway));
+
+    act(() => {
+      result.current.setQuery('synthetic sensitive query');
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    act(() => {
+      result.current.setQuery('');
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+      defaultRequest.resolve(makePage('default history'));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      queryRequest.reject(new Error('synthetic query rejection'));
+      await Promise.resolve();
+    });
+
+    expect(result.current.query).toBe('');
+    expect(result.current.status).toBe('ready');
+    expect(result.current.items[0]?.preview).toBe('default history');
+    expect(result.current).not.toHaveProperty('error');
+  });
+
+  it('ignores an older rejection after the gateway is replaced', async () => {
+    const firstRequest = deferred<HistoryPage>();
+    const secondRequest = deferred<HistoryPage>();
+    const firstGateway = gatewayWithSearch(() => firstRequest.promise);
+    const secondGateway = gatewayWithSearch(() => secondRequest.promise);
+    const { result, rerender } = renderHook(
+      ({ gateway }) => useHistorySearch(gateway),
+      { initialProps: { gateway: firstGateway } },
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    rerender({ gateway: secondGateway });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+      secondRequest.resolve(makePage('replacement gateway'));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      firstRequest.reject(new Error('synthetic old gateway rejection'));
+      await Promise.resolve();
+    });
+
+    expect(result.current.status).toBe('ready');
+    expect(result.current.items[0]?.preview).toBe('replacement gateway');
+    expect(result.current).not.toHaveProperty('error');
   });
 
   it('exposes a generic error state without returning the rejected error', async () => {
