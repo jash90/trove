@@ -27,6 +27,9 @@ interface AppProps {
   gateway?: ClipboardGateway;
 }
 
+/** Keys that belong to whatever text field has focus, never to the palette. */
+const TEXT_EDITING_KEYS = new Set(['Backspace', 'Delete']);
+
 const shortcutIsBlocked = (
   event: ReactKeyboardEvent<HTMLElement>,
   dialogOpen: boolean,
@@ -40,7 +43,12 @@ const shortcutIsBlocked = (
     target instanceof HTMLTextAreaElement ||
     target instanceof HTMLSelectElement ||
     target.isContentEditable;
-  return ownsTextInput && target.id !== 'history-search';
+  if (!ownsTextInput) return false;
+  // The query field keeps arrow, Enter and Escape navigation so the user can
+  // drive the list without leaving it — but it never surrenders the keys that
+  // edit its own text. Backspace there means "erase a character", and letting
+  // it reach the palette proposes deleting a history entry instead.
+  return target.id !== 'history-search' || TEXT_EDITING_KEYS.has(event.key);
 };
 
 const ClipboardPalette = (): React.JSX.Element => {

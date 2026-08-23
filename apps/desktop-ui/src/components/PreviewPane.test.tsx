@@ -471,7 +471,7 @@ describe('history actions', () => {
     expect(copyEvent).toHaveBeenLastCalledWith(2, false);
   });
 
-  it('supports copy, paste, plain-text, pin, and delete hotkeys from search focus', async () => {
+  it('supports copy, paste, plain-text and pin hotkeys from search focus', async () => {
     const copyEvent = vi.fn(async (_eventId: number, plainText: boolean) => ({
       mode: 'copied' as const,
       plainText,
@@ -493,7 +493,10 @@ describe('history actions', () => {
     expect(copyEvent).toHaveBeenCalledWith(1, false);
     expect(copyEvent).toHaveBeenCalledWith(1, true);
     expect(setPinned).toHaveBeenCalledWith(1, true);
-    expect(screen.getByRole('dialog', { name: 'Usunąć wpis z historii?' })).toBeVisible();
+    // Delete belongs to the query field while it has focus. Proposing to erase
+    // a history entry when the user meant to erase a character is the wrong
+    // trade in a field they type in constantly.
+    expect(screen.queryByRole('dialog', { name: 'Usunąć wpis z historii?' })).toBeNull();
   });
 
   it('preserves copy, paste, and plain-text paste intent in fallback feedback', async () => {
@@ -522,6 +525,37 @@ describe('history actions', () => {
       [1, false],
       [1, true],
     ]);
+  });
+
+  it('lets Backspace edit the query instead of proposing a deletion', async () => {
+    const deleteEvent = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(<App gateway={makeGateway([makeItem(1), makeItem(2)], { deleteEvent })} />);
+    await settleInitialSearch();
+
+    // A row must be selected: the palette only proposes a deletion when there
+    // is something to delete, which is exactly the state the user is in while
+    // typing a query over a populated list.
+    await user.click(screen.getByRole('option', { name: /Synthetic item 1/ }));
+    const search = screen.getByRole('searchbox');
+    await user.click(search);
+    await user.type(search, 'abc');
+    await user.keyboard('{Backspace}');
+
+    expect(search).toHaveValue('ab');
+    expect(screen.queryByRole('dialog', { name: 'Usunąć wpis z historii?' })).toBeNull();
+    expect(deleteEvent).not.toHaveBeenCalled();
+  });
+
+  it('still deletes with Backspace when the query field does not own focus', async () => {
+    const user = userEvent.setup();
+    render(<App gateway={makeGateway([makeItem(1), makeItem(2)])} />);
+    await settleInitialSearch();
+
+    await user.click(screen.getByRole('option', { name: /Synthetic item 1/ }));
+    await user.click(screen.getByRole('button', { name: 'Usuń wpis' }));
+
+    expect(screen.getByRole('dialog', { name: 'Usunąć wpis z historii?' })).toBeVisible();
   });
 
   it('suppresses history hotkeys while a dialog owns focus', async () => {
