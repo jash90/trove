@@ -2122,3 +2122,85 @@ fn source_confidence(value: SourceConfidence) -> &'static str {
         SourceConfidence::Unknown => "unknown",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[cfg(unix)]
+    use clipboard_core::{
+        CaptureInput, ContentFlags, ContentKind, EventFlags, RepresentationInput, SourceConfidence,
+    };
+    #[cfg(unix)]
+    use rusqlite::Connection;
+
+    #[cfg(unix)]
+    use super::{
+        BeginImportRun, CasError, CasStore, ImportSourceKind, StoreError, StoreImportCandidate,
+        begin_import, import_batch, read_import_status,
+    };
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_private_cas_error_in_import_batch_is_not_recorded_as_a_candidate_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut connection = Connection::open_in_memory().unwrap();
+        crate::migrations().apply(&mut connection).unwrap();
+        let run = begin_import(
+            &mut connection,
+            &BeginImportRun {
+                run_id: uuid::Uuid::now_v7(),
+                source_kind: ImportSourceKind::Raycast,
+                source_fingerprint: [7; 32],
+                total_records: 1,
+                candidate_records: 1,
+                initial_failures: Vec::new(),
+            },
+        )
+        .unwrap();
+        let cas = CasStore::new(directory.path().join("synthetic-blobs"));
+        cas.put(b"warmup").unwrap();
+        fs::set_permissions(cas.root(), fs::Permissions::from_mode(0o755)).unwrap();
+        let candidate = StoreImportCandidate {
+            candidate_offset: 0,
+            record_fingerprint: [8; 32],
+            capture: CaptureInput {
+                captured_at_ms: 1_000,
+                kind: ContentKind::Image,
+                primary_mime: "image/png".to_owned(),
+                representations: vec![RepresentationInput {
+                    format_id: "image/png".to_owned(),
+                    bytes: Some(b"synthetic image".to_vec()),
+                    missing_ref: None,
+                }],
+                source_app_id: None,
+                source_app_name: None,
+                source_confidence: SourceConfidence::Unknown,
+                pinned: false,
+                occurrence_count: 1,
+                content_flags: ContentFlags::empty(),
+                event_flags: EventFlags::empty(),
+            },
+            search_text: None,
+            source_app_original: None,
+        };
+
+        let error = import_batch(
+            &mut connection,
+            &cas,
+            run.run_id,
+            run.generation,
+            &[candidate],
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            StoreError::Cas(CasError::PrivateStorageUnavailable)
+        ));
+        let status = read_import_status(&connection, run.run_id).unwrap();
+        assert_eq!(status.next_candidate_offset, 0);
+        assert_eq!(status.failed_records, 0);
+    }
+}

@@ -668,6 +668,33 @@ fn verify_reports_failed_blob_status_when_the_exact_blob_root_is_missing() {
     assert_failed_verification(&output, "blobStatus");
 }
 
+#[cfg(unix)]
+#[test]
+fn verify_reports_private_storage_with_only_the_stable_json_code() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (sandbox, data_dir) = imported_two_source_store();
+    let database = data_dir.join("clipboard.db");
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stderr).unwrap(),
+        json!({"status": "error", "code": "private_storage_unavailable"})
+    );
+    assert_redacted(
+        &output,
+        &[
+            "clipboard.db",
+            "synthetic-data",
+            "sanitized fixture payload",
+        ],
+    );
+    drop(sandbox);
+}
+
 #[test]
 fn verify_reports_failed_blob_status_for_a_missing_cas_blob() {
     let (_sandbox, data_dir) = imported_store_with_cas();

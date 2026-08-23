@@ -9,7 +9,9 @@ use std::{
 };
 
 use clipboard_core::{ContentFlags, ContentKind, canonical_bytes, content_hash};
-use clipboard_store::{CasStore, MAX_CAS_OBJECT_BYTES, ReadOnlyStore, StorageBoundaryLease};
+use clipboard_store::{
+    CasStore, MAX_CAS_OBJECT_BYTES, ReadOnlyStore, StorageBoundaryError, StorageBoundaryLease,
+};
 use rusqlite::{
     Connection, MAIN_DB, OpenFlags,
     backup::{Backup, StepResult},
@@ -74,6 +76,16 @@ struct SourceSummary {
 
 pub(crate) fn verify(data_dir: &Path, expect_records: u64) -> Result<VerifyOutput, CliFailure> {
     let config = verified_read_only_config(data_dir)?;
+    verify_with_boundary(config, expect_records, StorageBoundaryLease::open_read_only)
+}
+
+fn verify_with_boundary(
+    config: clipboard_store::StoreConfig,
+    expect_records: u64,
+    open_boundary: impl FnOnce(
+        &clipboard_store::StoreConfig,
+    ) -> Result<StorageBoundaryLease, StorageBoundaryError>,
+) -> Result<VerifyOutput, CliFailure> {
     let blob_root = config.blob_root().to_path_buf();
     let canonical_data_dir = config
         .database_path()
@@ -83,8 +95,7 @@ pub(crate) fn verify(data_dir: &Path, expect_records: u64) -> Result<VerifyOutpu
     if !exact_blob_root_is_valid(&canonical_data_dir, &blob_root) {
         return Ok(blob_root_failure_output(expect_records));
     }
-    let boundary =
-        Arc::new(StorageBoundaryLease::open_read_only(&config).map_err(boundary_failure)?);
+    let boundary = Arc::new(open_boundary(&config).map_err(boundary_failure)?);
     let store = ReadOnlyStore::open_existing(config.with_storage_boundary(boundary))
         .map_err(store_failure)?;
     let cas = store.cas_store().map_err(store_failure)?;

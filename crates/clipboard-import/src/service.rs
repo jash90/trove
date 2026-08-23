@@ -153,6 +153,10 @@ pub struct ImportWorkerPolicy {
     persistence_gate: Option<Arc<tokio::sync::Notify>>,
     fail_next_persistence: Arc<AtomicBool>,
     invalid_lease_offset_once: Arc<AtomicBool>,
+    #[cfg(test)]
+    force_checkpoint_mismatch_once: Arc<AtomicBool>,
+    #[cfg(test)]
+    failure_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl ImportWorkerPolicy {
@@ -165,6 +169,10 @@ impl ImportWorkerPolicy {
             persistence_gate: None,
             fail_next_persistence: Arc::new(AtomicBool::new(false)),
             invalid_lease_offset_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            force_checkpoint_mismatch_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            failure_hook: None,
         }
     }
 
@@ -179,6 +187,10 @@ impl ImportWorkerPolicy {
             persistence_gate: None,
             fail_next_persistence: Arc::new(AtomicBool::new(false)),
             invalid_lease_offset_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            force_checkpoint_mismatch_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            failure_hook: None,
         }
     }
 
@@ -195,6 +207,10 @@ impl ImportWorkerPolicy {
             persistence_gate: None,
             fail_next_persistence: Arc::new(AtomicBool::new(false)),
             invalid_lease_offset_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            force_checkpoint_mismatch_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            failure_hook: None,
         }
     }
 
@@ -211,6 +227,10 @@ impl ImportWorkerPolicy {
             persistence_gate: Some(persistence_gate),
             fail_next_persistence: Arc::new(AtomicBool::new(false)),
             invalid_lease_offset_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            force_checkpoint_mismatch_once: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            failure_hook: None,
         }
     }
 
@@ -227,6 +247,30 @@ impl ImportWorkerPolicy {
         Self {
             invalid_lease_offset_once: Arc::new(AtomicBool::new(true)),
             ..Self::unbounded()
+        }
+    }
+
+    #[cfg(test)]
+    pub fn fail_marking_with_hook(failure_hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self {
+            failure_hook: Some(failure_hook),
+            ..Self::unbounded()
+        }
+    }
+
+    #[cfg(test)]
+    pub fn checkpoint_mismatch_with_hook(failure_hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self {
+            force_checkpoint_mismatch_once: Arc::new(AtomicBool::new(true)),
+            failure_hook: Some(failure_hook),
+            ..Self::unbounded()
+        }
+    }
+
+    #[cfg(test)]
+    fn before_failure(&self) {
+        if let Some(hook) = &self.failure_hook {
+            hook();
         }
     }
 }
@@ -575,10 +619,15 @@ impl ImportService {
                 };
                 let candidate_bytes = store_candidate_retained_bytes(&candidate);
                 if candidate_bytes > MAX_IMPORT_BATCH_BYTES {
-                    let _ = self
+                    #[cfg(test)]
+                    self.worker_policy.before_failure();
+                    if let Err(error) = self
                         .store
                         .fail_import(run_id, generation, "batch_too_large")
-                        .await;
+                        .await
+                    {
+                        return Err(map_store_error(error));
+                    }
                     return Err(ImportError::service("batch_too_large"));
                 }
                 if !batch.is_empty()
@@ -614,11 +663,26 @@ impl ImportService {
                     return Err(ImportError::service("store_failure"));
                 }
             };
+            #[cfg(test)]
+            let mut outcome = outcome;
+            #[cfg(test)]
+            if self
+                .worker_policy
+                .force_checkpoint_mismatch_once
+                .swap(false, Ordering::AcqRel)
+            {
+                outcome.processed_candidates = outcome.processed_candidates.saturating_sub(1);
+            }
             if outcome.processed_candidates != expected {
-                let _ = self
+                #[cfg(test)]
+                self.worker_policy.before_failure();
+                if let Err(error) = self
                     .store
                     .fail_import(run_id, generation, "checkpoint_failure")
-                    .await;
+                    .await
+                {
+                    return Err(map_store_error(error));
+                }
                 return Err(ImportError::service("checkpoint_failure"));
             }
             completed_batches += 1;
@@ -1253,9 +1317,13 @@ fn import_error_reason(error: &ImportError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::PathBuf, sync::Arc};
 
+    #[cfg(unix)]
+    use clipboard_store::{StorageBoundaryLease, StoreConfig, StoreHandle};
     use serde_json::json;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     use super::*;
 
@@ -1272,6 +1340,200 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_storage_errors_survive_import_lifecycle_boundaries() {
+        let (directory, store, data_dir) = leased_store();
+        let service = ImportService::new(store.clone());
+        let export = synthetic_export();
+
+        make_blob_storage_private(&data_dir);
+        let persistence_error = service.run_to_completion(export.path()).await.unwrap_err();
+        assert_private_service_error(persistence_error);
+        restore_blob_storage(&data_dir);
+
+        let resumable = service.prepare(export.path()).unwrap();
+        let run = service
+            .persist_run(Uuid::now_v7(), &resumable.source)
+            .await
+            .unwrap();
+        make_blob_storage_private(&data_dir);
+        let resume_error = service.resume(run.run_id, export.path()).await.unwrap_err();
+        assert_private_service_error(resume_error);
+        restore_blob_storage(&data_dir);
+        assert_unchanged_failure_accounting(&store, run.run_id);
+
+        let source = source_with_payload(1);
+        let run = service.persist_run(Uuid::now_v7(), &source).await.unwrap();
+
+        make_blob_storage_private(&data_dir);
+        let batch_error = match service
+            .run_worker(
+                run.run_id,
+                run.generation,
+                admitted_source_for_worker(source_with_payload(1)),
+                0,
+            )
+            .await
+        {
+            Ok(_) => panic!("private storage batch failure must be returned"),
+            Err(error) => error,
+        };
+        assert_private_service_error(batch_error);
+        restore_blob_storage(&data_dir);
+        assert_unchanged_failure_accounting(&store, run.run_id);
+
+        let source = empty_source(9);
+        let run = service.persist_run(Uuid::now_v7(), &source).await.unwrap();
+        make_blob_storage_private(&data_dir);
+        let finalize_error = match service
+            .run_worker(
+                run.run_id,
+                run.generation,
+                admitted_source_for_worker(empty_source(9)),
+                0,
+            )
+            .await
+        {
+            Ok(_) => panic!("private storage finalization failure must be returned"),
+            Err(error) => error,
+        };
+        assert_private_service_error(finalize_error);
+        restore_blob_storage(&data_dir);
+        assert_unchanged_failure_accounting(&store, run.run_id);
+        drop(directory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_storage_from_failure_marking_overrides_generic_worker_reasons() {
+        let (directory, store, data_dir) = leased_store();
+        let batch_service = ImportService::with_worker_policy(
+            store.clone(),
+            ImportWorkerPolicy::fail_marking_with_hook(private_storage_hook(data_dir.clone())),
+        );
+        let oversized = source_with_payload(MAX_IMPORT_BATCH_BYTES + 1);
+        let run = batch_service
+            .persist_run(Uuid::now_v7(), &oversized)
+            .await
+            .unwrap();
+        let error = match batch_service
+            .run_worker(
+                run.run_id,
+                run.generation,
+                admitted_source_for_worker(source_with_payload(MAX_IMPORT_BATCH_BYTES + 1)),
+                0,
+            )
+            .await
+        {
+            Ok(_) => panic!("private failure-marking error must be returned"),
+            Err(error) => error,
+        };
+        assert_private_service_error(error);
+        restore_blob_storage(&data_dir);
+        assert_unchanged_failure_accounting(&store, run.run_id);
+
+        let checkpoint_service = ImportService::with_worker_policy(
+            store.clone(),
+            ImportWorkerPolicy::checkpoint_mismatch_with_hook(private_storage_hook(
+                data_dir.clone(),
+            )),
+        );
+        let source = source_with_payload(1);
+        let run = checkpoint_service
+            .persist_run(Uuid::now_v7(), &source)
+            .await
+            .unwrap();
+        let error = match checkpoint_service
+            .run_worker(
+                run.run_id,
+                run.generation,
+                admitted_source_for_worker(source_with_payload(1)),
+                0,
+            )
+            .await
+        {
+            Ok(_) => panic!("private failure-marking error must be returned"),
+            Err(error) => error,
+        };
+        assert_private_service_error(error);
+        restore_blob_storage(&data_dir);
+        assert_unchanged_failure_accounting(&store, run.run_id);
+        drop(directory);
+    }
+
+    #[cfg(unix)]
+    fn leased_store() -> (tempfile::TempDir, StoreHandle, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("synthetic-leased-data");
+        fs::create_dir(&data_dir).unwrap();
+        let config = StoreConfig::new(data_dir.join("history.sqlite"))
+            .with_blob_root(data_dir.join("blobs"));
+        let lease = Arc::new(StorageBoundaryLease::create_writer(&config).unwrap());
+        let store = StoreHandle::open(config.with_storage_boundary(lease)).unwrap();
+        (directory, store, data_dir)
+    }
+
+    #[cfg(unix)]
+    fn synthetic_export() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("clipboard.json"),
+            serde_json::to_vec(&[json!({
+                "createdAt": "2026-08-22T12:00:00Z",
+                "modifiedAt": "2026-08-22T12:00:00Z",
+                "category": "text",
+                "copyCount": 1,
+                "text": "synthetic private storage lifecycle",
+            })])
+            .unwrap(),
+        )
+        .unwrap();
+        directory
+    }
+
+    #[cfg(unix)]
+    fn admitted_source_for_worker(source: PreparedSource) -> PreparedSourceEnvelope {
+        let budget = AdmissionBudget::new(ImportAdmissionLimits::new(
+            1,
+            MAX_PREPARED_SOURCE_BYTES,
+            MAX_PREPARED_SOURCE_BYTES,
+        ));
+        admitted_source(&mut PreparedSessions::default(), &budget, source)
+    }
+
+    #[cfg(unix)]
+    fn private_storage_hook(data_dir: PathBuf) -> Arc<dyn Fn() + Send + Sync> {
+        Arc::new(move || make_blob_storage_private(&data_dir))
+    }
+
+    #[cfg(unix)]
+    fn make_blob_storage_private(data_dir: &std::path::Path) {
+        fs::set_permissions(data_dir.join("blobs"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn restore_blob_storage(data_dir: &std::path::Path) {
+        fs::set_permissions(data_dir.join("blobs"), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn assert_private_service_error(error: ImportError) {
+        assert!(matches!(
+            error,
+            ImportError::Service {
+                reason: "private_storage_unavailable"
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    fn assert_unchanged_failure_accounting(store: &StoreHandle, run_id: Uuid) {
+        let status = store.import_status(run_id).unwrap();
+        assert_eq!(status.failed_records, 0);
+        assert_eq!(status.error_code, None);
     }
 
     #[test]
