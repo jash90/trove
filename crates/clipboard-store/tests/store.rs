@@ -428,6 +428,62 @@ fn exact_revision_four_schema_is_rejected_by_writer_and_read_only_opens() {
 }
 
 #[test]
+fn exact_revision_five_schema_is_rejected_by_concurrent_writer_and_read_only_opens() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("history.sqlite");
+    let blob_root = database_path.with_extension("blobs");
+    fs::create_dir(&blob_root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&blob_root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(include_str!("fixtures/001_3a0fdf4.sql"))
+        .unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+    secure_existing_database(directory.path(), &database_path);
+
+    let database_path = Arc::new(database_path);
+    let release = Arc::new(Barrier::new(5));
+    let mut openers = Vec::new();
+    for _ in 0..4 {
+        let database_path = Arc::clone(&database_path);
+        let release = Arc::clone(&release);
+        openers.push(thread::spawn(move || {
+            release.wait();
+            match StoreHandle::open(StoreConfig::new(database_path.as_path())) {
+                Ok(_) => panic!("revision five unexpectedly opened for writing"),
+                Err(error) => error,
+            }
+        }));
+    }
+    release.wait();
+    let writer_errors = openers
+        .into_iter()
+        .map(|opener| opener.join().unwrap())
+        .collect::<Vec<_>>();
+    let reader_error = match ReadOnlyStore::open_existing(StoreConfig::new(database_path.as_path()))
+    {
+        Ok(_) => panic!("revision five unexpectedly opened read-only"),
+        Err(error) => error,
+    };
+
+    for error in writer_errors.into_iter().chain([reader_error]) {
+        assert!(matches!(error, StoreError::IncompatibleSchema));
+        assert_eq!(
+            error.to_string(),
+            "database schema is incompatible; development reset required"
+        );
+        assert!(!error.to_string().contains("history.sqlite"));
+        assert!(!error.to_string().contains("revision"));
+        assert!(!error.to_string().contains('5'));
+    }
+}
+
+#[test]
 fn fresh_schema_reopens_and_is_validated_on_every_open() {
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("history.sqlite");
@@ -444,6 +500,439 @@ fn fresh_schema_reopens_and_is_validated_on_every_open() {
         Err(error) => error,
     };
     assert!(matches!(error, StoreError::IncompatibleSchema));
+}
+
+#[tokio::test]
+async fn sql_enforces_bounded_semantic_audit_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("history.sqlite");
+    let store = StoreHandle::open(StoreConfig::new(&database_path)).unwrap();
+    store
+        .ingest(text_capture("inline constraint anchor", 1_000))
+        .await
+        .unwrap();
+    let mut compressed = text_capture("compressed constraint anchor", 2_000);
+    compressed.representations[0].bytes = Some(pseudo_random_bytes(5_000));
+    store.ingest(compressed).await.unwrap();
+    let mut missing = text_capture("unused", 3_000);
+    missing.kind = ContentKind::Image;
+    missing.primary_mime = "image/png".to_owned();
+    missing.representations = vec![RepresentationInput {
+        format_id: "image/png".to_owned(),
+        bytes: None,
+        missing_ref: Some("bounded-missing-reference".to_owned()),
+    }];
+    missing.content_flags = ContentFlags::MISSING_PAYLOAD;
+    store.ingest(missing).await.unwrap();
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    let content_id: i64 = connection
+        .query_row("SELECT min(content_id) FROM content", [], |row| row.get(0))
+        .unwrap();
+    let event_id: i64 = connection
+        .query_row(
+            "SELECT event_id FROM event_representation WHERE missing_ref IS NULL LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let missing_event_id: i64 = connection
+        .query_row(
+            "SELECT event_id FROM event_representation WHERE missing_ref IS NOT NULL LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let inline_id: i64 = connection
+        .query_row(
+            "SELECT raw_payload_id FROM raw_payload WHERE storage_kind = 'inline' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let compressed_id: i64 = connection
+        .query_row(
+            "SELECT raw_payload_id FROM raw_payload WHERE storage_kind = 'inline_zstd' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let rejected = |label: &str, result: rusqlite::Result<usize>| {
+        assert!(result.is_err(), "{label} unexpectedly satisfied the schema")
+    };
+
+    for kind in ["text", "link", "image", "file", "color", "code", "html"] {
+        connection
+            .execute(
+                "UPDATE content SET kind = ?1 WHERE content_id = ?2",
+                rusqlite::params![kind, content_id],
+            )
+            .unwrap();
+    }
+    rejected(
+        "unknown content kind",
+        connection.execute(
+            "UPDATE content SET kind = 'binary' WHERE content_id = ?1",
+            [content_id],
+        ),
+    );
+    rejected(
+        "blob content kind",
+        connection.execute(
+            "UPDATE content SET kind = ?1 WHERE content_id = ?2",
+            rusqlite::params![b"text".as_slice(), content_id],
+        ),
+    );
+
+    let mime_at_limit = "ą".repeat(512);
+    connection
+        .execute(
+            "UPDATE content SET primary_mime = ?1 WHERE content_id = ?2",
+            rusqlite::params![mime_at_limit, content_id],
+        )
+        .unwrap();
+    rejected(
+        "empty primary MIME",
+        connection.execute(
+            "UPDATE content SET primary_mime = '' WHERE content_id = ?1",
+            [content_id],
+        ),
+    );
+    rejected(
+        "oversized primary MIME",
+        connection.execute(
+            "UPDATE content SET primary_mime = ?1 WHERE content_id = ?2",
+            rusqlite::params!["ą".repeat(513), content_id],
+        ),
+    );
+    rejected(
+        "blob primary MIME",
+        connection.execute(
+            "UPDATE content SET primary_mime = ?1 WHERE content_id = ?2",
+            rusqlite::params![b"text/plain".as_slice(), content_id],
+        ),
+    );
+
+    connection
+        .execute(
+            "UPDATE event_representation SET format_id = ?1 WHERE event_id = ?2",
+            rusqlite::params!["ą".repeat(512), event_id],
+        )
+        .unwrap();
+    for (label, value) in [
+        ("empty format ID", String::new()),
+        ("oversized format ID", "ą".repeat(513)),
+    ] {
+        rejected(
+            label,
+            connection.execute(
+                "UPDATE event_representation SET format_id = ?1 WHERE event_id = ?2",
+                rusqlite::params![value, event_id],
+            ),
+        );
+    }
+    rejected(
+        "blob format ID",
+        connection.execute(
+            "UPDATE event_representation SET format_id = ?1 WHERE event_id = ?2",
+            rusqlite::params![b"text/plain".as_slice(), event_id],
+        ),
+    );
+
+    connection
+        .execute(
+            "UPDATE event_representation SET missing_ref = ?1 WHERE event_id = ?2",
+            rusqlite::params!["ą".repeat(2_048), missing_event_id],
+        )
+        .unwrap();
+    for (label, value) in [
+        ("empty missing reference", String::new()),
+        ("oversized missing reference", "ą".repeat(2_049)),
+    ] {
+        rejected(
+            label,
+            connection.execute(
+                "UPDATE event_representation SET missing_ref = ?1 WHERE event_id = ?2",
+                rusqlite::params![value, missing_event_id],
+            ),
+        );
+    }
+    rejected(
+        "blob missing reference",
+        connection.execute(
+            "UPDATE event_representation SET missing_ref = ?1 WHERE event_id = ?2",
+            rusqlite::params![b"missing".as_slice(), missing_event_id],
+        ),
+    );
+
+    connection
+        .execute(
+            "UPDATE raw_payload
+             SET inline_payload = zeroblob(4095), original_byte_size = 4095,
+                 stored_byte_size = 4095
+             WHERE raw_payload_id = ?1",
+            [inline_id],
+        )
+        .unwrap();
+    rejected(
+        "text inline payload",
+        connection.execute(
+            "UPDATE raw_payload
+             SET inline_payload = 'raw', original_byte_size = 3, stored_byte_size = 3
+             WHERE raw_payload_id = ?1",
+            [inline_id],
+        ),
+    );
+    rejected(
+        "oversized inline payload",
+        connection.execute(
+            "UPDATE raw_payload
+             SET inline_payload = zeroblob(4096), original_byte_size = 1,
+                 stored_byte_size = 4096
+             WHERE raw_payload_id = ?1",
+            [inline_id],
+        ),
+    );
+
+    connection
+        .execute(
+            "UPDATE raw_payload
+             SET inline_payload = zeroblob(263168), original_byte_size = 262144,
+                 stored_byte_size = 263168
+             WHERE raw_payload_id = ?1",
+            [compressed_id],
+        )
+        .unwrap();
+    rejected(
+        "text inline-zstd payload",
+        connection.execute(
+            "UPDATE raw_payload
+             SET inline_payload = 'compressed', original_byte_size = 4096,
+                 stored_byte_size = 10
+             WHERE raw_payload_id = ?1",
+            [compressed_id],
+        ),
+    );
+    rejected(
+        "inline-zstd payload above compress bound",
+        connection.execute(
+            "UPDATE raw_payload
+             SET inline_payload = zeroblob(263169), original_byte_size = 262144,
+                 stored_byte_size = 263169
+             WHERE raw_payload_id = ?1",
+            [compressed_id],
+        ),
+    );
+
+    let digest = [0x0a_u8; 32];
+    let valid_relpath = format!("0a/{}", "0a".repeat(32));
+    connection
+        .execute(
+            "INSERT INTO raw_payload(
+               raw_digest, storage_kind, inline_payload, blob_relpath,
+               original_byte_size, stored_byte_size
+             ) VALUES (?1, 'cas', NULL, ?2, 1, 1)",
+            rusqlite::params![digest.as_slice(), valid_relpath],
+        )
+        .unwrap();
+    let cas_id = connection.last_insert_rowid();
+    let wrong_path_cases = [
+        ("long CAS path", format!("{valid_relpath}0")),
+        ("uppercase CAS path", valid_relpath.to_uppercase()),
+        ("non-hex CAS path", format!("0a/{}", "g0".repeat(32))),
+        ("wrong CAS separator", format!("0a-{}", "0a".repeat(32))),
+        ("CAS shard mismatch", format!("0b/{}", "0a".repeat(32))),
+    ];
+    for (label, value) in &wrong_path_cases {
+        rejected(
+            label,
+            connection.execute(
+                "UPDATE raw_payload SET blob_relpath = ?1 WHERE raw_payload_id = ?2",
+                rusqlite::params![value, cas_id],
+            ),
+        );
+    }
+    rejected(
+        "blob-typed CAS path",
+        connection.execute(
+            "UPDATE raw_payload SET blob_relpath = ?1 WHERE raw_payload_id = ?2",
+            rusqlite::params![valid_relpath.as_bytes(), cas_id],
+        ),
+    );
+    rejected(
+        "CAS payload size above the storage bound",
+        connection.execute(
+            "UPDATE raw_payload
+             SET original_byte_size = 134217729, stored_byte_size = 134217729
+             WHERE raw_payload_id = ?1",
+            [cas_id],
+        ),
+    );
+
+    let artifact_kind_at_limit = "ą".repeat(32);
+    connection
+        .execute(
+            "INSERT INTO artifact(
+               content_id, artifact_kind, blob_relpath, byte_size, raw_digest, created_at_ms
+             ) VALUES (?1, ?2, ?3, 1, ?4, 1)",
+            rusqlite::params![
+                content_id,
+                artifact_kind_at_limit,
+                valid_relpath,
+                digest.as_slice()
+            ],
+        )
+        .unwrap();
+    let artifact_id = connection.last_insert_rowid();
+    for (label, value) in [
+        ("empty artifact kind", String::new()),
+        ("oversized artifact kind", "ą".repeat(33)),
+    ] {
+        rejected(
+            label,
+            connection.execute(
+                "UPDATE artifact SET artifact_kind = ?1 WHERE artifact_id = ?2",
+                rusqlite::params![value, artifact_id],
+            ),
+        );
+    }
+    rejected(
+        "blob artifact kind",
+        connection.execute(
+            "UPDATE artifact SET artifact_kind = ?1 WHERE artifact_id = ?2",
+            rusqlite::params![b"thumbnail".as_slice(), artifact_id],
+        ),
+    );
+    for (label, value) in &wrong_path_cases {
+        rejected(
+            label,
+            connection.execute(
+                "UPDATE artifact SET blob_relpath = ?1 WHERE artifact_id = ?2",
+                rusqlite::params![value, artifact_id],
+            ),
+        );
+    }
+    rejected(
+        "blob-typed artifact path",
+        connection.execute(
+            "UPDATE artifact SET blob_relpath = ?1 WHERE artifact_id = ?2",
+            rusqlite::params![valid_relpath.as_bytes(), artifact_id],
+        ),
+    );
+    rejected(
+        "artifact size above the storage bound",
+        connection.execute(
+            "UPDATE artifact SET byte_size = 134217729 WHERE artifact_id = ?1",
+            [artifact_id],
+        ),
+    );
+}
+
+#[tokio::test]
+async fn writer_preflight_rejects_unbounded_semantic_metadata_and_payloads() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+    let mut invalid = Vec::new();
+
+    let mut empty_mime = text_capture("empty MIME", 1_000);
+    empty_mime.primary_mime.clear();
+    invalid.push(empty_mime);
+
+    let mut long_mime = text_capture("long MIME", 2_000);
+    long_mime.primary_mime = "ą".repeat(513);
+    invalid.push(long_mime);
+
+    let mut empty_format = text_capture("empty format", 3_000);
+    empty_format.representations[0].format_id.clear();
+    invalid.push(empty_format);
+
+    let mut long_format = text_capture("long format", 4_000);
+    long_format.representations[0].format_id = "ą".repeat(513);
+    invalid.push(long_format);
+
+    let mut empty_missing_ref = text_capture("unused", 5_000);
+    empty_missing_ref.kind = ContentKind::Image;
+    empty_missing_ref.primary_mime = "image/png".to_owned();
+    empty_missing_ref.representations[0] = RepresentationInput {
+        format_id: "image/png".to_owned(),
+        bytes: None,
+        missing_ref: Some(String::new()),
+    };
+    empty_missing_ref.content_flags = ContentFlags::MISSING_PAYLOAD;
+    invalid.push(empty_missing_ref);
+
+    let mut long_missing_ref = text_capture("unused", 6_000);
+    long_missing_ref.kind = ContentKind::Image;
+    long_missing_ref.primary_mime = "image/png".to_owned();
+    long_missing_ref.representations[0] = RepresentationInput {
+        format_id: "image/png".to_owned(),
+        bytes: None,
+        missing_ref: Some("ą".repeat(2_049)),
+    };
+    long_missing_ref.content_flags = ContentFlags::MISSING_PAYLOAD;
+    invalid.push(long_missing_ref);
+
+    for capture in invalid {
+        let error = store.ingest(capture).await.unwrap_err();
+        assert!(matches!(error, StoreError::PayloadStorageUnavailable));
+        assert_eq!(
+            error.to_string(),
+            "payload storage is unavailable until CAS storage is configured"
+        );
+    }
+
+    let mut oversized_payload = text_capture("unused", 7_000);
+    oversized_payload.kind = ContentKind::Image;
+    oversized_payload.primary_mime = "image/png".to_owned();
+    oversized_payload.representations[0] = RepresentationInput {
+        format_id: "image/png".to_owned(),
+        bytes: Some(vec![0_u8; clipboard_store::MAX_CAS_OBJECT_BYTES + 1]),
+        missing_ref: None,
+    };
+    let error = store.ingest(oversized_payload).await.unwrap_err();
+    assert!(matches!(error, StoreError::PayloadStorageUnavailable));
+    assert_eq!(store.stats().unwrap().event_count, 0);
+}
+
+#[tokio::test]
+async fn writer_maps_every_content_kind_to_the_exact_schema_literal() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+    let cases = [
+        (ContentKind::Text, "text"),
+        (ContentKind::Link, "link"),
+        (ContentKind::Image, "image"),
+        (ContentKind::File, "file"),
+        (ContentKind::Color, "color"),
+        (ContentKind::Code, "code"),
+        (ContentKind::Html, "html"),
+    ];
+    for (index, (kind, _)) in cases.iter().enumerate() {
+        let mut capture = text_capture(&format!("kind-{index}"), 10_000 + index as i64);
+        capture.kind = *kind;
+        store.ingest(capture).await.unwrap();
+    }
+
+    let stored = store
+        .with_reader(|connection| {
+            let mut statement =
+                connection.prepare("SELECT kind FROM content ORDER BY content_id")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
+
+    assert_eq!(
+        stored,
+        cases
+            .into_iter()
+            .map(|(_, literal)| literal.to_owned())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

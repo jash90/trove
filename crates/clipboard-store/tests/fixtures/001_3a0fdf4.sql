@@ -1,23 +1,17 @@
 CREATE TABLE schema_identity (
   identity TEXT PRIMARY KEY CHECK(identity = 'clipboard-store'),
-  revision INTEGER NOT NULL CHECK(revision = 6)
+  revision INTEGER NOT NULL CHECK(revision = 5)
 );
 
-INSERT INTO schema_identity(identity, revision) VALUES ('clipboard-store', 6);
+INSERT INTO schema_identity(identity, revision) VALUES ('clipboard-store', 5);
 
 CREATE TABLE content (
   content_id INTEGER PRIMARY KEY,
   content_hash BLOB NOT NULL UNIQUE CHECK(
     typeof(content_hash) = 'blob' AND length(content_hash) = 32
   ),
-  kind TEXT NOT NULL CHECK(
-    typeof(kind) = 'text'
-      AND kind IN ('text', 'link', 'image', 'file', 'color', 'code', 'html')
-  ),
-  primary_mime TEXT NOT NULL CHECK(
-    typeof(primary_mime) = 'text'
-      AND length(CAST(primary_mime AS BLOB)) BETWEEN 1 AND 1024
-  ),
+  kind TEXT NOT NULL,
+  primary_mime TEXT NOT NULL,
   byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
   preview_text TEXT NOT NULL CHECK(
     typeof(preview_text) = 'text'
@@ -35,32 +29,16 @@ CREATE TABLE raw_payload (
   storage_kind TEXT NOT NULL CHECK(storage_kind IN ('inline', 'inline_zstd', 'cas')),
   inline_payload BLOB,
   blob_relpath TEXT,
-  original_byte_size INTEGER NOT NULL CHECK(original_byte_size BETWEEN 0 AND 134217728),
-  stored_byte_size INTEGER NOT NULL CHECK(stored_byte_size BETWEEN 0 AND 134217728),
-  CHECK(
-    blob_relpath IS NULL OR (
-      typeof(blob_relpath) = 'text'
-      AND length(CAST(blob_relpath AS BLOB)) = 67
-      AND substr(blob_relpath, 3, 1) = '/'
-      AND substr(blob_relpath, 1, 2) = lower(substr(hex(raw_digest), 1, 2))
-      AND substr(blob_relpath, 1, 2) NOT GLOB '*[^0-9a-f]*'
-      AND substr(blob_relpath, 4, 64) NOT GLOB '*[^0-9a-f]*'
-    )
-  ),
+  original_byte_size INTEGER NOT NULL CHECK(original_byte_size >= 0),
+  stored_byte_size INTEGER NOT NULL CHECK(stored_byte_size >= 0),
   CHECK(
     (storage_kind = 'inline'
       AND inline_payload IS NOT NULL AND blob_relpath IS NULL
-      AND typeof(inline_payload) = 'blob'
-      AND original_byte_size < 4096
-      AND original_byte_size = stored_byte_size
-      AND stored_byte_size = length(inline_payload)
-      AND length(inline_payload) < 4096)
+      AND original_byte_size < 4096 AND stored_byte_size = length(inline_payload))
     OR (storage_kind = 'inline_zstd'
       AND inline_payload IS NOT NULL AND blob_relpath IS NULL
-      AND typeof(inline_payload) = 'blob'
       AND original_byte_size >= 4096 AND original_byte_size <= 262144
-      AND stored_byte_size = length(inline_payload)
-      AND length(inline_payload) <= 263168)
+      AND stored_byte_size = length(inline_payload))
     OR (storage_kind = 'cas'
       AND inline_payload IS NULL AND blob_relpath IS NOT NULL
       AND stored_byte_size = original_byte_size)
@@ -93,17 +71,9 @@ CREATE TABLE history_event (
 CREATE TABLE event_representation (
   event_id INTEGER NOT NULL REFERENCES history_event(event_id) ON DELETE CASCADE,
   ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
-  format_id TEXT NOT NULL CHECK(
-    typeof(format_id) = 'text'
-      AND length(CAST(format_id AS BLOB)) BETWEEN 1 AND 1024
-  ),
+  format_id TEXT NOT NULL CHECK(length(CAST(format_id AS BLOB)) BETWEEN 1 AND 1024),
   raw_payload_id INTEGER REFERENCES raw_payload(raw_payload_id) ON DELETE RESTRICT,
-  missing_ref TEXT CHECK(
-    missing_ref IS NULL OR (
-      typeof(missing_ref) = 'text'
-      AND length(CAST(missing_ref AS BLOB)) BETWEEN 1 AND 4096
-    )
-  ),
+  missing_ref TEXT,
   CHECK(
     (raw_payload_id IS NOT NULL AND missing_ref IS NULL)
     OR (raw_payload_id IS NULL AND missing_ref IS NOT NULL)
@@ -183,24 +153,13 @@ END;
 CREATE TABLE artifact (
   artifact_id INTEGER PRIMARY KEY,
   content_id INTEGER NOT NULL REFERENCES content(content_id) ON DELETE CASCADE,
-  artifact_kind TEXT NOT NULL CHECK(
-    typeof(artifact_kind) = 'text'
-      AND length(CAST(artifact_kind AS BLOB)) BETWEEN 1 AND 64
-  ),
+  artifact_kind TEXT NOT NULL,
   blob_relpath TEXT NOT NULL,
-  byte_size INTEGER NOT NULL CHECK(byte_size BETWEEN 0 AND 134217728),
+  byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
   raw_digest BLOB NOT NULL CHECK(
     typeof(raw_digest) = 'blob' AND length(raw_digest) = 32
   ),
   created_at_ms INTEGER NOT NULL,
-  CHECK(
-    typeof(blob_relpath) = 'text'
-      AND length(CAST(blob_relpath AS BLOB)) = 67
-      AND substr(blob_relpath, 3, 1) = '/'
-      AND substr(blob_relpath, 1, 2) = lower(substr(hex(raw_digest), 1, 2))
-      AND substr(blob_relpath, 1, 2) NOT GLOB '*[^0-9a-f]*'
-      AND substr(blob_relpath, 4, 64) NOT GLOB '*[^0-9a-f]*'
-  ),
   UNIQUE(content_id, artifact_kind)
 );
 

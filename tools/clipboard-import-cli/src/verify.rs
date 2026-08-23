@@ -8,12 +8,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clipboard_core::{ContentFlags, ContentKind, canonical_bytes, content_hash};
+use clipboard_core::{ContentFlags, ContentKind, canonical_byte_len, content_hash};
 use clipboard_store::{
     CasStore, MAX_CAS_OBJECT_BYTES, ReadOnlyStore, StorageBoundaryError, StorageBoundaryLease,
 };
 use rusqlite::{
-    Connection, MAIN_DB, OpenFlags,
+    Connection, MAIN_DB, OpenFlags, OptionalExtension,
     backup::{Backup, StepResult},
 };
 use serde::Serialize;
@@ -125,6 +125,7 @@ fn blob_root_failure_output(expect_records: u64) -> VerifyOutput {
 }
 
 struct VerificationSnapshot {
+    invalidated: bool,
     physical_content_count: i64,
     event_count: i64,
     indexed_document_count: i64,
@@ -137,6 +138,26 @@ struct VerificationSnapshot {
     logical_ok: bool,
     blob_ok: bool,
     fts_ok: bool,
+}
+
+impl VerificationSnapshot {
+    fn invalidated() -> Self {
+        Self {
+            invalidated: true,
+            physical_content_count: 0,
+            event_count: 0,
+            indexed_document_count: 0,
+            missing_payload_count: 0,
+            kinds: Vec::new(),
+            sources: Vec::new(),
+            image_counts: BTreeMap::new(),
+            integrity_ok: false,
+            run_status_ok: false,
+            logical_ok: false,
+            blob_ok: false,
+            fts_ok: false,
+        }
+    }
 }
 
 struct RawKindCount {
@@ -156,31 +177,64 @@ struct RawSourceSummary {
     declared_imported_records: i64,
 }
 
+struct ScalarClaims {
+    physical_content_count: i64,
+    event_count: i64,
+    indexed_document_count: i64,
+    missing_payload_count: i64,
+    run_status_ok: bool,
+}
+
+enum EpochRead<T> {
+    Stable(T),
+    Changed,
+}
+
 fn read_verification_snapshot(
     connection: &Connection,
     cas: &CasStore,
 ) -> rusqlite::Result<VerificationSnapshot> {
-    let (mut snapshot, stable) = read_stable_snapshot(connection, |connection| {
-        read_verification_snapshot_inner(connection, cas)
-    })?;
-    snapshot.logical_ok &= stable;
-    Ok(snapshot)
+    read_verification_snapshot_with_observer(connection, cas, &mut |_, _| {})
 }
 
-fn read_stable_snapshot<T>(
+fn read_verification_snapshot_with_observer(
     connection: &Connection,
+    cas: &CasStore,
+    observe: &mut impl FnMut(VerificationPhase, &Connection),
+) -> rusqlite::Result<VerificationSnapshot> {
+    if !connection.is_autocommit() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let epoch = data_version(connection)?;
+    read_verification_snapshot_inner(connection, cas, epoch, observe)
+}
+
+fn data_version(connection: &Connection) -> rusqlite::Result<i64> {
+    connection.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+}
+
+fn epoch_is_current(connection: &Connection, epoch: i64) -> rusqlite::Result<bool> {
+    Ok(connection.is_autocommit() && data_version(connection)? == epoch)
+}
+
+fn read_short_snapshot<T>(
+    connection: &Connection,
+    epoch: i64,
     read: impl FnOnce(&Connection) -> rusqlite::Result<T>,
-) -> rusqlite::Result<(T, bool)> {
-    let data_version_before =
-        connection.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
+) -> rusqlite::Result<EpochRead<T>> {
+    if !epoch_is_current(connection, epoch)? {
+        return Ok(EpochRead::Changed);
+    }
     connection.execute_batch("BEGIN DEFERRED")?;
-    let snapshot = read(connection);
+    let value = read(connection);
     let rollback = connection.execute_batch("ROLLBACK");
-    match (snapshot, rollback) {
-        (Ok(snapshot), Ok(())) => {
-            let data_version_after =
-                connection.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
-            Ok((snapshot, data_version_before == data_version_after))
+    match (value, rollback) {
+        (Ok(value), Ok(())) => {
+            if epoch_is_current(connection, epoch)? {
+                Ok(EpochRead::Stable(value))
+            } else {
+                Ok(EpochRead::Changed)
+            }
         }
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
@@ -189,52 +243,116 @@ fn read_stable_snapshot<T>(
 fn read_verification_snapshot_inner(
     connection: &Connection,
     cas: &CasStore,
+    epoch: i64,
+    observe: &mut impl FnMut(VerificationPhase, &Connection),
 ) -> rusqlite::Result<VerificationSnapshot> {
-    let physical_content_count =
-        connection.query_row("SELECT count(*) FROM content", [], |row| row.get(0))?;
-    let event_count =
-        connection.query_row("SELECT count(*) FROM history_event", [], |row| row.get(0))?;
-    let indexed_document_count =
-        connection.query_row("SELECT count(*) FROM search_doc", [], |row| row.get(0))?;
     let missing_mask = i64::from(ContentFlags::MISSING_PAYLOAD.bits());
-    let missing_payload_count = connection.query_row(
-        "SELECT count(*)
-         FROM history_event he
-         JOIN content c ON c.content_id = he.content_id
-         WHERE (c.flags & ?1) != 0",
-        [missing_mask],
-        |row| row.get(0),
-    )?;
-    let run_status_ok = connection.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM import_run WHERE status != 'completed')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
-    let kinds = read_kind_counts(connection, missing_mask)?;
-    let sources = read_latest_sources(connection)?;
-    let image_counts = read_source_image_counts(connection, missing_mask)?;
-    let relations_ok = logical_relations_are_coherent(connection, event_count)?;
-    let audit = semantic_storage_is_coherent(connection, cas)?;
+    let EpochRead::Stable(claims) = read_short_snapshot(connection, epoch, |connection| {
+        read_scalar_claims(connection, missing_mask)
+    })?
+    else {
+        return Ok(VerificationSnapshot::invalidated());
+    };
+    let EpochRead::Stable(kinds) = read_short_snapshot(connection, epoch, |connection| {
+        read_kind_counts(connection, missing_mask)
+    })?
+    else {
+        return Ok(VerificationSnapshot::invalidated());
+    };
+    let EpochRead::Stable(sources) = read_short_snapshot(connection, epoch, read_latest_sources)?
+    else {
+        return Ok(VerificationSnapshot::invalidated());
+    };
+    let EpochRead::Stable(image_counts) = read_short_snapshot(connection, epoch, |connection| {
+        read_source_image_counts(connection, missing_mask)
+    })?
+    else {
+        return Ok(VerificationSnapshot::invalidated());
+    };
+    let EpochRead::Stable(relations_ok) = read_short_snapshot(connection, epoch, |connection| {
+        logical_relations_are_coherent(connection, claims.event_count)
+    })?
+    else {
+        return Ok(VerificationSnapshot::invalidated());
+    };
+    let EpochRead::Stable(shape_ok) =
+        read_short_snapshot(connection, epoch, semantic_storage_shape_is_coherent)?
+    else {
+        return Ok(VerificationSnapshot::invalidated());
+    };
+    let EpochRead::Stable(audit) =
+        semantic_storage_is_coherent(connection, cas, epoch, shape_ok, observe)?
+    else {
+        return Ok(VerificationSnapshot::invalidated());
+    };
     let logical_ok = relations_ok && audit.logical_ok;
+    observe(VerificationPhase::Integrity, connection);
+    if !epoch_is_current(connection, epoch)? {
+        return Ok(VerificationSnapshot::invalidated());
+    }
     let integrity_ok = connection
         .query_row("PRAGMA integrity_check(1)", [], |row| {
             row.get::<_, String>(0)
         })
         .is_ok_and(|status| status == "ok");
-    let fts_ok = fts_is_coherent(connection, indexed_document_count);
+    if !epoch_is_current(connection, epoch)? {
+        return Ok(VerificationSnapshot::invalidated());
+    }
+    observe(VerificationPhase::Fts, connection);
+    if !epoch_is_current(connection, epoch)? {
+        return Ok(VerificationSnapshot::invalidated());
+    }
+    let fts_ok = fts_is_coherent(connection, claims.indexed_document_count);
+    if !epoch_is_current(connection, epoch)? {
+        return Ok(VerificationSnapshot::invalidated());
+    }
     Ok(VerificationSnapshot {
-        physical_content_count,
-        event_count,
-        indexed_document_count,
-        missing_payload_count,
+        invalidated: false,
+        physical_content_count: claims.physical_content_count,
+        event_count: claims.event_count,
+        indexed_document_count: claims.indexed_document_count,
+        missing_payload_count: claims.missing_payload_count,
         kinds,
         sources,
         image_counts,
         integrity_ok,
-        run_status_ok,
+        run_status_ok: claims.run_status_ok,
         logical_ok,
         blob_ok: audit.blob_ok,
         fts_ok,
+    })
+}
+
+fn read_scalar_claims(
+    connection: &Connection,
+    missing_mask: i64,
+) -> rusqlite::Result<ScalarClaims> {
+    Ok(ScalarClaims {
+        physical_content_count: connection.query_row(
+            "SELECT count(*) FROM content",
+            [],
+            |row| row.get(0),
+        )?,
+        event_count: connection
+            .query_row("SELECT count(*) FROM history_event", [], |row| row.get(0))?,
+        indexed_document_count: connection.query_row(
+            "SELECT count(*) FROM search_doc",
+            [],
+            |row| row.get(0),
+        )?,
+        missing_payload_count: connection.query_row(
+            "SELECT count(*)
+             FROM history_event he
+             JOIN content c ON c.content_id = he.content_id
+             WHERE (c.flags & ?1) != 0",
+            [missing_mask],
+            |row| row.get(0),
+        )?,
+        run_status_ok: connection.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM import_run WHERE status != 'completed')",
+            [],
+            |row| row.get(0),
+        )?,
     })
 }
 
@@ -242,6 +360,16 @@ fn read_verification_snapshot_inner(
 struct AuditStatus {
     logical_ok: bool,
     blob_ok: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VerificationPhase {
+    AfterMetadataPage,
+    Cas,
+    DecodeHash,
+    Fts,
+    Integrity,
+    PayloadFetch,
 }
 
 impl AuditStatus {
@@ -258,11 +386,8 @@ impl AuditStatus {
     }
 }
 
-fn semantic_storage_is_coherent(
-    connection: &Connection,
-    cas: &CasStore,
-) -> rusqlite::Result<AuditStatus> {
-    let shape_ok = connection.query_row(
+fn semantic_storage_shape_is_coherent(connection: &Connection) -> rusqlite::Result<bool> {
+    connection.query_row(
         "SELECT
            NOT EXISTS(
              SELECT 1 FROM history_event he
@@ -302,226 +427,720 @@ fn semantic_storage_is_coherent(
                       AND rp.storage_kind != 'inline_zstd')
                   OR (rp.original_byte_size > 262144 AND rp.storage_kind != 'cas')
                 ))
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM content
+             WHERE typeof(content_hash) != 'blob' OR length(content_hash) != 32
+                OR typeof(kind) != 'text'
+                OR kind NOT IN ('text', 'link', 'image', 'file', 'color', 'code', 'html')
+                OR typeof(primary_mime) != 'text'
+                OR length(CAST(primary_mime AS BLOB)) NOT BETWEEN 1 AND 1024
+                OR typeof(byte_size) != 'integer' OR byte_size < 0
+                OR typeof(flags) != 'integer'
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM event_representation
+             WHERE typeof(format_id) != 'text'
+                OR length(CAST(format_id AS BLOB)) NOT BETWEEN 1 AND 1024
+                OR (missing_ref IS NOT NULL AND (
+                     typeof(missing_ref) != 'text'
+                     OR length(CAST(missing_ref AS BLOB)) NOT BETWEEN 1 AND 4096
+                ))
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM raw_payload
+             WHERE typeof(raw_digest) != 'blob' OR length(raw_digest) != 32
+                OR typeof(storage_kind) != 'text'
+                OR storage_kind NOT IN ('inline', 'inline_zstd', 'cas')
+                OR typeof(original_byte_size) != 'integer'
+                OR original_byte_size NOT BETWEEN 0 AND 134217728
+                OR typeof(stored_byte_size) != 'integer'
+                OR stored_byte_size NOT BETWEEN 0 AND 134217728
+                OR NOT (
+                  (storage_kind = 'inline'
+                    AND typeof(inline_payload) = 'blob' AND blob_relpath IS NULL
+                    AND original_byte_size < 4096
+                    AND original_byte_size = stored_byte_size
+                    AND stored_byte_size = length(inline_payload)
+                    AND length(inline_payload) < 4096)
+                  OR (storage_kind = 'inline_zstd'
+                    AND typeof(inline_payload) = 'blob' AND blob_relpath IS NULL
+                    AND original_byte_size BETWEEN 4096 AND 262144
+                    AND stored_byte_size = length(inline_payload)
+                    AND length(inline_payload) <= 263168)
+                  OR (storage_kind = 'cas'
+                    AND inline_payload IS NULL
+                    AND typeof(blob_relpath) = 'text'
+                    AND length(CAST(blob_relpath AS BLOB)) = 67
+                    AND substr(blob_relpath, 3, 1) = '/'
+                    AND substr(blob_relpath, 1, 2) NOT GLOB '*[^0-9a-f]*'
+                    AND substr(blob_relpath, 4, 64) NOT GLOB '*[^0-9a-f]*'
+                    AND substr(blob_relpath, 1, 2) = substr(blob_relpath, 4, 2)
+                    AND stored_byte_size = original_byte_size)
+                )
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM artifact
+             WHERE typeof(artifact_kind) != 'text'
+                OR length(CAST(artifact_kind AS BLOB)) NOT BETWEEN 1 AND 64
+                OR typeof(blob_relpath) != 'text'
+                OR length(CAST(blob_relpath AS BLOB)) != 67
+                OR substr(blob_relpath, 3, 1) != '/'
+                OR substr(blob_relpath, 1, 2) GLOB '*[^0-9a-f]*'
+                OR substr(blob_relpath, 4, 64) GLOB '*[^0-9a-f]*'
+                OR substr(blob_relpath, 1, 2) != substr(blob_relpath, 4, 2)
+                OR typeof(byte_size) != 'integer'
+                OR byte_size NOT BETWEEN 0 AND 134217728
+                OR typeof(raw_digest) != 'blob' OR length(raw_digest) != 32
            )",
         [],
         |row| row.get::<_, bool>(0),
-    )?;
+    )
+}
+
+fn semantic_storage_is_coherent(
+    connection: &Connection,
+    cas: &CasStore,
+    epoch: i64,
+    shape_ok: bool,
+    observe: &mut impl FnMut(VerificationPhase, &Connection),
+) -> rusqlite::Result<EpochRead<AuditStatus>> {
     let mut status = AuditStatus {
         logical_ok: shape_ok,
         blob_ok: true,
     };
-    status.merge(audit_raw_payload_pages(connection, cas)?);
-    status.merge(audit_event_primary_pages(connection, cas)?);
-    status.merge(audit_artifact_pages(connection, cas)?);
-    Ok(status)
+    let EpochRead::Stable(raw_status) =
+        audit_raw_payload_pages_with_observer(connection, cas, epoch, observe)?
+    else {
+        return Ok(EpochRead::Changed);
+    };
+    status.merge(raw_status);
+    let EpochRead::Stable(primary_status) =
+        audit_event_primary_pages(connection, cas, epoch, observe)?
+    else {
+        return Ok(EpochRead::Changed);
+    };
+    status.merge(primary_status);
+    let EpochRead::Stable(artifact_status) = audit_artifact_pages(connection, cas, epoch, observe)?
+    else {
+        return Ok(EpochRead::Changed);
+    };
+    status.merge(artifact_status);
+    Ok(EpochRead::Stable(status))
 }
 
-fn audit_raw_payload_pages(
+struct RawPayloadMetadata {
+    id: i64,
+    digest_hex: Option<String>,
+    storage_kind: Option<String>,
+    inline_type: String,
+    inline_length: Option<i64>,
+    blob_path_type: String,
+    blob_path_length: Option<i64>,
+    blob_relpath: Option<Vec<u8>>,
+    original_size: Option<i64>,
+    stored_size: Option<i64>,
+}
+
+fn audit_raw_payload_pages_with_observer(
     connection: &Connection,
     cas: &CasStore,
-) -> rusqlite::Result<AuditStatus> {
+    epoch: i64,
+    observe: &mut impl FnMut(VerificationPhase, &Connection),
+) -> rusqlite::Result<EpochRead<AuditStatus>> {
     let mut status = AuditStatus::healthy();
     let mut last_id = 0_i64;
     loop {
-        let mut statement = connection.prepare(
-            "SELECT raw_payload_id, raw_digest, storage_kind, inline_payload, blob_relpath,
-                    original_byte_size, stored_byte_size
-             FROM raw_payload
-             WHERE raw_payload_id > ?1
-             ORDER BY raw_payload_id
-             LIMIT ?2",
-        )?;
-        let mut rows =
-            statement.query(rusqlite::params![last_id, VERIFICATION_REFERENCE_PAGE_SIZE])?;
-        let mut page_entries = 0_i64;
-        while let Some(row) = rows.next()? {
-            last_id = row.get(0)?;
-            page_entries += 1;
-            let raw_digest = row.get::<_, Vec<u8>>(1)?;
-            let storage_kind = row.get::<_, String>(2)?;
-            let inline_payload = row.get::<_, Option<Vec<u8>>>(3)?;
-            let blob_relpath = row.get::<_, Option<String>>(4)?;
-            let original_size = row.get::<_, i64>(5)?;
-            let stored_size = row.get::<_, i64>(6)?;
-            let Some(original_size) = valid_object_size(original_size) else {
+        let EpochRead::Stable(page) = read_short_snapshot(connection, epoch, |connection| {
+            read_raw_payload_metadata_page(connection, last_id)
+        })?
+        else {
+            return Ok(EpochRead::Changed);
+        };
+        observe(VerificationPhase::AfterMetadataPage, connection);
+        if !epoch_is_current(connection, epoch)? {
+            return Ok(EpochRead::Changed);
+        }
+        let page_is_full = page.len() == VERIFICATION_REFERENCE_PAGE_SIZE as usize;
+        for metadata in page {
+            last_id = metadata.id;
+            let digest = metadata.digest_hex.as_deref().and_then(decode_digest_hex);
+            let original_size = metadata.original_size.and_then(valid_object_size);
+            let stored_size = metadata.stored_size.and_then(valid_object_size);
+            let (Some(digest), Some(original_size), Some(stored_size)) =
+                (digest, original_size, stored_size)
+            else {
                 status.logical_ok = false;
                 continue;
             };
-            let Some(stored_size) = valid_object_size(stored_size) else {
-                status.logical_ok = false;
-                continue;
-            };
-            match storage_kind.as_str() {
-                "inline" => {
-                    let valid = blob_relpath.is_none()
+            let relpath = metadata
+                .blob_relpath
+                .and_then(|bytes| String::from_utf8(bytes).ok());
+            match metadata.storage_kind.as_deref() {
+                Some("inline") => {
+                    let metadata_valid = metadata.inline_type == "blob"
+                        && metadata.blob_path_type == "null"
+                        && metadata.blob_path_length.is_none()
+                        && relpath.is_none()
                         && original_size < 4 * 1024
-                        && inline_payload.as_ref().is_some_and(|bytes| {
-                            bytes.len() == original_size
-                                && bytes.len() == stored_size
-                                && raw_digest.as_slice() == blake3::hash(bytes).as_bytes()
-                        });
-                    status.logical_ok &= valid;
+                        && metadata
+                            .inline_length
+                            .and_then(|length| usize::try_from(length).ok())
+                            == Some(original_size)
+                        && stored_size == original_size;
+                    let Some(payload) = (if metadata_valid {
+                        read_bounded_inline_payload(
+                            connection,
+                            metadata.id,
+                            "inline",
+                            original_size,
+                            stored_size,
+                            observe,
+                        )?
+                    } else {
+                        None
+                    }) else {
+                        status.logical_ok = false;
+                        continue;
+                    };
+                    observe(VerificationPhase::DecodeHash, connection);
+                    if !epoch_is_current(connection, epoch)? {
+                        return Ok(EpochRead::Changed);
+                    }
+                    status.logical_ok &= digest.as_slice() == blake3::hash(&payload).as_bytes();
                 }
-                "inline_zstd" => {
-                    let decoded = inline_payload.as_deref().and_then(|bytes| {
-                        (blob_relpath.is_none()
-                            && (4 * 1024..=256 * 1024).contains(&original_size)
-                            && bytes.len() == stored_size)
-                            .then(|| decode_exact_zstd(bytes, original_size))
-                            .flatten()
-                    });
-                    status.logical_ok &= decoded.as_ref().is_some_and(|bytes| {
-                        raw_digest.as_slice() == blake3::hash(bytes).as_bytes()
-                    });
+                Some("inline_zstd") => {
+                    let metadata_valid = metadata.inline_type == "blob"
+                        && metadata.blob_path_type == "null"
+                        && metadata.blob_path_length.is_none()
+                        && relpath.is_none()
+                        && (4 * 1024..=256 * 1024).contains(&original_size)
+                        && stored_size <= 263_168
+                        && metadata
+                            .inline_length
+                            .and_then(|length| usize::try_from(length).ok())
+                            == Some(stored_size);
+                    let Some(payload) = (if metadata_valid {
+                        read_bounded_inline_payload(
+                            connection,
+                            metadata.id,
+                            "inline_zstd",
+                            original_size,
+                            stored_size,
+                            observe,
+                        )?
+                    } else {
+                        None
+                    }) else {
+                        status.logical_ok = false;
+                        continue;
+                    };
+                    observe(VerificationPhase::DecodeHash, connection);
+                    if !epoch_is_current(connection, epoch)? {
+                        return Ok(EpochRead::Changed);
+                    }
+                    let decoded = decode_exact_zstd(&payload, original_size);
+                    status.logical_ok &= decoded
+                        .as_ref()
+                        .is_some_and(|bytes| digest.as_slice() == blake3::hash(bytes).as_bytes());
                 }
-                "cas" => {
-                    let valid_shape = inline_payload.is_none()
+                Some("cas") => {
+                    let valid_shape = metadata.inline_type == "null"
+                        && metadata.inline_length.is_none()
                         && original_size == stored_size
-                        && blob_relpath
-                            .as_ref()
-                            .is_some_and(|relpath| digest_matches_relpath(&raw_digest, relpath));
-                    let valid_blob = valid_shape
-                        && blob_relpath.as_ref().is_some_and(|relpath| {
-                            cas.verify(relpath, original_size as u64).is_ok()
-                        });
+                        && metadata.blob_path_type == "text"
+                        && metadata.blob_path_length == Some(67)
+                        && relpath
+                            .as_deref()
+                            .is_some_and(|path| digest_matches_relpath(&digest, path));
+                    let valid_blob = if let Some(path) = relpath.as_deref().filter(|_| valid_shape)
+                    {
+                        observe(VerificationPhase::Cas, connection);
+                        if !epoch_is_current(connection, epoch)? {
+                            return Ok(EpochRead::Changed);
+                        }
+                        cas.verify(path, original_size as u64).is_ok()
+                    } else {
+                        false
+                    };
                     status.logical_ok &= valid_blob;
                     status.blob_ok &= valid_blob;
                 }
                 _ => status.logical_ok = false,
             }
         }
-        if page_entries < VERIFICATION_REFERENCE_PAGE_SIZE {
+        if !page_is_full {
             break;
         }
     }
-    Ok(status)
+    Ok(EpochRead::Stable(status))
+}
+
+fn read_raw_payload_metadata_page(
+    connection: &Connection,
+    last_id: i64,
+) -> rusqlite::Result<Vec<RawPayloadMetadata>> {
+    let mut statement = connection.prepare(
+        "SELECT raw_payload_id,
+                CASE WHEN typeof(raw_digest) = 'blob' AND length(raw_digest) = 32
+                     THEN hex(raw_digest) END,
+                CASE WHEN typeof(storage_kind) = 'text'
+                               AND storage_kind IN ('inline', 'inline_zstd', 'cas')
+                     THEN storage_kind END,
+                typeof(inline_payload), length(inline_payload),
+                typeof(blob_relpath), length(CAST(blob_relpath AS BLOB)),
+                CASE WHEN typeof(blob_relpath) = 'text'
+                               AND length(CAST(blob_relpath AS BLOB)) = 67
+                     THEN CAST(blob_relpath AS BLOB) END,
+                CASE WHEN typeof(original_byte_size) = 'integer'
+                     THEN original_byte_size END,
+                CASE WHEN typeof(stored_byte_size) = 'integer'
+                     THEN stored_byte_size END
+         FROM raw_payload
+         WHERE raw_payload_id > ?1
+         ORDER BY raw_payload_id
+         LIMIT ?2",
+    )?;
+    statement
+        .query_map(
+            rusqlite::params![last_id, VERIFICATION_REFERENCE_PAGE_SIZE],
+            |row| {
+                Ok(RawPayloadMetadata {
+                    id: row.get(0)?,
+                    digest_hex: row.get(1)?,
+                    storage_kind: row.get(2)?,
+                    inline_type: row.get(3)?,
+                    inline_length: row.get(4)?,
+                    blob_path_type: row.get(5)?,
+                    blob_path_length: row.get(6)?,
+                    blob_relpath: row.get(7)?,
+                    original_size: row.get(8)?,
+                    stored_size: row.get(9)?,
+                })
+            },
+        )?
+        .collect()
+}
+
+fn read_bounded_inline_payload(
+    connection: &Connection,
+    raw_payload_id: i64,
+    storage_kind: &str,
+    original_size: usize,
+    stored_size: usize,
+    observe: &mut impl FnMut(VerificationPhase, &Connection),
+) -> rusqlite::Result<Option<Vec<u8>>> {
+    observe(VerificationPhase::PayloadFetch, connection);
+    connection
+        .query_row(
+            "SELECT inline_payload
+             FROM raw_payload
+             WHERE raw_payload_id = ?1
+               AND storage_kind = ?2
+               AND typeof(inline_payload) = 'blob'
+               AND length(inline_payload) = ?3
+               AND blob_relpath IS NULL
+               AND original_byte_size = ?4
+               AND stored_byte_size = ?3",
+            rusqlite::params![
+                raw_payload_id,
+                storage_kind,
+                i64::try_from(stored_size).unwrap_or(i64::MAX),
+                i64::try_from(original_size).unwrap_or(i64::MAX),
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+}
+
+fn decode_digest_hex(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 || !value.is_ascii() {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(digest)
+}
+
+struct PrimaryMetadata {
+    event_id: i64,
+    kind: Option<String>,
+    primary_mime: Option<Vec<u8>>,
+    content_hash_hex: Option<String>,
+    content_size: Option<i64>,
+    flags: Option<i64>,
+    representation_event_id: Option<i64>,
+    raw_payload_id: Option<i64>,
+    missing_ref_type: String,
+    missing_ref_length: Option<i64>,
+    missing_ref: Option<Vec<u8>>,
+    storage_kind: Option<String>,
+    inline_type: String,
+    inline_length: Option<i64>,
+    blob_path_type: String,
+    blob_path_length: Option<i64>,
+    blob_relpath: Option<Vec<u8>>,
+    original_size: Option<i64>,
+    stored_size: Option<i64>,
 }
 
 fn audit_event_primary_pages(
     connection: &Connection,
     cas: &CasStore,
-) -> rusqlite::Result<AuditStatus> {
+    epoch: i64,
+    observe: &mut impl FnMut(VerificationPhase, &Connection),
+) -> rusqlite::Result<EpochRead<AuditStatus>> {
     let mut status = AuditStatus::healthy();
     let mut last_event_id = 0_i64;
     loop {
-        let mut statement = connection.prepare(
-            "SELECT he.event_id, c.kind, c.primary_mime, c.content_hash, c.byte_size, c.flags,
-                    er.raw_payload_id, er.missing_ref, rp.storage_kind, rp.inline_payload,
-                    rp.blob_relpath, rp.original_byte_size, rp.stored_byte_size
-             FROM history_event he
-             JOIN content c ON c.content_id = he.content_id
-             LEFT JOIN event_representation er
-               ON er.event_id = he.event_id AND er.ordinal = 0
-             LEFT JOIN raw_payload rp ON rp.raw_payload_id = er.raw_payload_id
-             WHERE he.event_id > ?1
-             ORDER BY he.event_id
-             LIMIT ?2",
-        )?;
-        let mut rows = statement.query(rusqlite::params![
-            last_event_id,
-            VERIFICATION_REFERENCE_PAGE_SIZE
-        ])?;
-        let mut page_entries = 0_i64;
-        while let Some(row) = rows.next()? {
-            last_event_id = row.get(0)?;
-            page_entries += 1;
-            let kind = parse_content_kind(&row.get::<_, String>(1)?);
-            let primary_mime = row.get::<_, String>(2)?;
-            let stored_content_hash = row.get::<_, Vec<u8>>(3)?;
-            let content_size = row.get::<_, i64>(4)?;
-            let flags = row.get::<_, i64>(5)?;
-            let raw_payload_id = row.get::<_, Option<i64>>(6)?;
-            let missing_ref = row.get::<_, Option<String>>(7)?;
-            let Some(kind) = kind else {
+        let EpochRead::Stable(page) = read_short_snapshot(connection, epoch, |connection| {
+            read_primary_metadata_page(connection, last_event_id)
+        })?
+        else {
+            return Ok(EpochRead::Changed);
+        };
+        observe(VerificationPhase::AfterMetadataPage, connection);
+        if !epoch_is_current(connection, epoch)? {
+            return Ok(EpochRead::Changed);
+        }
+        let page_is_full = page.len() == VERIFICATION_REFERENCE_PAGE_SIZE as usize;
+        for metadata in page {
+            last_event_id = metadata.event_id;
+            let kind = metadata.kind.as_deref().and_then(parse_content_kind);
+            let primary_mime = metadata
+                .primary_mime
+                .as_deref()
+                .and_then(|value| std::str::from_utf8(value).ok());
+            let stored_content_hash = metadata
+                .content_hash_hex
+                .as_deref()
+                .and_then(decode_digest_hex);
+            let flags = metadata.flags.and_then(valid_content_flags);
+            let content_size = metadata
+                .content_size
+                .and_then(|value| usize::try_from(value).ok());
+            let (
+                Some(kind),
+                Some(primary_mime),
+                Some(stored_content_hash),
+                Some(flags),
+                Some(content_size),
+            ) = (kind, primary_mime, stored_content_hash, flags, content_size)
+            else {
                 status.logical_ok = false;
                 continue;
             };
-            let Some(flags) = valid_content_flags(flags) else {
+            if metadata.representation_event_id.is_none() {
                 status.logical_ok = false;
                 continue;
-            };
-            if raw_payload_id.is_none() {
-                let valid = missing_ref
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty())
+            }
+            let missing_ref = metadata
+                .missing_ref
+                .as_deref()
+                .and_then(|value| std::str::from_utf8(value).ok());
+            if metadata.raw_payload_id.is_none() {
+                let metadata_valid = metadata.missing_ref_type == "text"
+                    && metadata
+                        .missing_ref_length
+                        .is_some_and(|length| (1..=4_096).contains(&length))
+                    && missing_ref.is_some_and(|value| !value.is_empty())
                     && flags.contains(ContentFlags::MISSING_PAYLOAD)
-                    && content_size == 0
-                    && stored_content_hash.as_slice()
-                        == missing_content_hash(
-                            kind,
-                            &primary_mime,
-                            missing_ref.as_deref().unwrap(),
-                        );
-                status.logical_ok &= valid;
+                    && content_size == 0;
+                if !metadata_valid {
+                    status.logical_ok = false;
+                    continue;
+                }
+                observe(VerificationPhase::DecodeHash, connection);
+                if !epoch_is_current(connection, epoch)? {
+                    return Ok(EpochRead::Changed);
+                }
+                status.logical_ok &= stored_content_hash
+                    == missing_content_hash(kind, primary_mime, missing_ref.unwrap());
                 continue;
             }
-            if missing_ref.is_some() || flags.contains(ContentFlags::MISSING_PAYLOAD) {
+            if metadata.missing_ref_type != "null"
+                || metadata.missing_ref_length.is_some()
+                || missing_ref.is_some()
+                || flags.contains(ContentFlags::MISSING_PAYLOAD)
+            {
                 status.logical_ok = false;
                 continue;
             }
-            let storage_kind = row.get::<_, Option<String>>(8)?;
-            let inline_payload = row.get::<_, Option<Vec<u8>>>(9)?;
-            let blob_relpath = row.get::<_, Option<String>>(10)?;
-            let original_size = row.get::<_, Option<i64>>(11)?;
-            let stored_size = row.get::<_, Option<i64>>(12)?;
-            let Some(bytes) = primary_payload_bytes(
-                cas,
-                storage_kind.as_deref(),
-                inline_payload.as_deref(),
-                blob_relpath.as_deref(),
-                original_size,
-                stored_size,
-            ) else {
+            let storage_kind = metadata.storage_kind.as_deref();
+            let Some(bytes) = read_primary_payload(connection, cas, epoch, &metadata, observe)?
+            else {
                 status.logical_ok = false;
-                if storage_kind.as_deref() == Some("cas") {
+                if storage_kind == Some("cas") {
                     status.blob_ok = false;
                 }
                 continue;
             };
-            let canonical_size = canonical_bytes(kind, &bytes).len();
-            let valid = usize::try_from(content_size).ok() == Some(canonical_size)
-                && stored_content_hash.as_slice() == content_hash(kind, &primary_mime, &bytes);
-            status.logical_ok &= valid;
+            observe(VerificationPhase::DecodeHash, connection);
+            if !epoch_is_current(connection, epoch)? {
+                return Ok(EpochRead::Changed);
+            }
+            let canonical_size = canonical_byte_len(kind, &bytes);
+            status.logical_ok &= content_size == canonical_size
+                && stored_content_hash == content_hash(kind, primary_mime, &bytes);
         }
-        if page_entries < VERIFICATION_REFERENCE_PAGE_SIZE {
+        if !page_is_full {
             break;
         }
     }
-    Ok(status)
+    Ok(EpochRead::Stable(status))
 }
 
-fn audit_artifact_pages(connection: &Connection, cas: &CasStore) -> rusqlite::Result<AuditStatus> {
+fn read_primary_metadata_page(
+    connection: &Connection,
+    last_event_id: i64,
+) -> rusqlite::Result<Vec<PrimaryMetadata>> {
+    let mut statement = connection.prepare(
+        "SELECT he.event_id,
+                CASE WHEN typeof(c.kind) = 'text'
+                               AND c.kind IN ('text', 'link', 'image', 'file', 'color', 'code', 'html')
+                     THEN c.kind END,
+                CASE WHEN typeof(c.primary_mime) = 'text'
+                               AND length(CAST(c.primary_mime AS BLOB)) BETWEEN 1 AND 1024
+                     THEN CAST(c.primary_mime AS BLOB) END,
+                CASE WHEN typeof(c.content_hash) = 'blob' AND length(c.content_hash) = 32
+                     THEN hex(c.content_hash) END,
+                CASE WHEN typeof(c.byte_size) = 'integer' THEN c.byte_size END,
+                CASE WHEN typeof(c.flags) = 'integer' THEN c.flags END,
+                er.event_id, er.raw_payload_id,
+                typeof(er.missing_ref), length(CAST(er.missing_ref AS BLOB)),
+                CASE WHEN typeof(er.missing_ref) = 'text'
+                               AND length(CAST(er.missing_ref AS BLOB)) BETWEEN 1 AND 4096
+                     THEN CAST(er.missing_ref AS BLOB) END,
+                CASE WHEN typeof(rp.storage_kind) = 'text'
+                               AND rp.storage_kind IN ('inline', 'inline_zstd', 'cas')
+                     THEN rp.storage_kind END,
+                typeof(rp.inline_payload), length(rp.inline_payload),
+                typeof(rp.blob_relpath), length(CAST(rp.blob_relpath AS BLOB)),
+                CASE WHEN typeof(rp.blob_relpath) = 'text'
+                               AND length(CAST(rp.blob_relpath AS BLOB)) = 67
+                     THEN CAST(rp.blob_relpath AS BLOB) END,
+                CASE WHEN typeof(rp.original_byte_size) = 'integer'
+                     THEN rp.original_byte_size END,
+                CASE WHEN typeof(rp.stored_byte_size) = 'integer'
+                     THEN rp.stored_byte_size END
+         FROM history_event he
+         JOIN content c ON c.content_id = he.content_id
+         LEFT JOIN event_representation er
+           ON er.event_id = he.event_id AND er.ordinal = 0
+         LEFT JOIN raw_payload rp ON rp.raw_payload_id = er.raw_payload_id
+         WHERE he.event_id > ?1
+         ORDER BY he.event_id
+         LIMIT ?2",
+    )?;
+    statement
+        .query_map(
+            rusqlite::params![last_event_id, VERIFICATION_REFERENCE_PAGE_SIZE],
+            |row| {
+                Ok(PrimaryMetadata {
+                    event_id: row.get(0)?,
+                    kind: row.get(1)?,
+                    primary_mime: row.get(2)?,
+                    content_hash_hex: row.get(3)?,
+                    content_size: row.get(4)?,
+                    flags: row.get(5)?,
+                    representation_event_id: row.get(6)?,
+                    raw_payload_id: row.get(7)?,
+                    missing_ref_type: row.get(8)?,
+                    missing_ref_length: row.get(9)?,
+                    missing_ref: row.get(10)?,
+                    storage_kind: row.get(11)?,
+                    inline_type: row.get(12)?,
+                    inline_length: row.get(13)?,
+                    blob_path_type: row.get(14)?,
+                    blob_path_length: row.get(15)?,
+                    blob_relpath: row.get(16)?,
+                    original_size: row.get(17)?,
+                    stored_size: row.get(18)?,
+                })
+            },
+        )?
+        .collect()
+}
+
+fn read_primary_payload(
+    connection: &Connection,
+    cas: &CasStore,
+    epoch: i64,
+    metadata: &PrimaryMetadata,
+    observe: &mut impl FnMut(VerificationPhase, &Connection),
+) -> rusqlite::Result<Option<Vec<u8>>> {
+    let Some(raw_payload_id) = metadata.raw_payload_id else {
+        return Ok(None);
+    };
+    let Some(original_size) = metadata.original_size.and_then(valid_object_size) else {
+        return Ok(None);
+    };
+    let Some(stored_size) = metadata.stored_size.and_then(valid_object_size) else {
+        return Ok(None);
+    };
+    let relpath = metadata
+        .blob_relpath
+        .as_ref()
+        .and_then(|value| std::str::from_utf8(value).ok());
+    match metadata.storage_kind.as_deref() {
+        Some("inline")
+            if metadata.inline_type == "blob"
+                && metadata.inline_length == i64::try_from(original_size).ok()
+                && metadata.blob_path_type == "null"
+                && metadata.blob_path_length.is_none()
+                && relpath.is_none()
+                && original_size < 4 * 1024
+                && stored_size == original_size =>
+        {
+            read_bounded_inline_payload(
+                connection,
+                raw_payload_id,
+                "inline",
+                original_size,
+                stored_size,
+                observe,
+            )
+        }
+        Some("inline_zstd")
+            if metadata.inline_type == "blob"
+                && metadata.inline_length == i64::try_from(stored_size).ok()
+                && metadata.blob_path_type == "null"
+                && metadata.blob_path_length.is_none()
+                && relpath.is_none()
+                && (4 * 1024..=256 * 1024).contains(&original_size)
+                && stored_size <= 263_168 =>
+        {
+            let Some(payload) = read_bounded_inline_payload(
+                connection,
+                raw_payload_id,
+                "inline_zstd",
+                original_size,
+                stored_size,
+                observe,
+            )?
+            else {
+                return Ok(None);
+            };
+            observe(VerificationPhase::DecodeHash, connection);
+            if !epoch_is_current(connection, epoch)? {
+                return Ok(None);
+            }
+            Ok(decode_exact_zstd(&payload, original_size))
+        }
+        Some("cas")
+            if metadata.inline_type == "null"
+                && metadata.inline_length.is_none()
+                && metadata.blob_path_type == "text"
+                && metadata.blob_path_length == Some(67)
+                && original_size == stored_size =>
+        {
+            let Some(relpath) = relpath else {
+                return Ok(None);
+            };
+            observe(VerificationPhase::Cas, connection);
+            if !epoch_is_current(connection, epoch)? {
+                return Ok(None);
+            }
+            Ok(cas
+                .read(relpath)
+                .ok()
+                .filter(|bytes| bytes.len() == original_size))
+        }
+        _ => Ok(None),
+    }
+}
+
+struct ArtifactMetadata {
+    id: i64,
+    blob_relpath: Option<Vec<u8>>,
+    byte_size: Option<i64>,
+    digest_hex: Option<String>,
+}
+
+fn audit_artifact_pages(
+    connection: &Connection,
+    cas: &CasStore,
+    epoch: i64,
+    observe: &mut impl FnMut(VerificationPhase, &Connection),
+) -> rusqlite::Result<EpochRead<AuditStatus>> {
     let mut status = AuditStatus::healthy();
     let mut last_id = 0_i64;
     loop {
-        let mut statement = connection.prepare(
-            "SELECT artifact_id, blob_relpath, byte_size, raw_digest
-             FROM artifact
-             WHERE artifact_id > ?1
-             ORDER BY artifact_id
-             LIMIT ?2",
-        )?;
-        let mut rows =
-            statement.query(rusqlite::params![last_id, VERIFICATION_REFERENCE_PAGE_SIZE])?;
-        let mut page_entries = 0_i64;
-        while let Some(row) = rows.next()? {
-            last_id = row.get(0)?;
-            page_entries += 1;
-            let relpath = row.get::<_, String>(1)?;
-            let size = row.get::<_, i64>(2)?;
-            let digest = row.get::<_, Vec<u8>>(3)?;
-            let valid = valid_object_size(size).is_some_and(|size| {
-                digest_matches_relpath(&digest, &relpath)
-                    && cas.verify(&relpath, size as u64).is_ok()
-            });
+        let EpochRead::Stable(page) = read_short_snapshot(connection, epoch, |connection| {
+            read_artifact_metadata_page(connection, last_id)
+        })?
+        else {
+            return Ok(EpochRead::Changed);
+        };
+        observe(VerificationPhase::AfterMetadataPage, connection);
+        if !epoch_is_current(connection, epoch)? {
+            return Ok(EpochRead::Changed);
+        }
+        let page_is_full = page.len() == VERIFICATION_REFERENCE_PAGE_SIZE as usize;
+        for metadata in page {
+            last_id = metadata.id;
+            let relpath = metadata
+                .blob_relpath
+                .and_then(|value| String::from_utf8(value).ok());
+            let size = metadata.byte_size.and_then(valid_object_size);
+            let digest = metadata.digest_hex.as_deref().and_then(decode_digest_hex);
+            let valid_shape = relpath
+                .as_deref()
+                .zip(digest.as_ref())
+                .is_some_and(|(path, digest)| digest_matches_relpath(digest, path));
+            let valid = if let (Some(path), Some(size)) =
+                (relpath.as_deref().filter(|_| valid_shape), size)
+            {
+                observe(VerificationPhase::Cas, connection);
+                if !epoch_is_current(connection, epoch)? {
+                    return Ok(EpochRead::Changed);
+                }
+                cas.verify(path, size as u64).is_ok()
+            } else {
+                false
+            };
             status.logical_ok &= valid;
             status.blob_ok &= valid;
         }
-        if page_entries < VERIFICATION_REFERENCE_PAGE_SIZE {
+        if !page_is_full {
             break;
         }
     }
-    Ok(status)
+    Ok(EpochRead::Stable(status))
+}
+
+fn read_artifact_metadata_page(
+    connection: &Connection,
+    last_id: i64,
+) -> rusqlite::Result<Vec<ArtifactMetadata>> {
+    let mut statement = connection.prepare(
+        "SELECT artifact_id,
+                CASE WHEN typeof(blob_relpath) = 'text'
+                               AND length(CAST(blob_relpath AS BLOB)) = 67
+                     THEN CAST(blob_relpath AS BLOB) END,
+                CASE WHEN typeof(byte_size) = 'integer' THEN byte_size END,
+                CASE WHEN typeof(raw_digest) = 'blob' AND length(raw_digest) = 32
+                     THEN hex(raw_digest) END
+         FROM artifact
+         WHERE artifact_id > ?1
+         ORDER BY artifact_id
+         LIMIT ?2",
+    )?;
+    statement
+        .query_map(
+            rusqlite::params![last_id, VERIFICATION_REFERENCE_PAGE_SIZE],
+            |row| {
+                Ok(ArtifactMetadata {
+                    id: row.get(0)?,
+                    blob_relpath: row.get(1)?,
+                    byte_size: row.get(2)?,
+                    digest_hex: row.get(3)?,
+                })
+            },
+        )?
+        .collect()
 }
 
 fn valid_object_size(size: i64) -> Option<usize> {
@@ -545,40 +1164,17 @@ fn decode_exact_zstd(payload: &[u8], expected_size: usize) -> Option<Vec<u8>> {
     (decoded.len() == expected_size && consumed == payload.len() as u64).then_some(decoded)
 }
 
-fn primary_payload_bytes(
-    cas: &CasStore,
-    storage_kind: Option<&str>,
-    inline_payload: Option<&[u8]>,
-    blob_relpath: Option<&str>,
-    original_size: Option<i64>,
-    stored_size: Option<i64>,
-) -> Option<Vec<u8>> {
-    let original_size = valid_object_size(original_size?)?;
-    let stored_size = valid_object_size(stored_size?)?;
-    match storage_kind? {
-        "inline" if blob_relpath.is_none() && original_size < 4 * 1024 => {
-            let bytes = inline_payload?;
-            (bytes.len() == original_size && stored_size == original_size).then(|| bytes.to_vec())
-        }
-        "inline_zstd"
-            if blob_relpath.is_none() && (4 * 1024..=256 * 1024).contains(&original_size) =>
-        {
-            let payload = inline_payload?;
-            (payload.len() == stored_size)
-                .then(|| decode_exact_zstd(payload, original_size))
-                .flatten()
-        }
-        "cas" if inline_payload.is_none() && original_size == stored_size => {
-            let relpath = blob_relpath?;
-            cas.verify(relpath, original_size as u64).ok()?;
-            cas.read(relpath).ok()
-        }
-        _ => None,
-    }
-}
-
 fn digest_matches_relpath(digest: &[u8], relpath: &str) -> bool {
-    if digest.len() != 32 || relpath.len() != 67 || relpath.as_bytes().get(2) != Some(&b'/') {
+    let bytes = relpath.as_bytes();
+    if digest.len() != 32
+        || bytes.len() != 67
+        || bytes.get(2) != Some(&b'/')
+        || !bytes[..2]
+            .iter()
+            .chain(&bytes[3..])
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+        || bytes[..2] != bytes[3..5]
+    {
         return false;
     }
     let encoded = &relpath[3..];
@@ -624,10 +1220,14 @@ fn read_kind_counts(
     missing_mask: i64,
 ) -> rusqlite::Result<Vec<RawKindCount>> {
     let mut statement = connection.prepare(
-        "SELECT c.kind, count(*),
+        "WITH expected(kind) AS (
+           VALUES ('text'), ('link'), ('image'), ('file'), ('color'), ('code'), ('html')
+         )
+         SELECT c.kind, count(*),
                 SUM(CASE WHEN (c.flags & ?1) != 0 THEN 1 ELSE 0 END)
          FROM history_event he
          JOIN content c ON c.content_id = he.content_id
+         JOIN expected e ON e.kind = c.kind
          GROUP BY c.kind
          ORDER BY c.kind",
     )?;
@@ -644,15 +1244,17 @@ fn read_kind_counts(
 
 fn read_latest_sources(connection: &Connection) -> rusqlite::Result<Vec<RawSourceSummary>> {
     let mut statement = connection.prepare(
-        "WITH completed AS MATERIALIZED (
-           SELECT import_run_id, source_kind, source_fingerprint, total_records, imported_records,
-                  already_present_records, skipped_records, failed_records,
+        "WITH expected(source_kind) AS (VALUES ('raycast'), ('supercmd')),
+         completed AS MATERIALIZED (
+           SELECT r.*,
                   ROW_NUMBER() OVER (
-                    PARTITION BY source_kind, source_fingerprint
-                    ORDER BY COALESCE(finished_at_ms, started_at_ms) DESC, import_run_id DESC
+                    PARTITION BY r.source_kind
+                    ORDER BY COALESCE(r.finished_at_ms, r.started_at_ms) DESC,
+                             r.import_run_id DESC
                   ) AS position
-           FROM import_run
-           WHERE status = 'completed'
+           FROM import_run r
+           JOIN expected e USING (source_kind)
+           WHERE r.status = 'completed'
          )
          SELECT source_kind, total_records, imported_records, already_present_records,
                 skipped_records, failed_records,
@@ -713,6 +1315,14 @@ fn logical_relations_are_coherent(
              FROM import_record ir
              JOIN import_run run ON run.import_run_id = ir.import_run_id
              WHERE ir.source_kind != run.source_kind
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM import_run
+             WHERE source_kind NOT IN ('raycast', 'supercmd')
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM import_record
+             WHERE source_kind NOT IN ('raycast', 'supercmd')
            )",
         [event_count],
         |row| row.get::<_, bool>(0),
@@ -725,10 +1335,12 @@ fn read_source_image_counts(
     missing_mask: i64,
 ) -> rusqlite::Result<BTreeMap<String, (i64, i64)>> {
     let mut statement = connection.prepare(
-        "SELECT ir.source_kind,
+        "WITH expected(source_kind) AS (VALUES ('raycast'), ('supercmd'))
+         SELECT ir.source_kind,
                 SUM(CASE WHEN c.kind = 'image' AND (c.flags & ?1) = 0 THEN 1 ELSE 0 END),
                 SUM(CASE WHEN c.kind = 'image' AND (c.flags & ?1) != 0 THEN 1 ELSE 0 END)
          FROM import_record ir
+         JOIN expected e ON e.source_kind = ir.source_kind
          JOIN history_event he ON he.event_id = ir.event_id
          JOIN content c ON c.content_id = he.content_id
          GROUP BY ir.source_kind
@@ -1121,6 +1733,9 @@ fn verification_output(
     snapshot: VerificationSnapshot,
     expect_records: u64,
 ) -> Result<VerifyOutput, CliFailure> {
+    if snapshot.invalidated {
+        return Ok(blob_root_failure_output(expect_records));
+    }
     let physical_content_count = checked_count(snapshot.physical_content_count)?;
     let event_count = checked_count(snapshot.event_count)?;
     let indexed_document_count = checked_count(snapshot.indexed_document_count)?;
@@ -1297,16 +1912,165 @@ mod tests {
 
     use rusqlite::{Connection, OpenFlags};
 
+    use clipboard_core::{
+        CaptureInput, ContentFlags, ContentKind, EventFlags, RepresentationInput, SourceConfidence,
+    };
     #[cfg(unix)]
-    use clipboard_store::{StorageBoundaryLease, StoreConfig, StoreHandle};
+    use clipboard_store::StorageBoundaryLease;
+    use clipboard_store::{ReadOnlyStore, StoreConfig, StoreHandle};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use super::{
         BackupProgress, BackupStep, FtsScratchError, FtsScratchPolicy, ScratchEvent,
-        fts_is_coherent_with_policy, fts_scratch_check_with_cleanup, read_stable_snapshot,
-        run_backup_loop,
+        VerificationPhase, audit_raw_payload_pages_with_observer, data_version,
+        fts_is_coherent_with_policy, fts_scratch_check_with_cleanup, read_short_snapshot,
+        read_verification_snapshot_with_observer, run_backup_loop, verification_output,
     };
+
+    #[tokio::test]
+    async fn transaction_boundary_heavy_phases_are_observed_only_in_autocommit() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = StoreConfig::new(directory.path().join("history.sqlite"))
+            .with_blob_root(directory.path().join("history.blobs"));
+        let store = StoreHandle::open(config.clone()).unwrap();
+        store
+            .ingest(CaptureInput {
+                captured_at_ms: 1_000,
+                kind: ContentKind::Text,
+                primary_mime: "text/plain".to_owned(),
+                representations: vec![RepresentationInput {
+                    format_id: "public.utf8-plain-text".to_owned(),
+                    bytes: Some(b"transaction boundary payload".to_vec()),
+                    missing_ref: None,
+                }],
+                source_app_id: None,
+                source_app_name: None,
+                source_confidence: SourceConfidence::Unknown,
+                pinned: false,
+                occurrence_count: 1,
+                content_flags: ContentFlags::empty(),
+                event_flags: EventFlags::empty(),
+            })
+            .await
+            .unwrap();
+        store
+            .ingest(CaptureInput {
+                captured_at_ms: 2_000,
+                kind: ContentKind::Image,
+                primary_mime: "image/png".to_owned(),
+                representations: vec![RepresentationInput {
+                    format_id: "public.png".to_owned(),
+                    bytes: Some(vec![0x5a; 300 * 1024]),
+                    missing_ref: None,
+                }],
+                source_app_id: None,
+                source_app_name: None,
+                source_confidence: SourceConfidence::Unknown,
+                pinned: false,
+                occurrence_count: 1,
+                content_flags: ContentFlags::empty(),
+                event_flags: EventFlags::empty(),
+            })
+            .await
+            .unwrap();
+        drop(store);
+        let store = ReadOnlyStore::open_existing(config).unwrap();
+        let cas = store.cas_store().unwrap();
+        let observed = RefCell::new(Vec::new());
+
+        store
+            .with_reader(|connection| {
+                read_verification_snapshot_with_observer(
+                    connection,
+                    &cas,
+                    &mut |phase, connection| {
+                        if matches!(
+                            phase,
+                            VerificationPhase::Cas
+                                | VerificationPhase::DecodeHash
+                                | VerificationPhase::Integrity
+                                | VerificationPhase::Fts
+                                | VerificationPhase::PayloadFetch
+                        ) {
+                            assert!(connection.is_autocommit());
+                            observed.borrow_mut().push(phase);
+                        }
+                    },
+                )
+            })
+            .unwrap();
+
+        for phase in [
+            VerificationPhase::Cas,
+            VerificationPhase::DecodeHash,
+            VerificationPhase::Integrity,
+            VerificationPhase::Fts,
+            VerificationPhase::PayloadFetch,
+        ] {
+            assert!(observed.borrow().contains(&phase), "missing {phase:?}");
+        }
+    }
+
+    #[test]
+    fn bounded_payload_metadata_rejects_oversized_inline_values_before_materialization() {
+        for (storage_kind, payload_len, original_size, declared_stored_size) in [
+            ("inline", 4_096, 1, 1),
+            ("inline_zstd", 263_169, 262_144, 263_168),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let database = directory.path().join("history.sqlite");
+            let blob_root = directory.path().join("history.blobs");
+            drop(
+                clipboard_store::StoreHandle::open(
+                    clipboard_store::StoreConfig::new(&database).with_blob_root(&blob_root),
+                )
+                .unwrap(),
+            );
+            let connection = Connection::open(&database).unwrap();
+            connection
+                .execute_batch("PRAGMA ignore_check_constraints = ON;")
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO raw_payload(
+                       raw_digest, storage_kind, inline_payload, blob_relpath,
+                       original_byte_size, stored_byte_size
+                     ) VALUES (zeroblob(32), ?1, zeroblob(?2), NULL, ?3, ?4)",
+                    rusqlite::params![
+                        storage_kind,
+                        payload_len,
+                        original_size,
+                        declared_stored_size
+                    ],
+                )
+                .unwrap();
+            let cas = clipboard_store::CasStore::new(blob_root);
+            let payload_fetches = Cell::new(0_u32);
+            let epoch = data_version(&connection).unwrap();
+
+            let audit =
+                audit_raw_payload_pages_with_observer(&connection, &cas, epoch, &mut |phase, _| {
+                    if phase == VerificationPhase::PayloadFetch {
+                        payload_fetches.set(payload_fetches.get() + 1);
+                    }
+                });
+
+            assert!(
+                audit.is_ok(),
+                "{storage_kind} metadata query materialized the oversized BLOB"
+            );
+            let super::EpochRead::Stable(audit) = audit.unwrap() else {
+                panic!("unchanged synthetic database unexpectedly invalidated the audit");
+            };
+            assert!(!audit.logical_ok);
+            assert_eq!(
+                payload_fetches.get(),
+                0,
+                "{storage_kind} payload was fetched before its metadata was bounded"
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1341,7 +2105,8 @@ mod tests {
         let reader = Connection::open(&database).unwrap();
         let modifier = Connection::open(&database).unwrap();
 
-        let (_, stable) = read_stable_snapshot(&reader, |connection| {
+        let epoch = data_version(&reader).unwrap();
+        let result = read_short_snapshot(&reader, epoch, |connection| {
             connection.query_row("SELECT count(*) FROM synthetic", [], |row| {
                 row.get::<_, i64>(0)
             })?;
@@ -1350,7 +2115,82 @@ mod tests {
         })
         .unwrap();
 
-        assert!(!stable);
+        assert!(matches!(result, super::EpochRead::Changed));
+    }
+
+    #[tokio::test]
+    async fn transaction_boundary_epoch_hooks_discard_every_aggregate_claim() {
+        for target_phase in [VerificationPhase::AfterMetadataPage, VerificationPhase::Fts] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = StoreConfig::new(directory.path().join("history.sqlite"))
+                .with_blob_root(directory.path().join("history.blobs"));
+            let writer = StoreHandle::open(config.clone()).unwrap();
+            writer
+                .ingest(CaptureInput {
+                    captured_at_ms: 1_000,
+                    kind: ContentKind::Text,
+                    primary_mime: "text/plain".to_owned(),
+                    representations: vec![RepresentationInput {
+                        format_id: "public.utf8-plain-text".to_owned(),
+                        bytes: Some(b"epoch hook payload".to_vec()),
+                        missing_ref: None,
+                    }],
+                    source_app_id: None,
+                    source_app_name: None,
+                    source_confidence: SourceConfidence::Unknown,
+                    pinned: false,
+                    occurrence_count: 1,
+                    content_flags: ContentFlags::empty(),
+                    event_flags: EventFlags::empty(),
+                })
+                .await
+                .unwrap();
+            drop(writer);
+            let modifier = Connection::open(config.database_path()).unwrap();
+            let reader = ReadOnlyStore::open_existing(config).unwrap();
+            let cas = reader.cas_store().unwrap();
+            let hook_fired = Cell::new(false);
+
+            let snapshot = reader
+                .with_reader(|connection| {
+                    read_verification_snapshot_with_observer(
+                        connection,
+                        &cas,
+                        &mut |phase, connection| {
+                            if phase == target_phase && !hook_fired.replace(true) {
+                                assert!(connection.is_autocommit());
+                                modifier
+                                    .execute(
+                                        "UPDATE history_event
+                                         SET paste_count = paste_count + 1
+                                         WHERE event_id = (SELECT min(event_id) FROM history_event)",
+                                        [],
+                                    )
+                                    .unwrap();
+                            }
+                        },
+                    )
+                })
+                .unwrap();
+            assert!(hook_fired.get(), "missing {target_phase:?} hook");
+
+            let Ok(output) = verification_output(snapshot, 1) else {
+                panic!("invalidated snapshot must produce aggregate-only output");
+            };
+            assert_eq!(output.status, "failed");
+            assert_eq!(output.latest_source_total, 0);
+            assert_eq!(output.physical_content_count, 0);
+            assert_eq!(output.event_count, 0);
+            assert_eq!(output.indexed_document_count, 0);
+            assert_eq!(output.missing_payload_count, 0);
+            assert!(output.counts_by_kind.is_empty());
+            assert!(output.sources.is_empty());
+            assert_eq!(output.integrity_status, "failed");
+            assert_eq!(output.run_status, "failed");
+            assert_eq!(output.logical_status, "failed");
+            assert_eq!(output.blob_status, "failed");
+            assert_eq!(output.fts_status, "failed");
+        }
     }
 
     fn read_only_fixture(data_dir: &Path) -> Connection {

@@ -40,6 +40,9 @@ pub const MAX_SEARCH_DOCUMENT_BYTES: usize = 512 * 1024;
 pub const MAX_PREVIEW_BYTES: usize = 512;
 const MAX_INLINE_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_INLINE_ZSTD_PAYLOAD_BYTES: usize = 256 * 1024;
+const MAX_PRIMARY_MIME_BYTES: usize = 1024;
+const MAX_FORMAT_ID_BYTES: usize = 1024;
+const MAX_MISSING_REFERENCE_BYTES: usize = 4096;
 const IMPORT_ZSTD_COMPRESSION_LEVEL: i32 = 3;
 const MAX_IMPORT_ZSTD_OUTPUT_BYTES_PER_REPRESENTATION: usize = 263_168;
 const MAX_IMPORT_ZSTD_OUTPUT_BYTES: usize =
@@ -1556,6 +1559,7 @@ fn prepare_ingest<'a>(
     input: &'a CaptureInput,
     cas: &CasStore,
 ) -> Result<PreparedIngest<'a>, StoreError> {
+    validate_capture_storage_bounds(input)?;
     let primary = input
         .representations
         .first()
@@ -1594,6 +1598,29 @@ fn prepare_ingest<'a>(
         content_flags,
         representations: stored_representations(input, cas)?,
     })
+}
+
+fn validate_capture_storage_bounds(input: &CaptureInput) -> Result<(), StoreError> {
+    if !bounded_nonempty_text(&input.primary_mime, MAX_PRIMARY_MIME_BYTES)
+        || input.representations.iter().any(|representation| {
+            !bounded_nonempty_text(&representation.format_id, MAX_FORMAT_ID_BYTES)
+                || representation
+                    .missing_ref
+                    .as_deref()
+                    .is_some_and(|value| !bounded_nonempty_text(value, MAX_MISSING_REFERENCE_BYTES))
+                || representation
+                    .bytes
+                    .as_ref()
+                    .is_some_and(|bytes| bytes.len() > crate::MAX_CAS_OBJECT_BYTES)
+        })
+    {
+        return Err(StoreError::PayloadStorageUnavailable);
+    }
+    Ok(())
+}
+
+fn bounded_nonempty_text(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= max_bytes
 }
 
 fn write_ingest(

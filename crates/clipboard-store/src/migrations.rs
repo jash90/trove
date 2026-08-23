@@ -5,7 +5,7 @@ use crate::StoreError;
 const INITIAL_MIGRATION: &str = include_str!("migrations/001_initial.sql");
 const LATEST_SCHEMA_VERSION: i64 = 1;
 const SCHEMA_IDENTITY: &str = "clipboard-store";
-const SCHEMA_REVISION: i64 = 5;
+const SCHEMA_REVISION: i64 = 6;
 
 pub struct Migrations;
 
