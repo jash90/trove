@@ -1344,6 +1344,22 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn begin_preserves_private_storage_through_persistence_handoff() {
+        let (directory, store, data_dir) = leased_store();
+        let service = ImportService::new(store);
+        let export = synthetic_export();
+        let analysis = service.analyze(export.path()).unwrap();
+
+        make_blob_storage_private(&data_dir);
+        let error = service.begin(analysis.analysis_id).await.unwrap_err();
+        restore_blob_storage(&data_dir);
+
+        assert_private_service_error(error);
+        drop(directory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn private_storage_errors_survive_import_lifecycle_boundaries() {
         let (directory, store, data_dir) = leased_store();
         let service = ImportService::new(store.clone());
