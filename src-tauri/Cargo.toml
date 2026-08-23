@@ -5,11 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [build-dependencies]
-tauri-build = "2.6.3"
+tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 anyhow.workspace = true
-tauri = "2.11.5"
+tauri = { version = "2.11.5", features = [] }
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-dialog = "2.7.2"

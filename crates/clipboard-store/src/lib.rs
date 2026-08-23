@@ -23,7 +23,7 @@ pub use cas::{
     CAS_VERIFY_BUFFER_BYTES, CasBlob, CasError, CasGcSession, CasStore, GcStep, GcStepBudget,
     MAX_CAS_OBJECT_BYTES,
 };
-pub use config::StoreConfig;
+pub use config::{BLOB_DIRECTORY_NAME, DATABASE_FILENAME, StoreConfig};
 pub use import_operation::{
     IMPORT_OPERATION_GATE_CONTROL_BYTES, ImportOperationError, ImportOperationGate,
     ImportOperationPermit, MAX_IMPORT_OPERATION_BYTES,

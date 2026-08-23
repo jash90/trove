@@ -11,8 +11,7 @@ use clipboard_store::{StorageBoundaryLease, StoreConfig};
 
 use crate::{CliFailure, boundary_failure};
 
-const DATABASE_FILENAME: &str = "clipboard.db";
-const BLOB_DIRECTORY: &str = "blobs";
+use clipboard_store::{BLOB_DIRECTORY_NAME as BLOB_DIRECTORY, DATABASE_FILENAME};
 
 pub(crate) struct ValidatedImportPaths {
     pub(crate) source: PathBuf,

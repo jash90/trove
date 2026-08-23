@@ -84,6 +84,33 @@ fn file_capture(reference_uri: &str, captured_at_ms: i64) -> clipboard_core::Cap
 }
 
 #[tokio::test]
+async fn the_application_opens_the_same_database_file_the_importer_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    state
+        .store
+        .ingest(text_capture("wpis kontrolny", 1_725_000_000_000))
+        .await
+        .unwrap();
+    drop(state);
+
+    // The importer resolves the same layout from clipboard-store, so a data
+    // directory written by one half must open in the other.
+    assert!(
+        directory
+            .path()
+            .join(clipboard_store::DATABASE_FILENAME)
+            .is_file()
+    );
+    assert!(
+        directory
+            .path()
+            .join(clipboard_store::BLOB_DIRECTORY_NAME)
+            .is_dir()
+    );
+}
+
+#[tokio::test]
 async fn preview_reports_an_existing_source_path_as_revealable() {
     let elsewhere = tempfile::tempdir().unwrap();
     let present = elsewhere.path().join("synthetic report.pdf");
@@ -774,7 +801,8 @@ fn image_capture(bytes: Vec<u8>, captured_at_ms: i64) -> clipboard_core::Capture
 fn install_thumbnail(data_dir: &std::path::Path, content_id: i64, bytes: &[u8]) {
     let cas = clipboard_store::CasStore::new(data_dir.join("blobs"));
     let blob = cas.put(bytes).unwrap();
-    let connection = rusqlite::Connection::open(data_dir.join("history.sqlite")).unwrap();
+    let connection =
+        rusqlite::Connection::open(data_dir.join(clipboard_store::DATABASE_FILENAME)).unwrap();
     connection
         .execute(
             "INSERT INTO artifact

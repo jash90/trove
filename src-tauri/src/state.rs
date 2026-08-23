@@ -11,9 +11,9 @@ pub struct AppState {
 
 impl AppState {
     pub fn open_data_dir(data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let database_path = data_dir.as_ref().join("history.sqlite");
-        let blob_root = data_dir.as_ref().join("blobs");
-        let store = StoreHandle::open(StoreConfig::new(database_path).with_blob_root(blob_root))?;
+        // The layout comes from clipboard-store so the importer and this
+        // application can never disagree about where the database lives.
+        let store = StoreHandle::open(StoreConfig::in_data_dir(data_dir))?;
         let importer = ImportService::new(store.clone())
             .map_err(|_| anyhow::anyhow!("import service initialization failed"))?;
         Ok(Self { store, importer })

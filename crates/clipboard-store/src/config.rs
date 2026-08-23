@@ -21,7 +21,26 @@ impl fmt::Debug for StoreConfig {
     }
 }
 
+/// The one filename a data directory's database has.
+///
+/// The importer and the desktop application must agree on this. They did not:
+/// the CLI wrote `clipboard.db` while the application opened `history.sqlite`,
+/// so pointing the application at an imported directory silently created a
+/// second, empty database beside the real one.
+pub const DATABASE_FILENAME: &str = "clipboard.db";
+
+/// The one directory name a data directory's blobs live in.
+pub const BLOB_DIRECTORY_NAME: &str = "blobs";
+
 impl StoreConfig {
+    /// Resolves the standard layout inside a data directory. Prefer this over
+    /// `new` wherever a caller starts from a directory rather than a file.
+    pub fn in_data_dir(data_dir: impl AsRef<Path>) -> Self {
+        let data_dir = data_dir.as_ref();
+        Self::new(data_dir.join(DATABASE_FILENAME))
+            .with_blob_root(data_dir.join(BLOB_DIRECTORY_NAME))
+    }
+
     pub fn new(database_path: impl Into<PathBuf>) -> Self {
         let database_path = database_path.into();
         let blob_root = database_path.with_extension("blobs");
