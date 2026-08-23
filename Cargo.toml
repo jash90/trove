@@ -8,6 +8,8 @@ members = [
   "crates/clipboard-images",
   "crates/clipboard-import",
   "crates/platform-macos",
+  "crates/platform-linux",
+  "crates/platform-windows",
   "crates/clipboard-zstd-bound",
   "tools/clipboard-import-cli",
 ]

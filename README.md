@@ -12,12 +12,33 @@ lokalnie.
 | Model domenowy, SQLite WAL + FTS5, CAS, wyszukiwanie | gotowe |
 | Importery Raycast i SuperCmd, CLI weryfikacyjne | gotowe |
 | Paleta React, podglądy, akcje, kreator importu, ustawienia | gotowe |
-| Skrót globalny przywołujący paletę | gotowe |
-| Przechwytywanie schowka, tray, wklejanie | **niezaimplementowane** |
-| Retencja, odzyskiwanie blobów, adaptery Windows i Linux | **niezaimplementowane** |
+| Skrót globalny, przechwytywanie schowka, tray, wklejanie | gotowe |
+| Retencja i odzyskiwanie blobów | gotowe |
+| Adaptery Windows i Linux | zaimplementowane, **niezweryfikowane** |
 
-Zweryfikowana platforma: macOS (`aarch64-apple-darwin`). Windows i Linux nie
-mają jeszcze adapterów systemowych.
+## Macierz wsparcia
+
+| Platforma | Stan | Co to znaczy |
+|---|---|---|
+| macOS | **zweryfikowane** | Uruchomione i sprawdzone na `aarch64-apple-darwin`: historia, import, przechwytywanie, skrót, tray. |
+| Windows | **zaimplementowane** | Kod polityki wykluczeń i deklaracja możliwości istnieją i mają testy uruchamiane na hoście. Nie skompilowano ani nie uruchomiono na Windows. |
+| Linux | **zaimplementowane** | Wykrywanie sesji X11/Wayland i deklaracja możliwości mają testy uruchamiane na hoście. Nie skompilowano ani nie uruchomiono na Linuksie. |
+
+„Zaimplementowane" nie znaczy „działa". Na tej maszynie zainstalowany jest tylko
+target `aarch64-apple-darwin`, więc nawet kompilacja krzyżowa nie została
+wykonana:
+
+```bash
+rustup target add x86_64-pc-windows-msvc x86_64-unknown-linux-gnu
+cargo check -p platform-windows --target x86_64-pc-windows-msvc
+cargo check -p platform-linux --target x86_64-unknown-linux-gnu
+```
+
+Dopóki te polecenia nie przejdą na maszynie z odpowiednimi targetami, oba
+adaptery pozostają niezweryfikowane. Wayland bez protokołu data-control nie
+pozwala czytać schowka w tle w ogóle — aplikacja zgłasza wtedy jawny stan
+`wayland_data_control_unavailable`, zamiast udawać historię, której nie może
+zbudować.
 
 ## Wymagania
 
@@ -52,8 +73,12 @@ Bez tej zmiennej aplikacja używa katalogu danych systemu operacyjnego.
 
 `⌘⇧Space` (na innych systemach `Ctrl+Shift+Space`) przywołuje paletę i ustawia na
 niej fokus; ponowne wciśnięcie ją chowa. Zamknięcie okna również tylko je chowa —
-aplikacja kończy działanie wyłącznie na jawne żądanie, bo menedżer schowka, który
-przestaje działać po zamknięciu okna, po cichu gubi historię.
+aplikacja kończy działanie wyłącznie przez „Zakończ" w menu paska, bo menedżer
+schowka, który przestaje działać po zamknięciu okna, po cichu gubi historię.
+
+Ikona w pasku menu pokazuje historię lewym kliknięciem, a prawym otwiera menu z
+wstrzymaniem nasłuchu, ustawieniami i wyjściem. Wpis „Wstrzymaj nasłuch" jest
+zarazem wskaźnikiem: jeśli tak brzmi, aplikacja właśnie nagrywa.
 
 Jeśli skrót jest już zajęty przez inną aplikację, rejestracja się nie powiedzie,
 a paleta nadal działa z własnego okna. Zmiana skrótu w ustawieniach jest
@@ -121,6 +146,30 @@ stabilny odcisk, a ponowny przebieg zwraca go jako `alreadyPresent`.
   zawsze równa się liczbie rekordów źródłowych.
 - **Nie odrzuca rekordów na podstawie heurystyki sekretów.** Archiwum może
   zawierać dane wrażliwe; kreator importu ostrzega o tym przed startem.
+
+## Przechwytywanie i wklejanie
+
+Aplikacja nagrywa to, co kopiujesz, dopóki nasłuch nie zostanie wstrzymany.
+Odrzuca — zanim cokolwiek przeczyta — wpisy oznaczone przez aplikację źródłową
+jako `ConcealedType` lub `TransientType`; tak oznaczają swoje wpisy menedżery
+haseł. Odrzuca też wszystko z aplikacji na liście wykluczeń.
+
+`Enter` i `⌘⇧V` proszą o wklejenie do okna, w którym byłeś przed otwarciem
+palety. Wymaga to uprawnienia Accessibility (Ustawienia systemowe → Prywatność i
+ochrona → Dostępność). Bez niego wpis i tak trafia do schowka, a aplikacja mówi,
+dlaczego nie wkleiła, zamiast milczeć.
+
+## Retencja i miejsce na dysku
+
+Historia jest domyślnie nieograniczona. Włączenie retencji w ustawieniach trwale
+usuwa wpisy starsze niż podana liczba dni — z wyjątkiem przypiętych, bo
+przypięcie to jawne „zachowaj to". Sprzątanie działa w małych partiach co
+kwadrans, żeby nigdy nie blokować nagrywania.
+
+Bloby, do których nic już nie odsyła, są zwalniane w tym samym przebiegu.
+Skanowanie tylko obserwuje; o tym, czy blob naprawdę jest nieużywany, decyduje
+writer tuż przed usunięciem, bo między skanem a usunięciem import mógł zacząć go
+używać.
 
 ## Prywatność
 
