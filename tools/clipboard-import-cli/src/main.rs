@@ -7,7 +7,9 @@ mod verify;
 use std::{io, io::Write, path::PathBuf};
 
 use clap::{Parser, Subcommand, error::ErrorKind};
-use clipboard_import::{ImportError, ImportService, analyze_export_with_password};
+use clipboard_import::{
+    ImportError, ImportService, analyze_export_with_password, export_requires_password,
+};
 use clipboard_store::{CasError, StorageBoundaryError, StoreError, StoreHandle};
 use serde::Serialize;
 
@@ -187,11 +189,12 @@ async fn execute(command: Commands) -> Result<CommandExecution, CliFailure> {
 
 fn analyze(source: &std::path::Path, password_stdin: bool) -> Result<AnalyzeOutput, CliFailure> {
     let source = path_policy::canonical_source(source)?;
-    // Asked for only once the export says it needs one, so a plain JSON import
-    // never prompts.
-    let secret = match analyze_export_with_password(&source, None) {
-        Err(error) if needs_password(&error) => Some(secret::read_password(password_stdin)?),
-        _ => None,
+    // Asked for only when the export says it needs one, so a plain manifest
+    // never prompts. Detection answers that without reading any records.
+    let secret = if export_requires_password(&source).map_err(import_failure)? {
+        Some(secret::read_password(password_stdin)?)
+    } else {
+        None
     };
     let analysis =
         analyze_export_with_password(&source, secret.as_ref()).map_err(import_failure)?;
@@ -220,13 +223,18 @@ async fn import(
     data_dir: &std::path::Path,
     password_stdin: bool,
 ) -> Result<ImportOutput, CliFailure> {
-    let paths = prepare_import_paths(source, data_dir)?;
-    // The password is read before the store is touched, so a mistyped one
-    // leaves no database behind.
-    let secret = match analyze_export_with_password(&paths.source, None) {
-        Err(error) if needs_password(&error) => Some(secret::read_password(password_stdin)?),
-        _ => None,
+    // The password is read and proven against the export before the data
+    // directory is touched. Validating later would leave an empty database
+    // behind every time somebody mistypes it.
+    let canonical_source = path_policy::canonical_source(source)?;
+    let secret = if export_requires_password(&canonical_source).map_err(import_failure)? {
+        let secret = secret::read_password(password_stdin)?;
+        analyze_export_with_password(&canonical_source, Some(&secret)).map_err(import_failure)?;
+        Some(secret)
+    } else {
+        None
     };
+    let paths = prepare_import_paths(source, data_dir)?;
     let store = StoreHandle::open(paths.store_config()).map_err(store_failure)?;
     path_policy::verify_created_storage(&paths)?;
     let service = ImportService::new(store).map_err(import_failure)?;
@@ -242,17 +250,6 @@ async fn import(
         skipped: summary.skipped,
         failed: summary.failed,
     })
-}
-
-/// Whether a failed analysis was only missing a password.
-fn needs_password(error: &ImportError) -> bool {
-    matches!(
-        error,
-        ImportError::Export {
-            reason: "rayconfig_password_required",
-            ..
-        }
-    )
 }
 
 fn import_failure(error: ImportError) -> CliFailure {

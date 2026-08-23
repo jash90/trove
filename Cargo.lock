@@ -660,19 +660,23 @@ dependencies = [
 name = "clipboard-import-cli"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "allocation-counter",
  "blake3",
  "cap-fs-ext",
  "cap-std",
+ "cbc",
  "clap",
  "clipboard-core",
  "clipboard-import",
  "clipboard-store",
  "directories",
+ "flate2",
  "rusqlite",
  "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "zstd",

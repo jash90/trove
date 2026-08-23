@@ -52,6 +52,206 @@ fn write_raycast_export(root: &Path, records: Value) {
     .unwrap();
 }
 
+/// A password that exists only in these tests. No real export's password is
+/// written down anywhere in this repository.
+const SYNTHETIC_RAYCONFIG_PASSWORD: &str = "sentinel-cli-passphrase";
+
+/// Builds the container Raycast writes: `IV ‖ AES-256-CBC-PKCS7(gzip(JSON))`,
+/// keyed by `SHA-256(password)`.
+fn write_rayconfig_export(root: &Path, records: Value) -> PathBuf {
+    use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+    use flate2::{Compression, write::GzEncoder};
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    fs::create_dir_all(root).unwrap();
+    let document = json!({
+        "raycast_version": "1.104.25",
+        "builtin_package_clipboardHistory": {
+            "clipboardHistoryLengthKey": "threeMonths",
+            "clipboardHistoryRecords": records,
+            "clipboardHistoryDisabledApplications": ["com.example.one"],
+            "provider_schemaVersion": 1,
+        },
+    });
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder
+        .write_all(&serde_json::to_vec(&document).unwrap())
+        .unwrap();
+    let compressed = encoder.finish().unwrap();
+
+    let mut key = [0_u8; 32];
+    key.copy_from_slice(&Sha256::digest(SYNTHETIC_RAYCONFIG_PASSWORD.as_bytes()));
+    let iv = [23_u8; 16];
+    let mut buffer = vec![0_u8; compressed.len() + 16];
+    let written = cbc::Encryptor::<aes::Aes256>::new(&key.into(), &iv.into())
+        .encrypt_padded_b2b_mut::<Pkcs7>(&compressed, &mut buffer)
+        .unwrap()
+        .len();
+    buffer.truncate(written);
+
+    let path = root.join("Raycast 2026-08-22 14.39.05.rayconfig");
+    let mut container = iv.to_vec();
+    container.extend_from_slice(&buffer);
+    fs::write(&path, container).unwrap();
+    path
+}
+
+fn synthetic_records() -> Value {
+    json!([
+        {
+            "createdAt": "2026-08-22T12:00:00Z",
+            "modifiedAt": "2026-08-22T12:00:00Z",
+            "category": "text",
+            "copyCount": 2,
+            "text": "synthetic encrypted entry",
+        },
+        {
+            "createdAt": "2026-08-22T12:01:00Z",
+            "modifiedAt": "2026-08-22T12:01:00Z",
+            "category": "link",
+            "copyCount": 1,
+            "text": "https://example.invalid/synthetic",
+        }
+    ])
+}
+
+/// Reads a failure report, which the CLI writes to stderr so stdout stays
+/// machine-readable for successes only.
+fn json_failure(output: &Output) -> Value {
+    let (_, stderr) = utf8_output(output);
+    serde_json::from_str(stderr).unwrap()
+}
+
+/// Runs the CLI with a password on standard input.
+fn cli_with_password(args: &[&str], password: &str) -> Output {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clipboard-import-cli"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(child.stdin.as_mut().unwrap(), "{password}").unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn an_encrypted_export_analyses_to_what_the_plain_one_does() {
+    let root = tempfile::tempdir().unwrap();
+    let plain = root.path().join("plain");
+    let encrypted = write_rayconfig_export(&root.path().join("encrypted"), synthetic_records());
+    write_raycast_export(&plain, synthetic_records());
+
+    let plain_output = cli(&["analyze", "--source", plain.to_str().unwrap()]);
+    let encrypted_output = cli_with_password(
+        &[
+            "analyze",
+            "--source",
+            encrypted.to_str().unwrap(),
+            "--password-stdin",
+        ],
+        SYNTHETIC_RAYCONFIG_PASSWORD,
+    );
+
+    assert!(encrypted_output.status.success());
+    assert_eq!(json_output(&plain_output), json_output(&encrypted_output));
+    assert_redacted(&encrypted_output, &[SYNTHETIC_RAYCONFIG_PASSWORD]);
+}
+
+#[test]
+fn an_encrypted_export_imports_the_same_records_as_the_plain_one() {
+    let root = tempfile::tempdir().unwrap();
+    let encrypted = write_rayconfig_export(&root.path().join("encrypted"), synthetic_records());
+    let data_dir = root.path().join("data");
+
+    let output = cli_with_password(
+        &[
+            "import",
+            "--source",
+            encrypted.to_str().unwrap(),
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "--password-stdin",
+        ],
+        SYNTHETIC_RAYCONFIG_PASSWORD,
+    );
+
+    assert!(output.status.success());
+    let value = json_output(&output);
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["total"], 2);
+    assert_eq!(value["imported"], 2);
+    assert_redacted(&output, &[SYNTHETIC_RAYCONFIG_PASSWORD]);
+}
+
+#[test]
+fn a_wrong_password_is_named_and_leaves_no_database_behind() {
+    let root = tempfile::tempdir().unwrap();
+    let encrypted = write_rayconfig_export(&root.path().join("encrypted"), synthetic_records());
+    let data_dir = root.path().join("data");
+
+    let output = cli_with_password(
+        &[
+            "import",
+            "--source",
+            encrypted.to_str().unwrap(),
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "--password-stdin",
+        ],
+        "not-the-password",
+    );
+
+    assert!(!output.status.success());
+    assert_eq!(json_failure(&output)["code"], "rayconfig_password_invalid");
+    // The password is proven before the data directory is touched, so a typo
+    // does not leave an empty database to explain later.
+    assert!(!data_dir.exists());
+    assert_redacted(&output, &["not-the-password"]);
+}
+
+#[test]
+fn a_missing_password_is_told_apart_from_a_wrong_one() {
+    let root = tempfile::tempdir().unwrap();
+    let encrypted = write_rayconfig_export(&root.path().join("encrypted"), synthetic_records());
+
+    let output = cli_with_password(
+        &[
+            "analyze",
+            "--source",
+            encrypted.to_str().unwrap(),
+            "--password-stdin",
+        ],
+        "",
+    );
+
+    assert_eq!(json_failure(&output)["code"], "password_missing");
+}
+
+#[test]
+fn a_directory_with_both_manifests_imports_without_asking_for_a_password() {
+    // No password is piped in at all: needing one here would hang or fail.
+    let root = tempfile::tempdir().unwrap();
+    let export = root.path().join("export");
+    write_raycast_export(&export, synthetic_records());
+    write_rayconfig_export(&export, synthetic_records());
+
+    let output = cli(&[
+        "import",
+        "--source",
+        export.to_str().unwrap(),
+        "--data-dir",
+        root.path().join("data").to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    assert_eq!(json_output(&output)["imported"], 2);
+}
+
 fn valid_raycast_export(root: &Path) {
     write_raycast_export(
         root,

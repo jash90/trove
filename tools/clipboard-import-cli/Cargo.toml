@@ -22,4 +22,8 @@ tokio.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+aes.workspace = true
 allocation-counter.workspace = true
+cbc.workspace = true
+flate2.workspace = true
+sha2.workspace = true

@@ -448,6 +448,17 @@ pub fn analyze_export(path: impl AsRef<Path>) -> Result<ImportExportAnalysis, Im
     analyze_export_with_password(path, None)
 }
 
+/// Whether reading this export needs a password, without reading its records.
+///
+/// Detection alone answers it, so a caller can ask for a password before doing
+/// any work — and can avoid asking at all when the export is a plain manifest.
+pub fn export_requires_password(path: impl AsRef<Path>) -> Result<bool, ImportError> {
+    let runtime = service::ImportRuntime::process_wide();
+    let permit = runtime.acquire_operation_blocking()?;
+    let limits = ImportParseLimits::default();
+    Ok(detect::detect_export_with_permit(path.as_ref(), &permit, limits)?.encrypted)
+}
+
 /// Analyses an export, decrypting it first when it is a `.rayconfig`.
 ///
 /// The secret is used here and nowhere else: the analysis keeps parsed records,
