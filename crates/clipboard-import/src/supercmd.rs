@@ -662,6 +662,13 @@ fn map_record(
             ],
             primary_fingerprint_bytes,
         )
+        .map_err(|_| {
+            record_failure(
+                ImportSource::SuperCmd,
+                index,
+                "canonicalization_too_complex",
+            )
+        })?
     };
     let representations = if matches!(kind, ContentKind::Image | ContentKind::File) {
         vec![RepresentationInput {

@@ -145,7 +145,8 @@ fn map_record(
             record.rich_text.as_deref(),
         ],
         primary_fingerprint_bytes,
-    );
+    )
+    .map_err(|_| record_failure(ImportSource::Raycast, index, "canonicalization_too_complex"))?;
     let representations = if missing_payload {
         vec![RepresentationInput {
             format_id: primary_mime(kind).to_owned(),
@@ -338,6 +339,53 @@ mod tests {
         assert_eq!(report.failures[0].reason, "record_too_large");
         assert_eq!(
             report.candidates[1].capture.representations[0]
+                .bytes
+                .as_deref(),
+            Some(b"later".as_slice())
+        );
+    }
+
+    #[test]
+    fn fingerprint_normalization_rejects_one_pathological_record_and_keeps_the_later_record() {
+        let export = tempfile::tempdir().unwrap();
+        let path = export.path().join("clipboard.json");
+        let pathological = format!("a{}", "\u{301}".repeat(4_097));
+        let document = serde_json::to_vec(&serde_json::json!([
+            {
+                "createdAt": "2026-01-02T03:04:05Z",
+                "modifiedAt": "2026-01-02T03:04:05Z",
+                "category": "text",
+                "text": pathological,
+            },
+            {
+                "createdAt": "2026-01-02T03:05:05Z",
+                "modifiedAt": "2026-01-02T03:05:05Z",
+                "category": "text",
+                "text": "later",
+            }
+        ]))
+        .unwrap();
+        fs::write(&path, &document).unwrap();
+        let limits = ImportParseLimits {
+            manifest_bytes: document.len(),
+            record_bytes: document.len(),
+            header_bytes: 1_024,
+            source_bytes: 2 * 1024 * 1024,
+            source_control_bytes: 4 * 1024,
+            auxiliary_bytes: 1_024,
+        };
+        let gate = ImportOperationGate::with_capacity(2 * 1024 * 1024).unwrap();
+        let permit = gate.acquire_blocking().unwrap();
+
+        let report = parse_raycast_report_with_permit(&path, &permit, limits).unwrap();
+
+        assert_eq!(report.total, 2);
+        assert_eq!(report.candidates.len(), 1);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].record, 1);
+        assert_eq!(report.failures[0].reason, "canonicalization_too_complex");
+        assert_eq!(
+            report.candidates[0].capture.representations[0]
                 .bytes
                 .as_deref(),
             Some(b"later".as_slice())

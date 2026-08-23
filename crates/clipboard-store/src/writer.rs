@@ -13,8 +13,8 @@ use std::{
 };
 
 use clipboard_core::{
-    CaptureInput, ContentFlags, ContentHash, ContentKind, SourceConfidence, canonical_byte_len,
-    content_hash, normalize_search_text_bounded,
+    CaptureInput, ContentFlags, ContentHash, ContentKind, MAX_CANONICAL_NORMALIZATION_HEAP_BYTES,
+    SourceConfidence, canonical_byte_len, content_hash, normalize_search_text_bounded,
 };
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use thiserror::Error;
@@ -51,6 +51,7 @@ const MAX_IMPORT_ZSTD_CODEC_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMPORT_REPRESENTATION_METADATA_BYTES: usize = 4 * 1024;
 const MAX_IMPORT_CAS_TRANSIENT_METADATA_BYTES: usize = 256 * 1024;
 const MAX_IMPORT_SEARCH_PEAK_BYTES: usize = MAX_IMPORT_ZSTD_OUTPUT_BYTES
+    + MAX_CANONICAL_NORMALIZATION_HEAP_BYTES
     + MAX_SEARCH_DERIVATION_BYTES
     + MAX_SEARCH_DERIVATION_BYTES
     + MAX_SEARCH_DERIVATION_BYTES
@@ -63,6 +64,7 @@ const MAX_IMPORT_SEARCH_PEAK_BYTES: usize = MAX_IMPORT_ZSTD_OUTPUT_BYTES
     + MAX_IMPORT_REPRESENTATION_METADATA_BYTES
     + MAX_IMPORT_CAS_TRANSIENT_METADATA_BYTES;
 const MAX_IMPORT_COMPRESSION_PEAK_BYTES: usize = MAX_IMPORT_ZSTD_OUTPUT_BYTES
+    + MAX_CANONICAL_NORMALIZATION_HEAP_BYTES
     + MAX_IMPORT_ZSTD_CODEC_BYTES
     + MAX_PREVIEW_BYTES
     + crate::CAS_VERIFY_BUFFER_BYTES
@@ -96,6 +98,8 @@ pub enum StoreError {
     RuntimeConfigurationMismatch,
     #[error("payload storage is unavailable until CAS storage is configured")]
     PayloadStorageUnavailable,
+    #[error("canonicalization_too_complex")]
+    CanonicalizationTooComplex,
     #[error(transparent)]
     Cas(#[from] CasError),
     #[error("failed to compress inline payload")]
@@ -1570,12 +1574,11 @@ fn prepare_ingest<'a>(
                 if input.content_flags.contains(ContentFlags::MISSING_PAYLOAD) {
                     return Err(StoreError::InvalidContentFlags);
                 }
-                (
-                    content_hash(input.kind, &input.primary_mime, bytes),
-                    canonical_byte_len(input.kind, bytes) as u64,
-                    Some(bytes),
-                    input.content_flags,
-                )
+                let byte_size = canonical_byte_len(input.kind, bytes)
+                    .map_err(|_| StoreError::CanonicalizationTooComplex)?;
+                let hash = content_hash(input.kind, &input.primary_mime, bytes)
+                    .map_err(|_| StoreError::CanonicalizationTooComplex)?;
+                (hash, byte_size as u64, Some(bytes), input.content_flags)
             }
             (None, Some(missing_ref)) => {
                 if !input.content_flags.contains(ContentFlags::MISSING_PAYLOAD) {
@@ -2277,6 +2280,7 @@ fn valid_reason_code(value: &str) -> bool {
 fn candidate_failure_reason(error: &StoreError) -> &'static str {
     match error {
         StoreError::PayloadStorageUnavailable => "invalid_candidate",
+        StoreError::CanonicalizationTooComplex => "canonicalization_too_complex",
         StoreError::Cas(_) | StoreError::PayloadCompression(_) => "payload_storage_failed",
         _ => "candidate_storage_failed",
     }

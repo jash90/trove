@@ -249,6 +249,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 name = "clipboard-core"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
  "bitflags",
  "blake3",
  "serde",
@@ -288,6 +289,7 @@ dependencies = [
 name = "clipboard-import-cli"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
  "blake3",
  "cap-fs-ext",
  "cap-std",

@@ -22,7 +22,9 @@ use std::{
     path::Path,
 };
 
-use clipboard_core::{CaptureInput, ContentKind, canonical_byte_len, update_canonical_bytes};
+use clipboard_core::{
+    CaptureInput, ContentKind, CoreError, canonical_byte_len, update_canonical_bytes,
+};
 use clipboard_store::ImportOperationPermit;
 use thiserror::Error;
 
@@ -577,11 +579,12 @@ pub(crate) fn stream_json_records_from_reader_with_limits<R: Read>(
     }
 
     let mut total = 0_usize;
+    let mut bytes = Vec::with_capacity(record_limit);
     loop {
         if first != b'{' {
             return Err(ImportError::export(source_kind, "invalid_document"));
         }
-        let mut bytes = Vec::with_capacity(record_limit);
+        bytes.clear();
         bytes.push(first);
         let mut too_large = false;
         let mut expected_delimiters = [0_u8; MAX_JSON_DELIMITER_DEPTH];
@@ -706,7 +709,7 @@ pub(crate) fn canonical_fingerprint<'a>(
     kind: ContentKind,
     stable_fields: impl IntoIterator<Item = Option<&'a str>>,
     primary_payload: &[u8],
-) -> [u8; 32] {
+) -> Result<[u8; 32], CoreError> {
     let mut hasher = FramedHasher::new();
     hasher.add_optional(Some(source.as_str().as_bytes()));
     hasher.add_optional(Some(captured_at_ms.to_string().as_bytes()));
@@ -714,8 +717,8 @@ pub(crate) fn canonical_fingerprint<'a>(
     for field in stable_fields {
         hasher.add_optional(field.map(str::as_bytes));
     }
-    hasher.add_canonical(kind, primary_payload);
-    hasher.finish()
+    hasher.add_canonical(kind, primary_payload)?;
+    Ok(hasher.finish())
 }
 
 pub(crate) struct FramedHasher(blake3::Hasher);
@@ -738,13 +741,18 @@ impl FramedHasher {
         }
     }
 
-    pub(crate) fn add_canonical(&mut self, kind: ContentKind, bytes: &[u8]) {
+    pub(crate) fn add_canonical(
+        &mut self,
+        kind: ContentKind,
+        bytes: &[u8],
+    ) -> Result<(), CoreError> {
         self.0.update(&[1]);
         self.0
-            .update(&(canonical_byte_len(kind, bytes) as u64).to_be_bytes());
+            .update(&(canonical_byte_len(kind, bytes)? as u64).to_be_bytes());
         update_canonical_bytes(kind, bytes, |chunk| {
             self.0.update(chunk);
-        });
+        })?;
+        Ok(())
     }
 
     pub(crate) fn finish(self) -> [u8; 32] {
@@ -875,6 +883,30 @@ mod tests {
         assert_eq!(observed[0], (1, Some(exact.to_vec())));
         assert_eq!(observed[1], (2, None));
         assert_eq!(observed[2], (3, Some(later.to_vec())));
+    }
+
+    #[test]
+    fn bounded_json_reuses_one_record_buffer_across_the_stream() {
+        let document = br#"[{"a":1},{"b":2},{"c":3}]"#;
+        let mut total = None;
+        let allocations = allocation_counter::measure(|| {
+            total = Some(stream_json_records_from_reader_with_limits(
+                Cursor::new(document),
+                "synthetic",
+                document.len(),
+                16,
+                |_, record| {
+                    assert!(matches!(record, JsonRecord::Complete(_)));
+                    Ok(true)
+                },
+            ));
+        });
+
+        assert_eq!(total.unwrap().unwrap(), 3);
+        assert_eq!(
+            allocations.count_total, 2,
+            "the reader and one reusable record buffer are the only expected allocations: {allocations:?}"
+        );
     }
 
     #[test]

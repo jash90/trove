@@ -1,8 +1,24 @@
-use std::fmt;
+use std::{fmt, mem::size_of};
 
 use serde::{Deserialize, Serialize};
 
+use crate::CoreError;
+
 pub type ContentHash = [u8; 32];
+
+/// Maximum canonical-decomposition non-starters accepted between starters.
+pub const MAX_CANONICAL_NONSTARTERS: usize = 4_096;
+/// Conservative peak heap allowance for the pinned NFC iterator's two `TinyVec` buffers.
+pub const MAX_CANONICAL_NORMALIZATION_HEAP_BYTES: usize = 128 * 1024;
+
+const MAX_CANONICAL_NORMALIZER_BUFFER_ITEMS: usize =
+    (MAX_CANONICAL_NONSTARTERS + 1).next_power_of_two();
+// Include both full buffers plus the old half-capacity decomposition buffer during growth.
+const _: () = assert!(
+    MAX_CANONICAL_NORMALIZER_BUFFER_ITEMS * (size_of::<(u8, char)>() + size_of::<char>())
+        + (MAX_CANONICAL_NORMALIZER_BUFFER_ITEMS / 2) * size_of::<(u8, char)>()
+        <= MAX_CANONICAL_NORMALIZATION_HEAP_BYTES
+);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,30 +130,34 @@ impl fmt::Debug for CaptureInput {
     }
 }
 
-pub fn canonical_text_bytes(value: &str) -> Vec<u8> {
+pub fn canonical_text_bytes(value: &str) -> Result<Vec<u8>, CoreError> {
     let bytes = value.as_bytes();
-    let mut canonical = Vec::with_capacity(canonical_byte_len(ContentKind::Text, bytes));
+    let mut canonical = Vec::with_capacity(canonical_byte_len(ContentKind::Text, bytes)?);
     update_canonical_bytes(ContentKind::Text, bytes, |chunk| {
         canonical.extend_from_slice(chunk);
-    });
-    canonical
+    })?;
+    Ok(canonical)
 }
 
-pub fn canonical_bytes(kind: ContentKind, bytes: &[u8]) -> Vec<u8> {
-    let mut canonical = Vec::with_capacity(canonical_byte_len(kind, bytes));
-    update_canonical_bytes(kind, bytes, |chunk| canonical.extend_from_slice(chunk));
-    canonical
+pub fn canonical_bytes(kind: ContentKind, bytes: &[u8]) -> Result<Vec<u8>, CoreError> {
+    let mut canonical = Vec::with_capacity(canonical_byte_len(kind, bytes)?);
+    update_canonical_bytes(kind, bytes, |chunk| canonical.extend_from_slice(chunk))?;
+    Ok(canonical)
 }
 
-pub fn canonical_byte_len(kind: ContentKind, bytes: &[u8]) -> usize {
+pub fn canonical_byte_len(kind: ContentKind, bytes: &[u8]) -> Result<usize, CoreError> {
     let mut byte_len = 0_usize;
     update_canonical_bytes(kind, bytes, |chunk| {
         byte_len = byte_len.saturating_add(chunk.len());
-    });
-    byte_len
+    })?;
+    Ok(byte_len)
 }
 
-pub fn update_canonical_bytes(kind: ContentKind, bytes: &[u8], mut update: impl FnMut(&[u8])) {
+pub fn update_canonical_bytes(
+    kind: ContentKind,
+    bytes: &[u8],
+    mut update: impl FnMut(&[u8]),
+) -> Result<(), CoreError> {
     use unicode_normalization::UnicodeNormalization;
 
     let Some(value) = kind
@@ -146,21 +166,48 @@ pub fn update_canonical_bytes(kind: ContentKind, bytes: &[u8], mut update: impl 
         .flatten()
     else {
         update(bytes);
-        return;
+        return Ok(());
     };
+    validate_canonical_combining_sequences(value)?;
+    let newline_normalized = newline_normalized_chars(value);
+    let mut encoded = [0_u8; 4];
+    for character in newline_normalized.nfc() {
+        update(character.encode_utf8(&mut encoded).as_bytes());
+    }
+    Ok(())
+}
+
+fn newline_normalized_chars(value: &str) -> impl Iterator<Item = char> + '_ {
     let mut previous_was_cr = false;
-    let newline_normalized = value.chars().filter_map(move |character| {
+    value.chars().filter_map(move |character| {
         if character == '\n' && previous_was_cr {
             previous_was_cr = false;
             return None;
         }
         previous_was_cr = character == '\r';
         Some(if character == '\r' { '\n' } else { character })
-    });
-    let mut encoded = [0_u8; 4];
-    for character in newline_normalized.nfc() {
-        update(character.encode_utf8(&mut encoded).as_bytes());
+    })
+}
+
+fn validate_canonical_combining_sequences(value: &str) -> Result<(), CoreError> {
+    use unicode_normalization::char::{canonical_combining_class, decompose_canonical};
+
+    let mut nonstarters = 0_usize;
+    for character in newline_normalized_chars(value) {
+        let mut exceeded = false;
+        decompose_canonical(character, |decomposed| {
+            if canonical_combining_class(decomposed) == 0 {
+                nonstarters = 0;
+            } else {
+                nonstarters += 1;
+                exceeded |= nonstarters > MAX_CANONICAL_NONSTARTERS;
+            }
+        });
+        if exceeded {
+            return Err(CoreError::CanonicalizationTooComplex);
+        }
     }
+    Ok(())
 }
 
 /// Normalizes a UTF-8 search prefix without ever growing the result beyond `max_bytes`.
@@ -188,7 +235,11 @@ pub fn normalize_search_text_bounded(value: &str, max_bytes: usize) -> String {
     normalized
 }
 
-pub fn content_hash(kind: ContentKind, primary_mime: &str, bytes: &[u8]) -> ContentHash {
+pub fn content_hash(
+    kind: ContentKind,
+    primary_mime: &str,
+    bytes: &[u8],
+) -> Result<ContentHash, CoreError> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(kind.as_str().as_bytes());
     hasher.update(&[0]);
@@ -196,8 +247,8 @@ pub fn content_hash(kind: ContentKind, primary_mime: &str, bytes: &[u8]) -> Cont
     hasher.update(&[0]);
     update_canonical_bytes(kind, bytes, |chunk| {
         hasher.update(chunk);
-    });
-    *hasher.finalize().as_bytes()
+    })?;
+    Ok(*hasher.finalize().as_bytes())
 }
 
 #[cfg(test)]
@@ -214,10 +265,11 @@ mod tests {
         let expected = "é\nbrace { and text".as_bytes();
         let mut streamed = Vec::new();
 
-        let byte_len = canonical_byte_len(ContentKind::Text, input);
+        let byte_len = canonical_byte_len(ContentKind::Text, input).unwrap();
         update_canonical_bytes(ContentKind::Text, input, |chunk| {
             streamed.extend_from_slice(chunk);
-        });
+        })
+        .unwrap();
 
         assert_eq!(byte_len, expected.len());
         assert_eq!(streamed, expected);
@@ -225,13 +277,13 @@ mod tests {
 
     #[test]
     fn canonical_text_normalizes_newlines_but_preserves_spaces() {
-        assert_eq!(canonical_text_bytes("a\r\n b  "), b"a\n b  ");
+        assert_eq!(canonical_text_bytes("a\r\n b  ").unwrap(), b"a\n b  ");
     }
 
     #[test]
     fn canonical_bytes_normalizes_textual_nfc_and_newlines() {
         assert_eq!(
-            canonical_bytes(ContentKind::Text, "e\u{301}\r\n b  ".as_bytes()),
+            canonical_bytes(ContentKind::Text, "e\u{301}\r\n b  ".as_bytes()).unwrap(),
             "é\n b  ".as_bytes(),
         );
     }
@@ -239,24 +291,68 @@ mod tests {
     #[test]
     fn canonical_bytes_preserves_non_textual_bytes() {
         let payload = [0x00, 0xff, 0x0d, 0x0a];
-        assert_eq!(canonical_bytes(ContentKind::Image, &payload), payload);
+        assert_eq!(
+            canonical_bytes(ContentKind::Image, &payload).unwrap(),
+            payload
+        );
     }
 
     #[test]
     fn canonical_bytes_preserves_invalid_utf8() {
         let payload = [0x66, 0x80, 0x0d, 0x0a];
-        assert_eq!(canonical_bytes(ContentKind::Text, &payload), payload);
+        assert_eq!(
+            canonical_bytes(ContentKind::Text, &payload).unwrap(),
+            payload
+        );
     }
 
     #[test]
     fn equal_canonical_payloads_have_equal_blake3_hashes() {
         assert_eq!(
-            content_hash(ContentKind::Text, "text/plain", b"a\n"),
+            content_hash(ContentKind::Text, "text/plain", b"a\n").unwrap(),
             content_hash(
                 ContentKind::Text,
                 "text/plain",
-                canonical_text_bytes("a\r\n").as_slice()
-            ),
+                canonical_text_bytes("a\r\n").unwrap().as_slice()
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn canonical_nfc_rejects_before_the_real_normalizer_can_exceed_its_heap_bound() {
+        let accepted_input = format!("a{}", "\u{301}".repeat(4_096));
+        let mut accepted = None;
+        let accepted_allocations = allocation_counter::measure(|| {
+            accepted = Some(canonical_byte_len(
+                ContentKind::Text,
+                accepted_input.as_bytes(),
+            ));
+        });
+
+        assert_eq!(accepted.unwrap().unwrap(), accepted_input.len() - 1);
+        assert!(
+            accepted_allocations.bytes_max <= 128 * 1024,
+            "the real NFC buffers exceeded the proved heap allowance: {accepted_allocations:?}"
+        );
+        assert_eq!(accepted_allocations.bytes_current, 0);
+
+        let rejected_input = format!("a{}", "\u{301}".repeat(4_097));
+        let mut rejected = None;
+        let rejected_allocations = allocation_counter::measure(|| {
+            rejected = Some(canonical_byte_len(
+                ContentKind::Text,
+                rejected_input.as_bytes(),
+            ));
+        });
+
+        assert_eq!(
+            rejected.unwrap().unwrap_err().to_string(),
+            "canonicalization_too_complex"
+        );
+        assert_eq!(
+            rejected_allocations.bytes_total, 0,
+            "rejection happened after entering the allocating NFC path: {rejected_allocations:?}"
         );
     }
 

@@ -139,6 +139,20 @@ async fn equivalent_unicode_events_share_content_but_not_raw_storage_identity() 
 }
 
 #[tokio::test]
+async fn live_writer_rejects_a_pathological_canonical_combining_sequence() {
+    let (_directory, store) = open_store();
+    let payload = format!("a{}", "\u{301}".repeat(4_097));
+
+    let error = store
+        .ingest(capture(payload.as_bytes(), 1_000))
+        .await
+        .expect_err("the writer must reject normalization state above the hard bound");
+
+    assert_eq!(error.to_string(), "canonicalization_too_complex");
+    assert_eq!(store.stats().unwrap().event_count, 0);
+}
+
+#[tokio::test]
 async fn identical_event_bytes_reuse_one_raw_payload() {
     let (_directory, store) = open_store();
     store

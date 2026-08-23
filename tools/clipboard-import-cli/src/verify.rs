@@ -10,7 +10,8 @@ use std::{
 
 use clipboard_core::{ContentFlags, ContentKind, canonical_byte_len, content_hash};
 use clipboard_store::{
-    CasStore, MAX_CAS_OBJECT_BYTES, ReadOnlyStore, StorageBoundaryError, StorageBoundaryLease,
+    CasError, CasStore, MAX_CAS_OBJECT_BYTES, ReadOnlyStore, StorageBoundaryError,
+    StorageBoundaryLease,
 };
 use rusqlite::{
     Connection, MAIN_DB, OpenFlags, OptionalExtension,
@@ -100,9 +101,19 @@ fn verify_with_boundary(
         .map_err(store_failure)?;
     let cas = store.cas_store().map_err(store_failure)?;
     let snapshot = store
-        .with_reader(|connection| read_verification_snapshot(connection, &cas))
-        .map_err(store_failure)?;
+        .with_reader(|connection| Ok(read_verification_snapshot(connection, &cas)))
+        .map_err(store_failure)?
+        .map_err(verification_read_failure)?;
     verification_output(snapshot, expect_records)
+}
+
+fn verification_read_failure(error: VerificationReadError) -> CliFailure {
+    match error {
+        VerificationReadError::Database(error) => store_failure(error.into()),
+        VerificationReadError::PrivateStorageUnavailable => {
+            CliFailure::new("private_storage_unavailable")
+        }
+    }
 }
 
 fn blob_root_failure_output(expect_records: u64) -> VerifyOutput {
@@ -190,10 +201,34 @@ enum EpochRead<T> {
     Changed,
 }
 
+#[derive(Debug)]
+enum VerificationReadError {
+    Database(rusqlite::Error),
+    PrivateStorageUnavailable,
+}
+
+impl From<rusqlite::Error> for VerificationReadError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
+type VerificationReadResult<T> = Result<T, VerificationReadError>;
+
+fn audited_cas<T>(result: Result<T, CasError>) -> VerificationReadResult<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(CasError::PrivateStorageUnavailable) => {
+            Err(VerificationReadError::PrivateStorageUnavailable)
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 fn read_verification_snapshot(
     connection: &Connection,
     cas: &CasStore,
-) -> rusqlite::Result<VerificationSnapshot> {
+) -> VerificationReadResult<VerificationSnapshot> {
     read_verification_snapshot_with_observer(connection, cas, &mut |_, _| {})
 }
 
@@ -201,9 +236,9 @@ fn read_verification_snapshot_with_observer(
     connection: &Connection,
     cas: &CasStore,
     observe: &mut impl FnMut(VerificationPhase, &Connection),
-) -> rusqlite::Result<VerificationSnapshot> {
+) -> VerificationReadResult<VerificationSnapshot> {
     if !connection.is_autocommit() {
-        return Err(rusqlite::Error::InvalidQuery);
+        return Err(rusqlite::Error::InvalidQuery.into());
     }
     let epoch = data_version(connection)?;
     read_verification_snapshot_inner(connection, cas, epoch, observe)
@@ -245,7 +280,7 @@ fn read_verification_snapshot_inner(
     cas: &CasStore,
     epoch: i64,
     observe: &mut impl FnMut(VerificationPhase, &Connection),
-) -> rusqlite::Result<VerificationSnapshot> {
+) -> VerificationReadResult<VerificationSnapshot> {
     let missing_mask = i64::from(ContentFlags::MISSING_PAYLOAD.bits());
     let EpochRead::Stable(claims) = read_short_snapshot(connection, epoch, |connection| {
         read_scalar_claims(connection, missing_mask)
@@ -505,7 +540,7 @@ fn semantic_storage_is_coherent(
     epoch: i64,
     shape_ok: bool,
     observe: &mut impl FnMut(VerificationPhase, &Connection),
-) -> rusqlite::Result<EpochRead<AuditStatus>> {
+) -> VerificationReadResult<EpochRead<AuditStatus>> {
     let mut status = AuditStatus {
         logical_ok: shape_ok,
         blob_ok: true,
@@ -548,7 +583,7 @@ fn audit_raw_payload_pages_with_observer(
     cas: &CasStore,
     epoch: i64,
     observe: &mut impl FnMut(VerificationPhase, &Connection),
-) -> rusqlite::Result<EpochRead<AuditStatus>> {
+) -> VerificationReadResult<EpochRead<AuditStatus>> {
     let mut status = AuditStatus::healthy();
     let mut last_id = 0_i64;
     loop {
@@ -660,7 +695,7 @@ fn audit_raw_payload_pages_with_observer(
                         if !epoch_is_current(connection, epoch)? {
                             return Ok(EpochRead::Changed);
                         }
-                        cas.verify(path, original_size as u64).is_ok()
+                        audited_cas(cas.verify(path, original_size as u64))?.is_some()
                     } else {
                         false
                     };
@@ -792,7 +827,7 @@ fn audit_event_primary_pages(
     cas: &CasStore,
     epoch: i64,
     observe: &mut impl FnMut(VerificationPhase, &Connection),
-) -> rusqlite::Result<EpochRead<AuditStatus>> {
+) -> VerificationReadResult<EpochRead<AuditStatus>> {
     let mut status = AuditStatus::healthy();
     let mut last_event_id = 0_i64;
     loop {
@@ -882,9 +917,16 @@ fn audit_event_primary_pages(
             if !epoch_is_current(connection, epoch)? {
                 return Ok(EpochRead::Changed);
             }
-            let canonical_size = canonical_byte_len(kind, &bytes);
-            status.logical_ok &= content_size == canonical_size
-                && stored_content_hash == content_hash(kind, primary_mime, &bytes);
+            let Ok(canonical_size) = canonical_byte_len(kind, &bytes) else {
+                status.logical_ok = false;
+                continue;
+            };
+            let Ok(expected_content_hash) = content_hash(kind, primary_mime, &bytes) else {
+                status.logical_ok = false;
+                continue;
+            };
+            status.logical_ok &=
+                content_size == canonical_size && stored_content_hash == expected_content_hash;
         }
         if !page_is_full {
             break;
@@ -971,7 +1013,7 @@ fn read_primary_payload(
     epoch: i64,
     metadata: &PrimaryMetadata,
     observe: &mut impl FnMut(VerificationPhase, &Connection),
-) -> rusqlite::Result<Option<Vec<u8>>> {
+) -> VerificationReadResult<Option<Vec<u8>>> {
     let Some(raw_payload_id) = metadata.raw_payload_id else {
         return Ok(None);
     };
@@ -995,14 +1037,14 @@ fn read_primary_payload(
                 && original_size < 4 * 1024
                 && stored_size == original_size =>
         {
-            read_bounded_inline_payload(
+            Ok(read_bounded_inline_payload(
                 connection,
                 raw_payload_id,
                 "inline",
                 original_size,
                 stored_size,
                 observe,
-            )
+            )?)
         }
         Some("inline_zstd")
             if metadata.inline_type == "blob"
@@ -1044,10 +1086,7 @@ fn read_primary_payload(
             if !epoch_is_current(connection, epoch)? {
                 return Ok(None);
             }
-            Ok(cas
-                .read(relpath)
-                .ok()
-                .filter(|bytes| bytes.len() == original_size))
+            Ok(audited_cas(cas.read(relpath))?.filter(|bytes| bytes.len() == original_size))
         }
         _ => Ok(None),
     }
@@ -1065,7 +1104,7 @@ fn audit_artifact_pages(
     cas: &CasStore,
     epoch: i64,
     observe: &mut impl FnMut(VerificationPhase, &Connection),
-) -> rusqlite::Result<EpochRead<AuditStatus>> {
+) -> VerificationReadResult<EpochRead<AuditStatus>> {
     let mut status = AuditStatus::healthy();
     let mut last_id = 0_i64;
     loop {
@@ -1098,7 +1137,7 @@ fn audit_artifact_pages(
                 if !epoch_is_current(connection, epoch)? {
                     return Ok(EpochRead::Changed);
                 }
-                cas.verify(path, size as u64).is_ok()
+                audited_cas(cas.verify(path, size as u64))?.is_some()
             } else {
                 false
             };
@@ -1243,41 +1282,81 @@ fn read_kind_counts(
         .collect()
 }
 
+const LATEST_SOURCES_SQL: &str = "WITH selected_ids(source_kind, import_run_id) AS (
+       SELECT 'raycast', (
+         SELECT import_run_id
+         FROM import_run INDEXED BY idx_import_run_source_fingerprint
+         WHERE source_kind = 'raycast' AND status = 'completed'
+         ORDER BY COALESCE(
+                    CASE WHEN typeof(finished_at_ms) = 'integer' THEN finished_at_ms END,
+                    CASE WHEN typeof(started_at_ms) = 'integer' THEN started_at_ms END
+                  ) DESC,
+                  import_run_id DESC
+         LIMIT 1
+       )
+       UNION ALL
+       SELECT 'supercmd', (
+         SELECT import_run_id
+         FROM import_run INDEXED BY idx_import_run_source_fingerprint
+         WHERE source_kind = 'supercmd' AND status = 'completed'
+         ORDER BY COALESCE(
+                    CASE WHEN typeof(finished_at_ms) = 'integer' THEN finished_at_ms END,
+                    CASE WHEN typeof(started_at_ms) = 'integer' THEN started_at_ms END
+                  ) DESC,
+                  import_run_id DESC
+         LIMIT 1
+       )
+     )
+     SELECT selected_ids.source_kind,
+            CASE WHEN typeof(selected.total_records) = 'integer'
+                 THEN selected.total_records END,
+            CASE WHEN typeof(selected.imported_records) = 'integer'
+                 THEN selected.imported_records END,
+            CASE WHEN typeof(selected.already_present_records) = 'integer'
+                 THEN selected.already_present_records END,
+            CASE WHEN typeof(selected.skipped_records) = 'integer'
+                 THEN selected.skipped_records END,
+            CASE WHEN typeof(selected.failed_records) = 'integer'
+                 THEN selected.failed_records END,
+            CASE WHEN typeof(selected.source_fingerprint) = 'blob'
+                       AND length(selected.source_fingerprint) = 32
+                 THEN (
+                   SELECT count(*)
+                   FROM import_record ir
+                   JOIN import_run owner ON owner.import_run_id = ir.import_run_id
+                   WHERE owner.status = 'completed'
+                     AND owner.source_kind = selected_ids.source_kind
+                     AND typeof(owner.source_fingerprint) = 'blob'
+                     AND length(owner.source_fingerprint) = 32
+                     AND owner.source_fingerprint = selected.source_fingerprint
+                 )
+            END,
+            CASE WHEN typeof(selected.source_fingerprint) = 'blob'
+                       AND length(selected.source_fingerprint) = 32
+                 THEN (
+                   SELECT CASE
+                            WHEN count(*) = count(
+                              CASE WHEN typeof(owner.imported_records) = 'integer' THEN 1 END
+                            )
+                            THEN COALESCE(sum(
+                              CASE WHEN typeof(owner.imported_records) = 'integer'
+                                   THEN owner.imported_records END
+                            ), 0)
+                          END
+                   FROM import_run owner
+                   WHERE owner.status = 'completed'
+                     AND owner.source_kind = selected_ids.source_kind
+                     AND typeof(owner.source_fingerprint) = 'blob'
+                     AND length(owner.source_fingerprint) = 32
+                     AND owner.source_fingerprint = selected.source_fingerprint
+                 )
+            END
+     FROM selected_ids
+     JOIN import_run selected ON selected.import_run_id = selected_ids.import_run_id
+     ORDER BY selected_ids.source_kind";
+
 fn read_latest_sources(connection: &Connection) -> rusqlite::Result<Vec<RawSourceSummary>> {
-    let mut statement = connection.prepare(
-        "WITH expected(source_kind) AS (VALUES ('raycast'), ('supercmd')),
-         completed AS MATERIALIZED (
-           SELECT r.*,
-                  ROW_NUMBER() OVER (
-                    PARTITION BY r.source_kind
-                    ORDER BY COALESCE(r.finished_at_ms, r.started_at_ms) DESC,
-                             r.import_run_id DESC
-                  ) AS position
-           FROM import_run r
-           JOIN expected e USING (source_kind)
-           WHERE r.status = 'completed'
-         )
-         SELECT source_kind, total_records, imported_records, already_present_records,
-                skipped_records, failed_records,
-                (
-                  SELECT count(*)
-                  FROM import_record ir
-                  JOIN import_run owner ON owner.import_run_id = ir.import_run_id
-                  WHERE owner.status = 'completed'
-                    AND owner.source_kind = selected.source_kind
-                    AND owner.source_fingerprint = selected.source_fingerprint
-                ),
-                (
-                  SELECT COALESCE(sum(owner.imported_records), 0)
-                  FROM import_run owner
-                  WHERE owner.status = 'completed'
-                    AND owner.source_kind = selected.source_kind
-                    AND owner.source_fingerprint = selected.source_fingerprint
-                )
-         FROM completed selected
-         WHERE position = 1
-         ORDER BY source_kind, source_fingerprint",
-    )?;
+    let mut statement = connection.prepare(LATEST_SOURCES_SQL)?;
     statement
         .query_map([], |row| {
             Ok(RawSourceSummary {
@@ -1915,7 +1994,7 @@ mod tests {
         time::Duration,
     };
 
-    use rusqlite::{Connection, OpenFlags};
+    use rusqlite::{Connection, OpenFlags, limits::Limit};
 
     use clipboard_core::{
         CaptureInput, ContentFlags, ContentKind, EventFlags, RepresentationInput, SourceConfidence,
@@ -1927,9 +2006,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::{
-        BackupProgress, BackupStep, FtsScratchError, FtsScratchPolicy, ScratchEvent,
-        VerificationPhase, audit_raw_payload_pages_with_observer, data_version,
-        fts_is_coherent_with_policy, fts_scratch_check_with_cleanup, read_short_snapshot,
+        BackupProgress, BackupStep, FtsScratchError, FtsScratchPolicy, LATEST_SOURCES_SQL,
+        ScratchEvent, VerificationPhase, audit_event_primary_pages,
+        audit_raw_payload_pages_with_observer, data_version, fts_is_coherent_with_policy,
+        fts_scratch_check_with_cleanup, read_latest_sources, read_short_snapshot,
         read_verification_snapshot_with_observer, run_backup_loop, verification_output,
     };
 
@@ -1986,7 +2066,7 @@ mod tests {
 
         store
             .with_reader(|connection| {
-                read_verification_snapshot_with_observer(
+                Ok(read_verification_snapshot_with_observer(
                     connection,
                     &cas,
                     &mut |phase, connection| {
@@ -2003,8 +2083,9 @@ mod tests {
                             observed.borrow_mut().push(phase);
                         }
                     },
-                )
+                ))
             })
+            .unwrap()
             .unwrap();
 
         for phase in [
@@ -2077,6 +2158,163 @@ mod tests {
                 "{storage_kind} payload was fetched before its metadata was bounded"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn verifier_rejects_pathological_nfc_without_unbounded_normalizer_allocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("history.sqlite");
+        let blob_root = directory.path().join("history.blobs");
+        let config = StoreConfig::new(&database).with_blob_root(&blob_root);
+        let store = StoreHandle::open(config).unwrap();
+        store
+            .ingest(CaptureInput {
+                captured_at_ms: 1_000,
+                kind: ContentKind::Text,
+                primary_mime: "text/plain".to_owned(),
+                representations: vec![RepresentationInput {
+                    format_id: "public.utf8-plain-text".to_owned(),
+                    bytes: Some(vec![b'z'; 5_000]),
+                    missing_ref: None,
+                }],
+                source_app_id: None,
+                source_app_name: None,
+                source_confidence: SourceConfidence::Unknown,
+                pinned: false,
+                occurrence_count: 1,
+                content_flags: ContentFlags::empty(),
+                event_flags: EventFlags::empty(),
+            })
+            .await
+            .unwrap();
+        drop(store);
+
+        let pathological = format!("a{}", "\u{301}".repeat(100_000));
+        let compressed = zstd::bulk::compress(pathological.as_bytes(), 3).unwrap();
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE raw_payload
+                 SET raw_digest = ?1, inline_payload = ?2,
+                     original_byte_size = ?3, stored_byte_size = ?4
+                 WHERE storage_kind = 'inline_zstd'",
+                rusqlite::params![
+                    blake3::hash(pathological.as_bytes()).as_bytes(),
+                    compressed,
+                    i64::try_from(pathological.len()).unwrap(),
+                    i64::try_from(compressed.len()).unwrap(),
+                ],
+            )
+            .unwrap();
+        let cas = clipboard_store::CasStore::new(blob_root);
+        let epoch = data_version(&connection).unwrap();
+        let mut audit = None;
+
+        let allocations = allocation_counter::measure(|| {
+            audit = Some(audit_event_primary_pages(
+                &connection,
+                &cas,
+                epoch,
+                &mut |_, _| {},
+            ));
+        });
+
+        let super::EpochRead::Stable(status) = audit.unwrap().unwrap() else {
+            panic!("the unchanged verifier fixture unexpectedly invalidated its epoch");
+        };
+        assert!(!status.logical_ok);
+        assert!(
+            allocations.bytes_max <= pathological.len() as u64 + 512 * 1024,
+            "the verifier entered the unbounded NFC allocation path: {allocations:?}"
+        );
+        assert_eq!(allocations.bytes_current, 0);
+    }
+
+    #[test]
+    fn latest_source_lookup_stays_narrow_with_many_oversized_unused_columns() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("history.sqlite");
+        drop(StoreHandle::open(StoreConfig::new(&database)).unwrap());
+        let connection = Connection::open(&database).unwrap();
+        let oversized_unused_text = "unused-private-sentinel-".repeat(4_096);
+        for index in 0_u64..300 {
+            let mut external_id = [0_u8; 16];
+            external_id[..8].copy_from_slice(&index.to_be_bytes());
+            external_id[6] = (external_id[6] & 0x0f) | 0x70;
+            external_id[8] = (external_id[8] & 0x3f) | 0x80;
+            let source_kind = if index % 2 == 0 {
+                "raycast"
+            } else {
+                "supercmd"
+            };
+            connection
+                .execute(
+                    "INSERT INTO import_run(
+                       external_id, source_kind, source_fingerprint,
+                       initial_failure_fingerprint, status, total_records,
+                       candidate_records, next_candidate_offset, imported_records,
+                       already_present_records, skipped_records, failed_records,
+                       started_at_ms, finished_at_ms, error_code
+                     ) VALUES (?1, ?2, ?3, ?4, 'completed', 0, 0, 0, 0, 0, 0, 0, ?5, ?5, ?6)",
+                    rusqlite::params![
+                        external_id.as_slice(),
+                        source_kind,
+                        blake3::hash(&index.to_be_bytes()).as_bytes(),
+                        blake3::hash(&index.wrapping_add(1).to_be_bytes()).as_bytes(),
+                        i64::try_from(index).unwrap(),
+                        oversized_unused_text,
+                    ],
+                )
+                .unwrap();
+        }
+        connection
+            .set_limit(Limit::SQLITE_LIMIT_COLUMN, 12)
+            .unwrap();
+
+        let summaries = read_latest_sources(&connection).unwrap();
+
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].source_kind, "raycast");
+        assert_eq!(summaries[1].source_kind, "supercmd");
+    }
+
+    #[test]
+    fn latest_source_query_plan_uses_two_indexed_top_one_lookups() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("history.sqlite");
+        drop(StoreHandle::open(StoreConfig::new(&database)).unwrap());
+        let connection = Connection::open(&database).unwrap();
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {LATEST_SOURCES_SQL}"))
+            .unwrap();
+        let details = statement
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(
+            details
+                .iter()
+                .filter(|detail| detail.contains("idx_import_run_source_fingerprint"))
+                .count()
+                >= 2,
+            "missing per-source index searches: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .filter(|detail| detail.contains("INTEGER PRIMARY KEY"))
+                .count()
+                >= 1,
+            "missing indexed selected-row lookups: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("MATERIALIZE completed")),
+            "the historical wide-row CTE returned: {details:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -2163,7 +2401,7 @@ mod tests {
 
             let snapshot = reader
                 .with_reader(|connection| {
-                    read_verification_snapshot_with_observer(
+                    Ok(read_verification_snapshot_with_observer(
                         connection,
                         &cas,
                         &mut |phase, connection| {
@@ -2179,8 +2417,9 @@ mod tests {
                                     .unwrap();
                             }
                         },
-                    )
+                    ))
                 })
+                .unwrap()
                 .unwrap();
             assert!(hook_fired.get(), "missing {target_phase:?} hook");
 

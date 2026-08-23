@@ -1073,6 +1073,63 @@ fn verify_reports_private_storage_with_only_the_stable_json_code() {
     drop(sandbox);
 }
 
+#[cfg(unix)]
+#[test]
+fn verify_preserves_private_storage_error_from_a_real_cas_object() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (sandbox, data_dir) = imported_store_with_cas();
+    let blob_path = first_cas_blob_path(&data_dir);
+    let blob_name = blob_path.file_name().unwrap().to_str().unwrap().to_owned();
+    fs::set_permissions(&blob_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stderr).unwrap(),
+        json!({"status": "error", "code": "private_storage_unavailable"})
+    );
+    assert_redacted(
+        &output,
+        &[&blob_name, "synthetic-data", "synthetic-available.png"],
+    );
+    drop(sandbox);
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_preserves_private_storage_error_from_a_real_cas_shard() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (sandbox, data_dir) = imported_store_with_cas();
+    let blob_path = first_cas_blob_path(&data_dir);
+    let shard_path = blob_path.parent().unwrap();
+    let shard_name = shard_path.file_name().unwrap().to_str().unwrap().to_owned();
+    let blob_name = blob_path.file_name().unwrap().to_str().unwrap().to_owned();
+    fs::set_permissions(shard_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = run_verify(&data_dir, 2);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stderr).unwrap(),
+        json!({"status": "error", "code": "private_storage_unavailable"})
+    );
+    assert_redacted(
+        &output,
+        &[
+            &shard_name,
+            &blob_name,
+            "synthetic-data",
+            "synthetic-available.png",
+        ],
+    );
+    drop(sandbox);
+}
+
 #[test]
 fn verify_reports_failed_blob_status_for_a_missing_cas_blob() {
     let (_sandbox, data_dir) = imported_store_with_cas();
