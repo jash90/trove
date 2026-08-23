@@ -524,6 +524,7 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "get_storage_stats",
             "get_thumbnail",
             "reveal_source",
+            "open_settings_window",
         ]
     );
 
