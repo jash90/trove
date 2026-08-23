@@ -13,7 +13,7 @@ use clipboard_core::ContentHash;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::StorageBoundaryLease;
+use crate::{StorageBoundaryError, StorageBoundaryLease};
 
 pub const CAS_VERIFY_BUFFER_BYTES: usize = 64 * 1024;
 pub const MAX_CAS_OBJECT_BYTES: usize = 128 * 1024 * 1024;
@@ -44,21 +44,12 @@ pub struct CasVerification {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GcStepBudget {
     max_entries: usize,
-    max_filesystem_operations: usize,
 }
 
 impl GcStepBudget {
     pub const fn new(maximum: usize) -> Self {
         Self {
             max_entries: maximum,
-            max_filesystem_operations: maximum,
-        }
-    }
-
-    pub const fn with_limits(max_entries: usize, max_filesystem_operations: usize) -> Self {
-        Self {
-            max_entries,
-            max_filesystem_operations,
         }
     }
 }
@@ -66,8 +57,7 @@ impl GcStepBudget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GcStep {
     pub examined_entries: usize,
-    pub filesystem_operations: usize,
-    pub removed_objects: usize,
+    pub orphan_candidates: usize,
     pub complete: bool,
 }
 
@@ -364,7 +354,7 @@ impl CasStore {
         if let Some(boundary) = &self.storage_boundary {
             boundary
                 .validate_for_cas(&self.root)
-                .map_err(|_| CasError::FilesystemBoundary)?;
+                .map_err(map_storage_boundary_error)?;
         }
         Ok(())
     }
@@ -374,7 +364,7 @@ impl CasStore {
             .as_ref()
             .ok_or(CasError::FilesystemBoundary)?
             .clone_blob_directory()
-            .map_err(|_| CasError::FilesystemBoundary)
+            .map_err(map_storage_boundary_error)
     }
 
     fn put_leased(&self, bytes: &[u8]) -> Result<CasBlob, CasError> {
@@ -762,6 +752,13 @@ impl CasStore {
     }
 }
 
+fn map_storage_boundary_error(error: StorageBoundaryError) -> CasError {
+    match error {
+        StorageBoundaryError::Changed => CasError::FilesystemBoundary,
+        StorageBoundaryError::PrivateStorageUnavailable => CasError::PrivateStorageUnavailable,
+    }
+}
+
 impl CasGcSession {
     pub fn step(
         &mut self,
@@ -771,24 +768,19 @@ impl CasGcSession {
         self.store.validate_storage_boundary()?;
         let mut outcome = GcStep {
             examined_entries: 0,
-            filesystem_operations: 0,
-            removed_objects: 0,
+            orphan_candidates: 0,
             complete: matches!(self.state, GcState::Complete),
         };
-        while !outcome.complete
-            && outcome.examined_entries < budget.max_entries
-            && outcome.filesystem_operations < budget.max_filesystem_operations
-        {
+        while !outcome.complete && outcome.examined_entries < budget.max_entries {
             let progress = match &mut self.state {
                 GcState::Direct(state) => next_direct_gc_entry(&self.store, state, &mut is_live)?,
                 GcState::Leased(state) => next_leased_gc_entry(state, &mut is_live)?,
                 GcState::Complete => GcProgress::Complete,
             };
             match progress {
-                GcProgress::Examined { removed } => {
+                GcProgress::Examined { orphan_candidate } => {
                     outcome.examined_entries += 1;
-                    outcome.filesystem_operations += 1;
-                    outcome.removed_objects += usize::from(removed);
+                    outcome.orphan_candidates += usize::from(orphan_candidate);
                 }
                 GcProgress::Complete => {
                     self.state = GcState::Complete;
@@ -802,7 +794,7 @@ impl CasGcSession {
 }
 
 enum GcProgress {
-    Examined { removed: bool },
+    Examined { orphan_candidate: bool },
     Complete,
 }
 
@@ -818,27 +810,42 @@ fn next_direct_gc_entry(
                 Some(Ok(entry)) => {
                     let blob_name = match entry.file_name().into_string() {
                         Ok(name) => name,
-                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                        Err(_) => {
+                            return Ok(GcProgress::Examined {
+                                orphan_candidate: false,
+                            });
+                        }
                     };
                     let relpath = format!("{}/{blob_name}", shard.name);
                     if !is_valid_relpath(&relpath) {
-                        return Ok(GcProgress::Examined { removed: false });
+                        return Ok(GcProgress::Examined {
+                            orphan_candidate: false,
+                        });
                     }
                     let path = shard.directory.join(&blob_name);
                     let Some(file) = valid_direct_gc_file(&path)? else {
-                        return Ok(GcProgress::Examined { removed: false });
+                        return Ok(GcProgress::Examined {
+                            orphan_candidate: false,
+                        });
                     };
                     if store.verify_inner(&relpath, file.size).is_err() || is_live(&relpath)? {
-                        return Ok(GcProgress::Examined { removed: false });
+                        return Ok(GcProgress::Examined {
+                            orphan_candidate: false,
+                        });
                     }
                     let Some(after) = valid_direct_gc_file(&path)? else {
-                        return Ok(GcProgress::Examined { removed: false });
+                        return Ok(GcProgress::Examined {
+                            orphan_candidate: false,
+                        });
                     };
                     if after.identity != file.identity {
-                        return Ok(GcProgress::Examined { removed: false });
+                        return Ok(GcProgress::Examined {
+                            orphan_candidate: false,
+                        });
                     }
-                    fs::remove_file(path).map_err(CasError::Io)?;
-                    return Ok(GcProgress::Examined { removed: true });
+                    return Ok(GcProgress::Examined {
+                        orphan_candidate: true,
+                    });
                 }
                 None => state.shard = None,
             }
@@ -848,26 +855,42 @@ fn next_direct_gc_entry(
                 Some(Ok(entry)) => {
                     let name = match entry.file_name().into_string() {
                         Ok(name) => name,
-                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                        Err(_) => {
+                            return Ok(GcProgress::Examined {
+                                orphan_candidate: false,
+                            });
+                        }
                     };
                     if name == ".tmp" || !is_lower_hex(&name, 2) {
-                        return Ok(GcProgress::Examined { removed: false });
+                        return Ok(GcProgress::Examined {
+                            orphan_candidate: false,
+                        });
                     }
                     let path = entry.path();
                     let directory = match store.validate_existing_directory(&state.root, &path) {
                         Ok(directory) => directory,
-                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                        Err(_) => {
+                            return Ok(GcProgress::Examined {
+                                orphan_candidate: false,
+                            });
+                        }
                     };
                     let entries = match fs::read_dir(&directory) {
                         Ok(entries) => entries,
-                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                        Err(_) => {
+                            return Ok(GcProgress::Examined {
+                                orphan_candidate: false,
+                            });
+                        }
                     };
                     state.shard = Some(DirectGcShard {
                         name,
                         directory,
                         entries,
                     });
-                    return Ok(GcProgress::Examined { removed: false });
+                    return Ok(GcProgress::Examined {
+                        orphan_candidate: false,
+                    });
                 }
                 None => return Ok(GcProgress::Complete),
             }
@@ -946,49 +969,75 @@ fn next_leased_gc_entry(
                 Some(Ok(entry)) => {
                     let blob_name = match entry.file_name().into_string() {
                         Ok(name) => name,
-                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                        Err(_) => {
+                            return Ok(GcProgress::Examined {
+                                orphan_candidate: false,
+                            });
+                        }
                     };
                     let relpath = format!("{}/{blob_name}", shard.name);
                     if !is_valid_relpath(&relpath) {
-                        return Ok(GcProgress::Examined { removed: false });
+                        return Ok(GcProgress::Examined {
+                            orphan_candidate: false,
+                        });
                     }
                     let metadata = match shard.directory.symlink_metadata(&blob_name) {
                         Ok(metadata) => metadata,
-                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                        Err(_) => {
+                            return Ok(GcProgress::Examined {
+                                orphan_candidate: false,
+                            });
+                        }
                     };
                     let identity = match CapFileIdentity::from_metadata(&metadata) {
                         Ok(identity) => identity,
-                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                        Err(_) => {
+                            return Ok(GcProgress::Examined {
+                                orphan_candidate: false,
+                            });
+                        }
                     };
                     if metadata.len() > MAX_CAS_OBJECT_BYTES as u64 {
-                        return Ok(GcProgress::Examined { removed: false });
+                        return Ok(GcProgress::Examined {
+                            orphan_candidate: false,
+                        });
                     }
                     let mut options = CapOpenOptions::new();
                     options.read(true).follow(FollowSymlinks::No);
                     let mut file = match shard.directory.open_with(&blob_name, &options) {
                         Ok(file) => file,
-                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                        Err(_) => {
+                            return Ok(GcProgress::Examined {
+                                orphan_candidate: false,
+                            });
+                        }
                     };
                     let handle_identity = match file.metadata() {
                         Ok(metadata) => CapFileIdentity::from_metadata(&metadata),
-                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                        Err(_) => {
+                            return Ok(GcProgress::Examined {
+                                orphan_candidate: false,
+                            });
+                        }
                     };
                     if !matches!(handle_identity, Ok(current) if current == identity)
                         || verify_reader(&mut file, &relpath, metadata.len()).is_err()
                         || is_live(&relpath)?
                     {
-                        return Ok(GcProgress::Examined { removed: false });
+                        return Ok(GcProgress::Examined {
+                            orphan_candidate: false,
+                        });
                     }
                     if validate_named_cap_file(&shard.directory, OsStr::new(&blob_name), identity)
                         .is_err()
                     {
-                        return Ok(GcProgress::Examined { removed: false });
+                        return Ok(GcProgress::Examined {
+                            orphan_candidate: false,
+                        });
                     }
-                    shard
-                        .directory
-                        .remove_file(&blob_name)
-                        .map_err(CasError::Io)?;
-                    return Ok(GcProgress::Examined { removed: true });
+                    return Ok(GcProgress::Examined {
+                        orphan_candidate: true,
+                    });
                 }
                 None => state.shard = None,
             }
@@ -998,25 +1047,41 @@ fn next_leased_gc_entry(
                 Some(Ok(entry)) => {
                     let name = match entry.file_name().into_string() {
                         Ok(name) => name,
-                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                        Err(_) => {
+                            return Ok(GcProgress::Examined {
+                                orphan_candidate: false,
+                            });
+                        }
                     };
                     if name == ".tmp" || !is_lower_hex(&name, 2) {
-                        return Ok(GcProgress::Examined { removed: false });
+                        return Ok(GcProgress::Examined {
+                            orphan_candidate: false,
+                        });
                     }
                     let directory = match open_cap_directory(&state.root, &name) {
                         Ok(directory) => directory,
-                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                        Err(_) => {
+                            return Ok(GcProgress::Examined {
+                                orphan_candidate: false,
+                            });
+                        }
                     };
                     let entries = match directory.entries() {
                         Ok(entries) => entries,
-                        Err(_) => return Ok(GcProgress::Examined { removed: false }),
+                        Err(_) => {
+                            return Ok(GcProgress::Examined {
+                                orphan_candidate: false,
+                            });
+                        }
                     };
                     state.shard = Some(LeasedGcShard {
                         name,
                         directory,
                         entries,
                     });
-                    return Ok(GcProgress::Examined { removed: false });
+                    return Ok(GcProgress::Examined {
+                        orphan_candidate: false,
+                    });
                 }
                 None => return Ok(GcProgress::Complete),
             }

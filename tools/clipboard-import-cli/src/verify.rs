@@ -17,7 +17,7 @@ use rusqlite::{
 use serde::Serialize;
 
 use crate::{
-    CliFailure, KindCount,
+    CliFailure, KindCount, boundary_failure,
     path_policy::{exact_blob_root_is_valid, verified_read_only_config},
     store_failure,
 };
@@ -83,10 +83,8 @@ pub(crate) fn verify(data_dir: &Path, expect_records: u64) -> Result<VerifyOutpu
     if !exact_blob_root_is_valid(&canonical_data_dir, &blob_root) {
         return Ok(blob_root_failure_output(expect_records));
     }
-    let boundary = Arc::new(
-        StorageBoundaryLease::open_read_only(&config)
-            .map_err(|_| CliFailure::new("unsafe_storage_layout"))?,
-    );
+    let boundary =
+        Arc::new(StorageBoundaryLease::open_read_only(&config).map_err(boundary_failure)?);
     let store = ReadOnlyStore::open_existing(config.with_storage_boundary(boundary))
         .map_err(store_failure)?;
     let cas = store.cas_store().map_err(store_failure)?;
@@ -1288,11 +1286,33 @@ mod tests {
 
     use rusqlite::{Connection, OpenFlags};
 
+    #[cfg(unix)]
+    use clipboard_store::{StorageBoundaryLease, StoreConfig, StoreHandle};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use super::{
         BackupProgress, BackupStep, FtsScratchError, FtsScratchPolicy, ScratchEvent,
         fts_is_coherent_with_policy, fts_scratch_check_with_cleanup, read_stable_snapshot,
         run_backup_loop,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn private_storage_at_read_only_lease_creation_has_a_stable_code() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = StoreConfig::new(directory.path().join("history.sqlite"))
+            .with_blob_root(directory.path().join("blobs"));
+        drop(StoreHandle::open(config.clone()).unwrap());
+        fs::set_permissions(config.database_path(), fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = match StorageBoundaryLease::open_read_only(&config) {
+            Ok(_) => panic!("private storage must be rejected"),
+            Err(error) => crate::boundary_failure(error),
+        };
+
+        assert_eq!(error.code, "private_storage_unavailable");
+    }
 
     #[test]
     fn changing_database_version_marks_a_verification_snapshot_unstable() {

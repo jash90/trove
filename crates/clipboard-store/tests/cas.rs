@@ -6,7 +6,8 @@ use std::{
 
 use clipboard_core::ContentKind;
 use clipboard_store::{
-    CasBlob, CasError, CasStore, GcStepBudget, StoreConfig, StoreError, classify_payload,
+    CasBlob, CasError, CasStore, GcStepBudget, ReadOnlyStore, StorageBoundaryLease, StoreConfig,
+    StoreError, StoreHandle, classify_payload,
 };
 
 fn test_cas() -> (tempfile::TempDir, CasStore) {
@@ -119,24 +120,51 @@ fn concurrent_puts_are_idempotent() {
     assert_eq!(cas.read(&blobs[0].relpath).unwrap(), b"concurrent payload");
 }
 
-#[test]
-fn gc_session_only_removes_unreferenced_valid_blobs() {
-    let (_directory, cas) = test_cas();
-    let live = cas.put(b"live").unwrap();
-    let orphan = cas.put(b"orphan").unwrap();
+fn assert_gc_reports_unreferenced_valid_blobs_without_removing_them(cas: &CasStore) {
+    let live_bytes = b"synthetic live";
+    let orphan_bytes = b"synthetic orphan";
+    let live = cas.put(live_bytes).unwrap();
+    let orphan = cas.put(orphan_bytes).unwrap();
 
     let mut session = cas.start_gc().unwrap();
+    let mut total_orphan_candidates = 0;
     loop {
         let step = session
-            .step(GcStepBudget::new(2), |relpath| Ok(relpath == live.relpath))
+            .step(GcStepBudget::new(1), |relpath| Ok(relpath == live.relpath))
             .unwrap();
+        assert!(step.examined_entries <= 1);
+        total_orphan_candidates += step.orphan_candidates;
         if step.complete {
             break;
         }
     }
 
-    assert_eq!(cas.read(&live.relpath).unwrap(), b"live");
-    assert!(cas.read(&orphan.relpath).is_err());
+    assert_eq!(total_orphan_candidates, 1);
+    assert_eq!(cas.read(&live.relpath).unwrap(), live_bytes);
+    assert_eq!(cas.read(&orphan.relpath).unwrap(), orphan_bytes);
+}
+
+#[test]
+fn gc_session_reports_unreferenced_valid_blobs_without_removing_them() {
+    let (_directory, cas) = test_cas();
+
+    assert_gc_reports_unreferenced_valid_blobs_without_removing_them(&cas);
+}
+
+#[test]
+fn leased_gc_session_reports_unreferenced_valid_blobs_without_removing_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = StoreConfig::new(directory.path().join("history.sqlite"))
+        .with_blob_root(directory.path().join("blobs"));
+    let lease = Arc::new(StorageBoundaryLease::create_writer(&config).unwrap());
+    let store = StoreHandle::open(config.clone().with_storage_boundary(lease)).unwrap();
+    drop(store);
+    let read_only_lease = Arc::new(StorageBoundaryLease::open_read_only(&config).unwrap());
+    let read_only =
+        ReadOnlyStore::open_existing(config.with_storage_boundary(read_only_lease)).unwrap();
+    let cas = read_only.cas_store().unwrap();
+
+    assert_gc_reports_unreferenced_valid_blobs_without_removing_them(&cas);
 }
 
 #[test]

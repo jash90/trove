@@ -9,7 +9,7 @@ use cap_fs_ext::DirExt;
 use cap_std::{ambient_authority, fs::Dir};
 use clipboard_store::{StorageBoundaryLease, StoreConfig};
 
-use crate::CliFailure;
+use crate::{CliFailure, boundary_failure};
 
 const DATABASE_FILENAME: &str = "clipboard.db";
 const BLOB_DIRECTORY: &str = "blobs";
@@ -74,10 +74,8 @@ fn prepare_import_paths_with_hooks(
     let blob_root = data_dir.join(BLOB_DIRECTORY);
     ensure_optional_child(&data_dir, &database_path, ChildKind::File)?;
     let config = StoreConfig::new(&database_path).with_blob_root(&blob_root);
-    let storage_boundary = Arc::new(
-        StorageBoundaryLease::create_writer(&config)
-            .map_err(|_| CliFailure::new("unsafe_storage_layout"))?,
-    );
+    let storage_boundary =
+        Arc::new(StorageBoundaryLease::create_writer(&config).map_err(boundary_failure)?);
     let paths = ValidatedImportPaths {
         source,
         data_dir,
@@ -94,7 +92,7 @@ pub(crate) fn verify_created_storage(paths: &ValidatedImportPaths) -> Result<(),
     paths
         .storage_boundary
         .validate()
-        .map_err(|_| CliFailure::new("unsafe_storage_layout"))?;
+        .map_err(boundary_failure)?;
     ensure_exact_directory(&paths.data_dir)?;
     ensure_existing_child(&paths.data_dir, &paths.database_path, ChildKind::File)?;
     ensure_existing_child(&paths.data_dir, &paths.blob_root, ChildKind::Directory)
@@ -302,7 +300,7 @@ mod tests {
     use std::{cell::Cell, fs};
 
     #[cfg(unix)]
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     use tempfile::tempdir;
 
@@ -375,5 +373,29 @@ mod tests {
         );
         assert!(!data_dir.join(DATABASE_FILENAME).exists());
         assert!(!data_dir.join(BLOB_DIRECTORY).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_storage_at_writer_lease_revalidation_has_a_stable_code() {
+        let temporary = tempdir().expect("temporary directory");
+        let source = temporary.path().join("synthetic-source.json");
+        fs::write(&source, b"synthetic").expect("synthetic source");
+        let data_dir = temporary.path().join("leased-data");
+
+        let error = match prepare_import_paths_with_hooks(
+            &source,
+            &data_dir,
+            |_| {},
+            |paths| {
+                fs::set_permissions(&paths.blob_root, fs::Permissions::from_mode(0o755))
+                    .expect("unsafe synthetic blob permissions");
+            },
+        ) {
+            Ok(_) => panic!("private storage must be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, "private_storage_unavailable");
     }
 }

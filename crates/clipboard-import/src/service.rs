@@ -599,11 +599,18 @@ impl ImportService {
                 Err(StoreError::ImportWorkerSuperseded) => {
                     return Ok(WorkerCompletion::Superseded);
                 }
-                Err(_) => {
-                    let _ = self
+                Err(error) => {
+                    let reason = store_error_reason(&error);
+                    if reason == "private_storage_unavailable" {
+                        return Err(ImportError::service(reason));
+                    }
+                    if let Err(error) = self
                         .store
                         .fail_import(run_id, generation, "store_failure")
-                        .await;
+                        .await
+                    {
+                        return Err(map_store_error(error));
+                    }
                     return Err(ImportError::service("store_failure"));
                 }
             };
@@ -630,11 +637,18 @@ impl ImportService {
             Err(StoreError::ImportWorkerSuperseded) => {
                 return Ok(WorkerCompletion::Superseded);
             }
-            Err(_) => {
-                let _ = self
+            Err(error) => {
+                let reason = store_error_reason(&error);
+                if reason == "private_storage_unavailable" {
+                    return Err(ImportError::service(reason));
+                }
+                if let Err(error) = self
                     .store
                     .fail_import(run_id, generation, "finalization_failure")
-                    .await;
+                    .await
+                {
+                    return Err(map_store_error(error));
+                }
                 return Err(ImportError::service("finalization_failure"));
             }
         }
@@ -1208,7 +1222,15 @@ fn progress_from_store(status: StoreImportRunStatus) -> Result<ImportProgress, I
 }
 
 fn map_store_error(error: StoreError) -> ImportError {
-    let reason = match error {
+    ImportError::service(store_error_reason(&error))
+}
+
+fn store_error_reason(error: &StoreError) -> &'static str {
+    match error {
+        StoreError::PrivateStorageUnavailable
+        | StoreError::Cas(clipboard_store::CasError::PrivateStorageUnavailable) => {
+            "private_storage_unavailable"
+        }
         StoreError::ImportRunNotFound => "run_not_found",
         StoreError::ImportSourceMismatch => "source_mismatch",
         StoreError::ImportRunConflict => "run_conflict",
@@ -1218,8 +1240,7 @@ fn map_store_error(error: StoreError) -> ImportError {
         StoreError::ImportInvariant => "invalid_run_state",
         StoreError::InvalidImportInput | StoreError::ImportBatchTooLarge => "invalid_import",
         _ => "store_failure",
-    };
-    ImportError::service(reason)
+    }
 }
 
 fn import_error_reason(error: &ImportError) -> &'static str {
@@ -1237,6 +1258,21 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn private_storage_store_errors_keep_their_service_reason() {
+        for error in [
+            StoreError::PrivateStorageUnavailable,
+            StoreError::Cas(clipboard_store::CasError::PrivateStorageUnavailable),
+        ] {
+            assert!(matches!(
+                map_store_error(error),
+                ImportError::Service {
+                    reason: "private_storage_unavailable"
+                }
+            ));
+        }
+    }
 
     #[test]
     fn source_changed_during_analysis_is_rejected_before_a_run_can_be_persisted() {

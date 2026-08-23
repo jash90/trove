@@ -10,7 +10,7 @@ use clipboard_core::ContentKind;
 use clipboard_import::{
     ImportError, ImportParseReport, ImportService, ImportSource, detect_export, parse_export_report,
 };
-use clipboard_store::{StoreError, StoreHandle};
+use clipboard_store::{CasError, StorageBoundaryError, StoreError, StoreHandle};
 use serde::Serialize;
 
 use path_policy::prepare_import_paths;
@@ -274,7 +274,20 @@ pub(crate) fn store_failure(error: StoreError) -> CliFailure {
             CliFailure::new("incompatible_database")
         }
         StoreError::StorageBoundary => CliFailure::new("unsafe_storage_layout"),
+        StoreError::PrivateStorageUnavailable
+        | StoreError::Cas(CasError::PrivateStorageUnavailable) => {
+            CliFailure::new("private_storage_unavailable")
+        }
         _ => CliFailure::new("storage_unavailable"),
+    }
+}
+
+pub(crate) fn boundary_failure(error: StorageBoundaryError) -> CliFailure {
+    match error {
+        StorageBoundaryError::Changed => CliFailure::new("unsafe_storage_layout"),
+        StorageBoundaryError::PrivateStorageUnavailable => {
+            CliFailure::new("private_storage_unavailable")
+        }
     }
 }
 
@@ -291,4 +304,35 @@ fn emit_error(error: CliFailure) {
 fn emit_json(mut output: impl Write, value: &impl Serialize) -> io::Result<()> {
     serde_json::to_writer(&mut output, value).map_err(io::Error::other)?;
     output.write_all(b"\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use clipboard_store::{CasError, StorageBoundaryError, StoreError};
+
+    use super::{boundary_failure, store_failure};
+
+    #[test]
+    fn private_storage_errors_have_one_stable_cli_code() {
+        for (code, actual) in [
+            (
+                "private_storage_unavailable",
+                store_failure(StoreError::PrivateStorageUnavailable).code,
+            ),
+            (
+                "private_storage_unavailable",
+                store_failure(StoreError::Cas(CasError::PrivateStorageUnavailable)).code,
+            ),
+            (
+                "private_storage_unavailable",
+                boundary_failure(StorageBoundaryError::PrivateStorageUnavailable).code,
+            ),
+            (
+                "unsafe_storage_layout",
+                boundary_failure(StorageBoundaryError::Changed).code,
+            ),
+        ] {
+            assert_eq!(actual, code);
+        }
+    }
 }

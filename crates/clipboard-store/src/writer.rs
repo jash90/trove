@@ -1250,6 +1250,9 @@ fn import_batch(
                 commit_import_candidate(connection, run_id, generation, candidate, &prepared)?;
             }
             Err(error) => {
+                if is_private_storage_error(&error) {
+                    return Err(error);
+                }
                 record_import_candidate_failure(
                     connection,
                     run_id,
@@ -1264,6 +1267,14 @@ fn import_batch(
     Ok(ImportBatchOutcome {
         processed_candidates,
     })
+}
+
+fn is_private_storage_error(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::PrivateStorageUnavailable
+            | StoreError::Cas(CasError::PrivateStorageUnavailable)
+    )
 }
 
 fn commit_import_candidate(

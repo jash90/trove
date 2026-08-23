@@ -498,6 +498,7 @@ fn gc_session_charges_invalid_entries_and_resumes_with_a_strict_step_budget() {
     let live_paths = BTreeSet::from([live.relpath.clone()]);
     let mut session = cas.start_gc().unwrap();
     let mut steps = Vec::new();
+    let mut total_orphan_candidates = 0;
     loop {
         let step = session
             .step(GcStepBudget::new(1), |relpath| {
@@ -505,7 +506,7 @@ fn gc_session_charges_invalid_entries_and_resumes_with_a_strict_step_budget() {
             })
             .unwrap();
         assert!(step.examined_entries <= 1);
-        assert!(step.filesystem_operations <= 1);
+        total_orphan_candidates += step.orphan_candidates;
         let complete = step.complete;
         steps.push(step);
         if complete {
@@ -513,7 +514,8 @@ fn gc_session_charges_invalid_entries_and_resumes_with_a_strict_step_budget() {
         }
     }
     assert!(steps.len() >= 3);
+    assert_eq!(total_orphan_candidates, 1);
     assert_eq!(cas.read(&live.relpath).unwrap(), b"synthetic live");
-    assert!(cas.read(&orphan.relpath).is_err());
+    assert_eq!(cas.read(&orphan.relpath).unwrap(), b"synthetic orphan");
     assert!(cas.root().join("unmanaged-entry").exists());
 }

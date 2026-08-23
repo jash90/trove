@@ -1324,3 +1324,50 @@ async fn writer_retains_lease_and_rejects_replacement_before_ingest_or_cas_work(
     assert!(!data_dir.join("clipboard.db").exists());
     assert!(!data_dir.join("blobs").exists());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn import_batch_propagates_private_storage_without_recording_a_candidate_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = tempfile::tempdir().unwrap();
+    let data_dir = sandbox.path().join("leased-data");
+    let (config, _lease) = leased_store_config(&data_dir);
+    let store = StoreHandle::open(config).unwrap();
+    let run = store
+        .begin_import(BeginImportRun {
+            run_id: uuid::Uuid::now_v7(),
+            source_kind: ImportSourceKind::SuperCmd,
+            source_fingerprint: [42; 32],
+            total_records: 1,
+            candidate_records: 1,
+            initial_failures: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let mut capture = text_capture("synthetic image", 1_000);
+    capture.kind = ContentKind::Image;
+    capture.primary_mime = "image/png".to_owned();
+    fs::set_permissions(data_dir.join("blobs"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let error = store
+        .import_batch(
+            run.run_id,
+            run.generation,
+            vec![StoreImportCandidate {
+                candidate_offset: 0,
+                record_fingerprint: [43; 32],
+                capture,
+                search_text: None,
+                source_app_original: None,
+            }],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, StoreError::PrivateStorageUnavailable));
+    fs::set_permissions(data_dir.join("blobs"), fs::Permissions::from_mode(0o700)).unwrap();
+    let status = store.import_status(run.run_id).unwrap();
+    assert_eq!(status.next_candidate_offset, 0);
+    assert_eq!(status.failed_records, 0);
+}
