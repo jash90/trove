@@ -41,11 +41,15 @@ csv-core = "=0.1.13"
 directories = "6.0.0"
 # rust_backend keeps this pure Rust (miniz_oxide); no libz-sys, no C toolchain.
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+image = { version = "0.25.10", default-features = false, features = ["gif", "png", "jpeg", "webp"] }
 # HTTPS through the system trust store: on macOS that is Security.framework,
 # so a corporate root or a user-added certificate behaves here exactly as it
 # does everywhere else on the machine. The alternative bundles its own crypto
 # and its own certificate list, which is more to trust and more to update.
+# Rasterises an SVG that a page nominates as its own picture. Text rendering
+# is on because a logo without its words is a broken logo; the font database it
+# needs is loaded once, on first use, never at startup.
+resvg = "=0.46.0"
 reqwest = { version = "=0.13.4", default-features = false, features = ["native-tls", "charset"] }
 rusqlite = { version = "0.40.2", features = ["backup", "bundled", "cache"] }
 rusqlite_migration = "2.6.0"
