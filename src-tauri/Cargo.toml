@@ -1,0 +1,22 @@
+[package]
+name = "clipboard-history-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = "2.6.3"
+
+[dependencies]
+tauri = "2.11.5"
+tauri-plugin-autostart = "2.5.1"
+tauri-plugin-clipboard-manager = "2.3.2"
+tauri-plugin-dialog = "2.7.2"
+clipboard-core = { path = "../crates/clipboard-core" }
+clipboard-store = { path = "../crates/clipboard-store" }
+clipboard-search = { path = "../crates/clipboard-search" }
+clipboard-import = { path = "../crates/clipboard-import" }
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
