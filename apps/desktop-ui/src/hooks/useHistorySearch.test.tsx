@@ -177,6 +177,87 @@ describe('useHistorySearch', () => {
     expect(result.current.items).toEqual([]);
   });
 
+  it('keeps the results on screen while a newer query is on its way', async () => {
+    // The regression this exists for: the hook used to clear its page the
+    // instant a key was pressed, which emptied the list, unmounted it, and
+    // took the scroll position and the selection with it.
+    const gateway = gatewayWithSearch(async (request) =>
+      makePage(request.query === '' ? 'default history' : 'narrowed history'),
+    );
+    const { result } = renderHook(() => useHistorySearch(gateway));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(result.current.items[0]?.preview).toBe('default history');
+
+    act(() => {
+      result.current.setQuery('n');
+    });
+
+    // Mid-flight: the previous rows are still there and the hook says why.
+    expect(result.current.status).toBe('ready');
+    expect(result.current.refreshing).toBe(true);
+    expect(result.current.items).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(result.current.items[0]?.preview).toBe('narrowed history');
+    expect(result.current.refreshing).toBe(false);
+  });
+
+  it('never empties the list across a whole typed phrase', async () => {
+    const gateway = gatewayWithSearch(async (request) =>
+      makePage(`results for ${request.query}`),
+    );
+    const { result } = renderHook(() => useHistorySearch(gateway));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+
+    for (const phrase of ['s', 'sy', 'syn', 'synt']) {
+      act(() => {
+        result.current.setQuery(phrase);
+      });
+      expect(result.current.items).not.toHaveLength(0);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60);
+      });
+      expect(result.current.items).not.toHaveLength(0);
+    }
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(result.current.items[0]?.preview).toBe('results for synt');
+  });
+
+  it('drops stale rows when a query fails, rather than passing them off as the answer', async () => {
+    const request = deferred<HistoryPage>();
+    const gateway = gatewayWithSearch((search) =>
+      search.query === '' ? Promise.resolve(makePage('default history')) : request.promise,
+    );
+    const { result } = renderHook(() => useHistorySearch(gateway));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    act(() => {
+      result.current.setQuery('synthetic');
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+      request.reject(new Error('synthetic failure'));
+      await Promise.resolve();
+    });
+
+    expect(result.current.status).toBe('error');
+    expect(result.current.items).toHaveLength(0);
+    expect(result.current.refreshing).toBe(false);
+  });
+
   it('invalidates an in-flight query when the query is cleared', async () => {
     const privateRequest = deferred<HistoryPage>();
     const defaultRequest = deferred<HistoryPage>();

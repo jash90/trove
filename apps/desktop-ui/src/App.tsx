@@ -53,7 +53,7 @@ const shortcutIsBlocked = (
 
 const ClipboardPalette = (): React.JSX.Element => {
   const gateway = useGateway();
-  const { query, setQuery, status, items } = useHistorySearch(gateway);
+  const { query, setQuery, status, refreshing, items } = useHistorySearch(gateway);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
   const [workspace, setWorkspace] = useState<'none' | 'import' | 'settings'>('none');
@@ -193,6 +193,7 @@ const ClipboardPalette = (): React.JSX.Element => {
           selectedId={navigation.selectedId}
           resultCount={actions.visibleItems.length}
           resultsTruncated={actions.visibleItems.length >= HISTORY_PAGE_SIZE}
+          refreshing={refreshing}
           searchInputRef={searchInputRef}
           onQueryChange={handleQueryChange}
           onKeyDown={handleSearchKeyDown}

@@ -13,7 +13,11 @@ interface HistorySearchState {
 export interface UseHistorySearchResult {
   query: string;
   setQuery: (query: string) => void;
+  /// What there is to show. `loading` means nothing yet — not "a newer query
+  /// is on its way", which is what `refreshing` is for.
   status: HistorySearchStatus;
+  /// True while a query is in flight over results that are already on screen.
+  refreshing: boolean;
   items: HistoryItem[];
   page: HistoryPage | null;
 }
@@ -24,6 +28,7 @@ export const useHistorySearch = (gateway: ClipboardGateway): UseHistorySearchRes
     status: 'loading',
     page: null,
   });
+  const [refreshing, setRefreshing] = useState(false);
   const requestId = useRef(0);
   // Bumped when the core records something, to re-run the same query rather
   // than make the user retype to see what they just copied.
@@ -39,7 +44,11 @@ export const useHistorySearch = (gateway: ClipboardGateway): UseHistorySearchRes
   useEffect(() => {
     const id = ++requestId.current;
     let active = true;
-    setState({ status: 'loading', page: null });
+    // The page on screen stays. Clearing it here — before the debounce has
+    // even armed — emptied the list on every keystroke, which unmounted it
+    // and took the scroll position and the selection with it. Typing should
+    // narrow what is shown, not replace it with nothing twice per letter.
+    setRefreshing(true);
 
     const timer = window.setTimeout(() => {
       void gateway
@@ -47,11 +56,15 @@ export const useHistorySearch = (gateway: ClipboardGateway): UseHistorySearchRes
         .then((page) => {
           if (active && id === requestId.current) {
             setState({ status: 'ready', page });
+            setRefreshing(false);
           }
         })
         .catch(() => {
           if (active && id === requestId.current) {
+            // A failure means we no longer know what matches, so the previous
+            // rows must not stay on screen pretending to be the answer.
             setState({ status: 'error', page: null });
+            setRefreshing(false);
           }
         });
     }, 150);
@@ -69,6 +82,7 @@ export const useHistorySearch = (gateway: ClipboardGateway): UseHistorySearchRes
     query,
     setQuery,
     status: state.status,
+    refreshing,
     items: state.page?.items ?? [],
     page: state.page,
   };

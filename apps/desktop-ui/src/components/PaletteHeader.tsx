@@ -10,6 +10,8 @@ interface PaletteHeaderProps {
   resultCount: number;
   /** True when the list is full, so more entries match than are shown. */
   resultsTruncated: boolean;
+  /** True while a newer query is on its way over results already on screen. */
+  refreshing: boolean;
   searchInputRef?: Ref<HTMLInputElement>;
   onQueryChange: (query: string) => void;
   onKeyDown: KeyboardEventHandler<HTMLInputElement>;
@@ -26,6 +28,7 @@ export const PaletteHeader = ({
   selectedId,
   resultCount,
   resultsTruncated,
+  refreshing,
   searchInputRef,
   onQueryChange,
   onKeyDown,
@@ -57,8 +60,14 @@ export const PaletteHeader = ({
           onKeyDown={onKeyDown}
         />
         {/* The list is a page, not the whole history: saying "80 wyników"
-            when thousands match reads as a total and is simply untrue. */}
-        <span className="search-field__count" aria-live="polite">
+            when thousands match reads as a total and is simply untrue.
+            Announced only once it settles — mid-typing it would read out a
+            new number on every letter. */}
+        <span
+          className={`search-field__count${refreshing ? ' is-refreshing' : ''}`}
+          aria-live="polite"
+          aria-busy={refreshing}
+        >
           {formatCount(resultCount)}
           {resultsTruncated ? '+' : ''}
         </span>

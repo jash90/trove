@@ -42,18 +42,22 @@ export const PaletteWorkspace = ({
 }: PaletteWorkspaceProps): React.JSX.Element => (
   <div className="palette-content">
     <div className="history-column">
-      {items.length > 0 ? (
-        <button
-          type="button"
-          className="preview-toggle"
-          aria-label="Pokaż podgląd zaznaczonego wpisu"
-          onClick={onOpenPreview}
-        >
-          <PanelRightOpen size={15} aria-hidden="true" />
-          Podgląd
-        </button>
-      ) : null}
+      {/* Rendered whatever the list holds. Appearing and disappearing with the
+          results moved the list's top edge on every keystroke at narrow
+          widths, which is its own kind of jumping. */}
+      <button
+        type="button"
+        className="preview-toggle"
+        aria-label="Pokaż podgląd zaznaczonego wpisu"
+        disabled={items.length === 0}
+        onClick={onOpenPreview}
+      >
+        <PanelRightOpen size={15} aria-hidden="true" />
+        Podgląd
+      </button>
       <div className="history-panel">
+        {/* `loading` now means there is nothing to show yet, so this replaces
+            the list once, on first open — never again mid-typing. */}
         {status === 'loading' ? <EmptyState kind="loading" /> : null}
         {status === 'error' ? <EmptyState kind="error" /> : null}
         {status === 'ready' && items.length === 0 ? <EmptyState kind="empty" /> : null}

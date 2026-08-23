@@ -1342,3 +1342,9 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* While a newer query is on its way the count is the only thing that moves:
+   the rows stay put, which is the whole point. */
+.search-field__count.is-refreshing {
+  opacity: 0.45;
+}
+

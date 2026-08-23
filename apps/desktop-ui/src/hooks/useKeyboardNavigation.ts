@@ -26,8 +26,11 @@ export const useKeyboardNavigation = ({
     ? storedSelectedId
     : (items[0]?.eventId ?? null);
 
+  // Remember only a real selection. Writing the fallback back in would erase
+  // what the user picked the moment a query narrows past it, so widening the
+  // query again would land on the first row instead of where they were.
   useEffect(() => {
-    if (storedSelectedId !== selectedId) {
+    if (selectedId !== null && storedSelectedId !== selectedId) {
       setStoredSelectedId(selectedId);
     }
   }, [selectedId, storedSelectedId]);
