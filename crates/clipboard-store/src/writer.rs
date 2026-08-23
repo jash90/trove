@@ -711,6 +711,12 @@ enum WriteCommand {
         pinned: bool,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    StoreThumbnail {
+        content_id: i64,
+        bytes: Vec<u8>,
+        created_at_ms: i64,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     RunRetentionBatch {
         cutoff_ms: i64,
         max_events: u32,
@@ -823,6 +829,34 @@ impl StoreHandle {
             .send(WriteCommand::SetPinned {
                 event_id,
                 pinned,
+                reply,
+            })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    /// Stores a rendered thumbnail for one content row.
+    ///
+    /// Idempotent: a second call replaces the artifact rather than failing, so
+    /// two windows asking for the same preview at once cost one wasted render
+    /// and nothing worse.
+    pub async fn store_thumbnail(
+        &self,
+        content_id: i64,
+        bytes: Vec<u8>,
+        created_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        let (reply, response) = oneshot::channel();
+        self.runtime
+            .runtime
+            .writer_sender()?
+            .send(WriteCommand::StoreThumbnail {
+                content_id,
+                bytes,
+                created_at_ms,
                 reply,
             })
             .await
@@ -1187,6 +1221,16 @@ fn handle_command(
         } => {
             let _ = reply.send(with_storage_boundary(boundary, || {
                 set_pinned(connection, event_id, pinned)
+            }));
+        }
+        WriteCommand::StoreThumbnail {
+            content_id,
+            bytes,
+            created_at_ms,
+            reply,
+        } => {
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                store_thumbnail(connection, cas, content_id, &bytes, created_at_ms)
             }));
         }
         WriteCommand::RunRetentionBatch {
@@ -1705,6 +1749,43 @@ fn fail_import(
             Ok(_) => Err(StoreError::ImportRunNotResumable),
         };
     }
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Writes a thumbnail blob and the artifact row pointing at it.
+///
+/// The blob goes in first: an artifact row referring to a file that is not
+/// there yet would be a broken preview, while a blob with no row is just an
+/// unreferenced object the reclamation pass already knows how to collect.
+fn store_thumbnail(
+    connection: &mut Connection,
+    cas: &CasStore,
+    content_id: i64,
+    bytes: &[u8],
+    created_at_ms: i64,
+) -> Result<(), StoreError> {
+    let blob = cas.put(bytes)?;
+    let byte_size =
+        i64::try_from(blob.byte_size).map_err(|_| StoreError::PayloadStorageUnavailable)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "INSERT INTO artifact
+           (content_id, artifact_kind, blob_relpath, byte_size, raw_digest, created_at_ms)
+         VALUES (?1, 'thumbnail', ?2, ?3, ?4, ?5)
+         ON CONFLICT(content_id, artifact_kind) DO UPDATE SET
+           blob_relpath = excluded.blob_relpath,
+           byte_size = excluded.byte_size,
+           raw_digest = excluded.raw_digest,
+           created_at_ms = excluded.created_at_ms",
+        rusqlite::params![
+            content_id,
+            blob.relpath,
+            byte_size,
+            blob.hash.as_slice(),
+            created_at_ms,
+        ],
+    )?;
     transaction.commit()?;
     Ok(())
 }

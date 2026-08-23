@@ -581,10 +581,102 @@ pub async fn get_thumbnail_service(
     event_id: i64,
 ) -> Result<Option<ThumbnailDto>, String> {
     let store = state.store.clone();
-    run_blocking("thumbnail_unavailable", move || {
-        get_thumbnail_blocking(&store, event_id)
+    let stored = run_blocking("thumbnail_unavailable", {
+        let store = store.clone();
+        move || get_thumbnail_blocking(&store, event_id)
     })
-    .await
+    .await?;
+    if let Some(stored) = stored {
+        return Ok(Some(stored));
+    }
+
+    // Nothing stored yet. Render it from the image itself and keep it, so an
+    // image copied before this existed gets a preview the first time anyone
+    // looks at it, and only that once.
+    let rendered = run_blocking("thumbnail_unavailable", {
+        let store = store.clone();
+        move || render_thumbnail_blocking(&store, event_id)
+    })
+    .await?;
+    let Some(rendered) = rendered else {
+        return Ok(None);
+    };
+    // A failed write costs the next viewer one more render; it must not cost
+    // this one their preview.
+    let _ = store
+        .store_thumbnail(
+            rendered.content_id,
+            rendered.bytes.clone(),
+            current_time_ms(),
+        )
+        .await;
+    encode_thumbnail(&rendered.bytes).map(Some)
+}
+
+/// A thumbnail rendered on demand, with the row it belongs to.
+struct RenderedThumbnail {
+    content_id: i64,
+    bytes: Vec<u8>,
+}
+
+/// Renders a thumbnail for an image entry that has one to render.
+///
+/// Returns nothing rather than an error for the ordinary cases — the entry is
+/// not an image, or its payload is gone — because neither is a fault the user
+/// can act on and both mean the same thing on screen.
+fn render_thumbnail_blocking(
+    store: &StoreHandle,
+    event_id: i64,
+) -> Result<Option<RenderedThumbnail>, String> {
+    let content_id = store
+        .with_reader(|connection| {
+            connection
+                .query_row(
+                    "SELECT he.content_id FROM history_event he WHERE he.event_id = ?1",
+                    [event_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+        })
+        .map_err(|error| store_error_code(&error, "thumbnail_unavailable"))?
+        .ok_or_else(|| "history_event_not_found".to_owned())?;
+
+    let metadata = read_primary_metadata(store, event_id, "thumbnail_unavailable")?;
+    if metadata.kind != "image" || metadata.missing_payload {
+        return Ok(None);
+    }
+    let Some(bytes) = read_primary_bytes(
+        store,
+        &metadata,
+        clipboard_images::MAX_IMAGE_INPUT_BYTES,
+        "thumbnail_too_large",
+        "thumbnail_unavailable",
+    )?
+    else {
+        return Ok(None);
+    };
+    let thumbnail =
+        clipboard_images::make_thumbnail(&bytes, clipboard_images::MAX_THUMBNAIL_DIMENSION)
+            .map_err(|_| "thumbnail_unavailable".to_owned())?;
+    Ok(Some(RenderedThumbnail {
+        content_id,
+        bytes: thumbnail,
+    }))
+}
+
+/// Wraps raw PNG bytes in the response shape, refusing anything over the cap.
+fn encode_thumbnail(bytes: &[u8]) -> Result<ThumbnailDto, String> {
+    if bytes.len() > MAX_THUMBNAIL_RAW_BYTES {
+        return Err("thumbnail_too_large".to_owned());
+    }
+    let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    if base64.len() > MAX_THUMBNAIL_BASE64_BYTES {
+        return Err("thumbnail_too_large".to_owned());
+    }
+    Ok(ThumbnailDto {
+        mime_type: "image/png".to_owned(),
+        base64,
+    })
 }
 
 fn get_thumbnail_blocking(
@@ -630,14 +722,7 @@ fn get_thumbnail_blocking(
     let bytes = cas
         .read_bounded(&relpath, byte_size as u64, MAX_THUMBNAIL_RAW_BYTES)
         .map_err(|error| cas_error_code(&error, "thumbnail_unavailable"))?;
-    let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    if base64.len() > MAX_THUMBNAIL_BASE64_BYTES {
-        return Err("thumbnail_too_large".to_owned());
-    }
-    Ok(Some(ThumbnailDto {
-        mime_type: "image/png".to_owned(),
-        base64,
-    }))
+    encode_thumbnail(&bytes).map(Some)
 }
 
 #[tauri::command(rename_all = "camelCase")]

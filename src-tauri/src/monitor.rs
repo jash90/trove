@@ -173,10 +173,34 @@ fn record<R: Runtime>(app: &AppHandle<R>, capture: CaptureInput) {
     }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        if store.ingest(capture).await.is_ok() {
-            let _ = app.emit(HISTORY_CHANGED_EVENT, ());
+        // Rendered before the capture is handed over, so a copied image has a
+        // preview the moment it appears rather than the first time somebody
+        // opens it. Off the polling thread on purpose: decoding a large image
+        // is the one slow thing in this path.
+        let thumbnail = thumbnail_for(&capture);
+        let Ok(outcome) = store.ingest(capture).await else {
+            return;
+        };
+        if let Some(bytes) = thumbnail {
+            // A failed thumbnail costs a later render, never the entry itself.
+            let _ = store
+                .store_thumbnail(outcome.content_id, bytes, now_ms())
+                .await;
         }
+        let _ = app.emit(HISTORY_CHANGED_EVENT, ());
     });
+}
+
+/// Renders a thumbnail for a captured image, when there is one to render.
+fn thumbnail_for(capture: &CaptureInput) -> Option<Vec<u8>> {
+    if capture.kind != clipboard_core::ContentKind::Image {
+        return None;
+    }
+    let bytes = capture.representations.first()?.bytes.as_ref()?;
+    if bytes.len() > clipboard_images::MAX_IMAGE_INPUT_BYTES {
+        return None;
+    }
+    clipboard_images::make_thumbnail(bytes, clipboard_images::MAX_THUMBNAIL_DIMENSION).ok()
 }
 
 #[cfg(test)]

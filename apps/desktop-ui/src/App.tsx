@@ -79,7 +79,10 @@ const ClipboardPalette = (): React.JSX.Element => {
   const thumbnail = useThumbnail(
     gateway,
     navigation.selectedId,
-    selectedItem?.kind === 'image' && selectedItem.hasThumbnail,
+    // Not gated on `hasThumbnail`: that flag is false exactly while no
+    // thumbnail exists, which is when one needs rendering. The command
+    // answers cheaply when there is no image to render from.
+    selectedItem?.kind === 'image',
   );
 
   useEffect(

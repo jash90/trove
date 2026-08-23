@@ -791,6 +791,86 @@ async fn thumbnail_is_event_scoped_and_rejects_encoded_responses_over_256_kib() 
     );
 }
 
+/// A real 4x4 PNG, so the generator has something it can actually decode.
+fn synthetic_png() -> Vec<u8> {
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    let image = image::RgbaImage::from_fn(4, 4, |x, y| {
+        image::Rgba([(x * 60) as u8, (y * 60) as u8, 120, 255])
+    });
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut buffer, image::ImageFormat::Png)
+        .unwrap();
+    buffer.into_inner()
+}
+
+fn stored_thumbnail_count(state: &AppState) -> i64 {
+    state
+        .store
+        .with_reader(|connection| {
+            connection.query_row(
+                "SELECT count(*) FROM artifact WHERE artifact_kind = 'thumbnail'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_image_without_a_thumbnail_gets_one_the_first_time_it_is_viewed() {
+    // Thumbnails were never produced by anything, so every image already in a
+    // history has none. Asking for one renders it and keeps it.
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let image = state
+        .store
+        .ingest(image_capture(synthetic_png(), 1_725_000_000_400))
+        .await
+        .unwrap();
+    // Capture already rendered one. Remove it to stand in for every image
+    // stored before thumbnails existed at all.
+    drop(state);
+    remove_thumbnails(directory.path());
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    assert_eq!(stored_thumbnail_count(&state), 0);
+
+    let rendered = commands::get_thumbnail_service(&state, image.event_id)
+        .await
+        .unwrap()
+        .expect("an image with a payload has a thumbnail to render");
+
+    assert_eq!(rendered.mime_type, "image/png");
+    assert!(!rendered.base64.is_empty());
+    assert_eq!(stored_thumbnail_count(&state), 1);
+
+    // Second look is served from what the first one stored.
+    let again = commands::get_thumbnail_service(&state, image.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.base64, rendered.base64);
+    assert_eq!(stored_thumbnail_count(&state), 1);
+}
+
+#[tokio::test]
+async fn an_entry_with_nothing_to_render_reports_no_thumbnail_rather_than_an_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let text = state
+        .store
+        .ingest(text_capture("synthetic text", 1_725_000_000_500))
+        .await
+        .unwrap();
+
+    assert!(
+        commands::get_thumbnail_service(&state, text.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(stored_thumbnail_count(&state), 0);
+}
+
 async fn wait_for_import(state: &AppState, run_id: uuid::Uuid) -> clipboard_import::ImportProgress {
     for _ in 0..50_000 {
         let progress = commands::get_import_status_service(state, &run_id.to_string())
@@ -844,6 +924,13 @@ fn image_capture(bytes: Vec<u8>, captured_at_ms: i64) -> clipboard_core::Capture
         event_flags: clipboard_core::EventFlags::LOCAL_ONLY,
         display_label: None,
     }
+}
+
+fn remove_thumbnails(data_dir: &std::path::Path) {
+    rusqlite::Connection::open(data_dir.join(clipboard_store::DATABASE_FILENAME))
+        .unwrap()
+        .execute("DELETE FROM artifact WHERE artifact_kind = 'thumbnail'", [])
+        .unwrap();
 }
 
 fn install_thumbnail(data_dir: &std::path::Path, content_id: i64, bytes: &[u8]) {
