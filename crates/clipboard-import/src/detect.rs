@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::de::{IgnoredAny, MapAccess, Visitor};
+#[cfg(test)]
+thread_local! {
+    static SCHEMA_KEY_ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 use crate::{
     ImportError, ImportParseLimits, ImportSource, JsonRecord, stream_json_records_path_with_limits,
@@ -205,43 +208,9 @@ fn source_fingerprint(
 }
 
 fn detect_json_source(bytes: &[u8]) -> Result<ImportSource, ImportError> {
-    #[derive(Default)]
-    struct SchemaFields {
-        created_at: bool,
-        category: bool,
-        copied_at: bool,
-    }
-
-    struct SchemaVisitor;
-
-    impl<'de> Visitor<'de> for SchemaVisitor {
-        type Value = SchemaFields;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("an export record object")
-        }
-
-        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-        where
-            A: MapAccess<'de>,
-        {
-            let mut fields = SchemaFields::default();
-            while let Some(key) = map.next_key::<String>()? {
-                match key.as_str() {
-                    "createdAt" => fields.created_at = true,
-                    "category" => fields.category = true,
-                    "copied_at" | "copiedAt" => fields.copied_at = true,
-                    _ => {}
-                }
-                map.next_value::<IgnoredAny>()?;
-            }
-            Ok(fields)
-        }
-    }
-
-    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    let fields = serde::de::Deserializer::deserialize_map(&mut deserializer, SchemaVisitor)
-        .map_err(|_| ImportError::export("detection", "invalid_document"))?;
+    let fields = JsonSchemaScanner::new(bytes)
+        .scan()
+        .map_err(|()| ImportError::export("detection", "invalid_document"))?;
 
     if fields.created_at && fields.category {
         return Ok(ImportSource::Raycast);
@@ -250,6 +219,338 @@ fn detect_json_source(bytes: &[u8]) -> Result<ImportSource, ImportError> {
         return Ok(ImportSource::SuperCmd);
     }
     Err(ImportError::export("detection", "unknown_schema"))
+}
+
+#[derive(Default)]
+struct SchemaFields {
+    created_at: bool,
+    category: bool,
+    copied_at: bool,
+}
+
+#[derive(Clone, Copy)]
+enum SchemaKey {
+    CreatedAt,
+    Category,
+    CopiedAt,
+}
+
+struct KnownKeyMatcher {
+    position: usize,
+    candidates: u8,
+}
+
+impl KnownKeyMatcher {
+    const KEYS: [&'static [u8]; 4] = [b"createdAt", b"category", b"copied_at", b"copiedAt"];
+
+    fn new() -> Self {
+        Self {
+            position: 0,
+            candidates: (1 << Self::KEYS.len()) - 1,
+        }
+    }
+
+    fn push(&mut self, character: char) {
+        for (index, key) in Self::KEYS.iter().enumerate() {
+            let bit = 1 << index;
+            if self.candidates & bit != 0
+                && (!character.is_ascii()
+                    || key.get(self.position).copied() != Some(character as u8))
+            {
+                self.candidates &= !bit;
+            }
+        }
+        self.position = self.position.saturating_add(1);
+    }
+
+    fn finish(self) -> Option<SchemaKey> {
+        let matched = Self::KEYS
+            .iter()
+            .enumerate()
+            .find(|(index, key)| self.candidates & (1 << index) != 0 && key.len() == self.position)?
+            .0;
+        match matched {
+            0 => Some(SchemaKey::CreatedAt),
+            1 => Some(SchemaKey::Category),
+            2 | 3 => Some(SchemaKey::CopiedAt),
+            _ => None,
+        }
+    }
+}
+
+struct JsonSchemaScanner<'a> {
+    bytes: &'a [u8],
+    index: usize,
+}
+
+impl<'a> JsonSchemaScanner<'a> {
+    const MAX_NESTING_DEPTH: usize = 128;
+
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, index: 0 }
+    }
+
+    fn scan(mut self) -> Result<SchemaFields, ()> {
+        let mut fields = SchemaFields::default();
+        self.skip_whitespace();
+        self.expect(b'{')?;
+        self.skip_whitespace();
+        if self.consume(b'}') {
+            self.finish_document()?;
+            return Ok(fields);
+        }
+        loop {
+            let mut matcher = KnownKeyMatcher::new();
+            self.parse_string(Some(&mut matcher))?;
+            self.skip_whitespace();
+            self.expect(b':')?;
+            self.skip_value(1)?;
+            match matcher.finish() {
+                Some(SchemaKey::CreatedAt) => fields.created_at = true,
+                Some(SchemaKey::Category) => fields.category = true,
+                Some(SchemaKey::CopiedAt) => fields.copied_at = true,
+                None => {}
+            }
+            self.skip_whitespace();
+            if self.consume(b'}') {
+                self.finish_document()?;
+                return Ok(fields);
+            }
+            self.expect(b',')?;
+            self.skip_whitespace();
+        }
+    }
+
+    fn finish_document(&mut self) -> Result<(), ()> {
+        self.skip_whitespace();
+        (self.index == self.bytes.len()).then_some(()).ok_or(())
+    }
+
+    fn skip_value(&mut self, depth: usize) -> Result<(), ()> {
+        self.skip_whitespace();
+        match self.peek().ok_or(())? {
+            b'"' => self.parse_string(None),
+            b'{' => {
+                if depth >= Self::MAX_NESTING_DEPTH {
+                    return Err(());
+                }
+                self.skip_object(depth + 1)
+            }
+            b'[' => {
+                if depth >= Self::MAX_NESTING_DEPTH {
+                    return Err(());
+                }
+                self.skip_array(depth + 1)
+            }
+            b't' => self.consume_literal(b"true"),
+            b'f' => self.consume_literal(b"false"),
+            b'n' => self.consume_literal(b"null"),
+            b'-' | b'0'..=b'9' => self.skip_number(),
+            _ => Err(()),
+        }
+    }
+
+    fn skip_object(&mut self, depth: usize) -> Result<(), ()> {
+        self.expect(b'{')?;
+        self.skip_whitespace();
+        if self.consume(b'}') {
+            return Ok(());
+        }
+        loop {
+            self.parse_string(None)?;
+            self.skip_whitespace();
+            self.expect(b':')?;
+            self.skip_value(depth)?;
+            self.skip_whitespace();
+            if self.consume(b'}') {
+                return Ok(());
+            }
+            self.expect(b',')?;
+            self.skip_whitespace();
+        }
+    }
+
+    fn skip_array(&mut self, depth: usize) -> Result<(), ()> {
+        self.expect(b'[')?;
+        self.skip_whitespace();
+        if self.consume(b']') {
+            return Ok(());
+        }
+        loop {
+            self.skip_value(depth)?;
+            self.skip_whitespace();
+            if self.consume(b']') {
+                return Ok(());
+            }
+            self.expect(b',')?;
+            self.skip_whitespace();
+        }
+    }
+
+    fn parse_string(&mut self, mut matcher: Option<&mut KnownKeyMatcher>) -> Result<(), ()> {
+        self.expect(b'"')?;
+        loop {
+            let byte = self.peek().ok_or(())?;
+            let character = match byte {
+                b'"' => {
+                    self.index += 1;
+                    return Ok(());
+                }
+                b'\\' => self.parse_escape()?,
+                0x00..=0x1f => return Err(()),
+                0x20..=0x7f => {
+                    self.index += 1;
+                    byte as char
+                }
+                _ => self.parse_utf8_character()?,
+            };
+            if let Some(matcher) = matcher.as_deref_mut() {
+                matcher.push(character);
+            }
+        }
+    }
+
+    fn parse_escape(&mut self) -> Result<char, ()> {
+        self.expect(b'\\')?;
+        let escaped = self.next().ok_or(())?;
+        match escaped {
+            b'"' => Ok('"'),
+            b'\\' => Ok('\\'),
+            b'/' => Ok('/'),
+            b'b' => Ok('\u{0008}'),
+            b'f' => Ok('\u{000c}'),
+            b'n' => Ok('\n'),
+            b'r' => Ok('\r'),
+            b't' => Ok('\t'),
+            b'u' => {
+                let high = self.parse_hex_quad()?;
+                let scalar = if (0xd800..=0xdbff).contains(&high) {
+                    self.expect(b'\\')?;
+                    self.expect(b'u')?;
+                    let low = self.parse_hex_quad()?;
+                    if !(0xdc00..=0xdfff).contains(&low) {
+                        return Err(());
+                    }
+                    0x1_0000 + (((high as u32 - 0xd800) << 10) | (low as u32 - 0xdc00))
+                } else if (0xdc00..=0xdfff).contains(&high) {
+                    return Err(());
+                } else {
+                    high as u32
+                };
+                char::from_u32(scalar).ok_or(())
+            }
+            _ => Err(()),
+        }
+    }
+
+    fn parse_hex_quad(&mut self) -> Result<u16, ()> {
+        let mut value = 0_u16;
+        for _ in 0..4 {
+            let digit = self.next().and_then(|byte| match byte {
+                b'0'..=b'9' => Some((byte - b'0') as u16),
+                b'a'..=b'f' => Some((byte - b'a' + 10) as u16),
+                b'A'..=b'F' => Some((byte - b'A' + 10) as u16),
+                _ => None,
+            });
+            let digit = digit.ok_or(())?;
+            value = value
+                .checked_mul(16)
+                .and_then(|value| value.checked_add(digit))
+                .ok_or(())?;
+        }
+        Ok(value)
+    }
+
+    fn parse_utf8_character(&mut self) -> Result<char, ()> {
+        let width = match self.peek().ok_or(())? {
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf4 => 4,
+            _ => return Err(()),
+        };
+        let end = self.index.checked_add(width).ok_or(())?;
+        let encoded = self.bytes.get(self.index..end).ok_or(())?;
+        let decoded = std::str::from_utf8(encoded).map_err(|_| ())?;
+        let mut characters = decoded.chars();
+        let character = characters.next().ok_or(())?;
+        if characters.next().is_some() {
+            return Err(());
+        }
+        self.index = end;
+        Ok(character)
+    }
+
+    fn skip_number(&mut self) -> Result<(), ()> {
+        self.consume(b'-');
+        match self.next().ok_or(())? {
+            b'0' if self.peek().is_some_and(|byte| byte.is_ascii_digit()) => return Err(()),
+            b'0' => {}
+            b'1'..=b'9' => {
+                while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+                    self.index += 1;
+                }
+            }
+            _ => return Err(()),
+        }
+        if self.consume(b'.') {
+            if !self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+                return Err(());
+            }
+            while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+                self.index += 1;
+            }
+        }
+        if self.consume(b'e') || self.consume(b'E') {
+            if !self.consume(b'+') {
+                self.consume(b'-');
+            }
+            if !self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+                return Err(());
+            }
+            while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+                self.index += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn consume_literal(&mut self, literal: &[u8]) -> Result<(), ()> {
+        let end = self.index.checked_add(literal.len()).ok_or(())?;
+        if self.bytes.get(self.index..end) != Some(literal) {
+            return Err(());
+        }
+        self.index = end;
+        Ok(())
+    }
+
+    fn skip_whitespace(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+            self.index += 1;
+        }
+    }
+
+    fn expect(&mut self, expected: u8) -> Result<(), ()> {
+        self.consume(expected).then_some(()).ok_or(())
+    }
+
+    fn consume(&mut self, expected: u8) -> bool {
+        if self.peek() == Some(expected) {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn next(&mut self) -> Option<u8> {
+        let byte = self.peek()?;
+        self.index += 1;
+        Some(byte)
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.index).copied()
+    }
 }
 
 #[cfg(test)]
@@ -316,5 +617,16 @@ mod tests {
                 .to_string()
                 .contains(directory.path().to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn bounded_json_detection_does_not_allocate_schema_keys() {
+        SCHEMA_KEY_ALLOCATIONS.with(|allocations| allocations.set(0));
+        let record = br#"{"\ud83d\ude00":{"nested":["brace } and quote \"",2,3]},"\u0063reatedAt":"2026-01-02T03:04:05Z","\u0063ategory":"text"}"#;
+
+        let source = detect_json_source(record).unwrap();
+
+        assert_eq!(source, ImportSource::Raycast);
+        SCHEMA_KEY_ALLOCATIONS.with(|allocations| assert_eq!(allocations.get(), 0));
     }
 }
