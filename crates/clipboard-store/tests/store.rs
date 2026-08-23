@@ -48,6 +48,110 @@ fn import_operation_permit_serializes_and_releases_its_reserved_capacity() {
 }
 
 #[tokio::test]
+async fn reclamation_removes_only_what_the_writer_reconfirms_as_unused() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = StoreHandle::open(StoreConfig::in_data_dir(directory.path())).unwrap();
+    let cas = store.cas_store().unwrap();
+    let orphan = cas.put(b"nikt do mnie nie odsyla").unwrap();
+
+    let outcome = store
+        .reclaim_orphans(vec![orphan.relpath.clone()])
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.examined, 1);
+    assert_eq!(outcome.removed_objects, 1);
+    assert_eq!(outcome.skipped_now_live, 0);
+    assert!(outcome.reclaimed_bytes > 0);
+    assert!(cas.read(&orphan.relpath).is_err());
+}
+
+#[tokio::test]
+async fn a_candidate_referenced_again_since_the_scan_is_not_deleted() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = StoreHandle::open(StoreConfig::in_data_dir(directory.path())).unwrap();
+    let payload = vec![b'x'; 300 * 1024];
+    store
+        .ingest(binary_capture("image/png", &payload, 1_000))
+        .await
+        .unwrap();
+    let relpath: String = store
+        .with_reader(|connection| {
+            connection.query_row(
+                "SELECT blob_relpath FROM raw_payload WHERE storage_kind = 'cas'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+
+    // The scan runs outside any transaction, so a blob it saw as unused may be
+    // referenced by the time reclamation gets to it. Liveness is re-checked
+    // here, under the writer, rather than trusted from the scan.
+    let outcome = store.reclaim_orphans(vec![relpath.clone()]).await.unwrap();
+
+    assert_eq!(outcome.removed_objects, 0);
+    assert_eq!(outcome.skipped_now_live, 1);
+    assert!(store.cas_store().unwrap().read(&relpath).is_ok());
+}
+
+#[tokio::test]
+async fn retention_deletes_only_what_aged_out_and_never_a_pinned_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = StoreHandle::open(StoreConfig::in_data_dir(directory.path())).unwrap();
+    let day_ms = 24 * 60 * 60 * 1_000_i64;
+    let now_ms = 100 * day_ms;
+
+    let old = store
+        .ingest(text_capture("stary wpis", now_ms - 40 * day_ms))
+        .await
+        .unwrap();
+    let pinned = store
+        .ingest(text_capture("stary przypięty", now_ms - 41 * day_ms))
+        .await
+        .unwrap();
+    store.set_pinned(pinned.event_id, true).await.unwrap();
+    store
+        .ingest(text_capture("świeży wpis", now_ms - day_ms))
+        .await
+        .unwrap();
+
+    let policy = clipboard_store::RetentionPolicy::from_days(Some(30));
+    let cutoff = policy.cutoff_ms(now_ms).unwrap();
+    let outcome = store
+        .run_retention_batch(cutoff, clipboard_store::MAX_RETENTION_BATCH)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.deleted_events, 1);
+    assert!(!outcome.more_remaining);
+    let remaining = store.stats().unwrap().event_count;
+    assert_eq!(remaining, 2, "the pinned and the fresh entry both stay");
+    let _ = old;
+}
+
+#[tokio::test]
+async fn retention_stops_at_its_batch_and_says_more_remains() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = StoreHandle::open(StoreConfig::in_data_dir(directory.path())).unwrap();
+
+    for index in 0..5 {
+        store
+            .ingest(text_capture(&format!("wpis {index}"), 1_000 + index))
+            .await
+            .unwrap();
+    }
+
+    // Deleting is a write on the queue capture shares, so a long cleanup must
+    // yield rather than hold it.
+    let outcome = store.run_retention_batch(i64::MAX, 2).await.unwrap();
+
+    assert_eq!(outcome.deleted_events, 2);
+    assert!(outcome.more_remaining);
+    assert_eq!(store.stats().unwrap().event_count, 3);
+}
+
+#[tokio::test]
 async fn import_operation_permit_is_consumed_by_store_batch() {
     let directory = tempfile::tempdir().unwrap();
     let store =
@@ -176,6 +280,27 @@ fn secure_existing_database(data_root: &std::path::Path, database: &std::path::P
 
 #[cfg(not(unix))]
 fn secure_existing_database(_: &std::path::Path, _: &std::path::Path) {}
+
+fn binary_capture(mime: &str, payload: &[u8], captured_at_ms: i64) -> CaptureInput {
+    CaptureInput {
+        captured_at_ms,
+        kind: ContentKind::Image,
+        primary_mime: mime.to_owned(),
+        representations: vec![RepresentationInput {
+            format_id: mime.to_owned(),
+            bytes: Some(payload.to_vec()),
+            missing_ref: None,
+        }],
+        source_app_id: Some("com.example.viewer".to_owned()),
+        source_app_name: Some("Example Viewer".to_owned()),
+        source_confidence: SourceConfidence::Declared,
+        pinned: false,
+        occurrence_count: 1,
+        content_flags: ContentFlags::empty(),
+        event_flags: EventFlags::empty(),
+        display_label: None,
+    }
+}
 
 fn text_capture(value: &str, captured_at_ms: i64) -> CaptureInput {
     CaptureInput {

@@ -662,6 +662,13 @@ fn current_time_ms() -> i64 {
         .unwrap_or_default()
 }
 
+/// How many days of history the user asked to keep, if they asked at all.
+pub fn retention_days(store: &StoreHandle) -> Option<u16> {
+    get_settings_blocking(store)
+        .ok()
+        .and_then(|settings| settings.retention_days)
+}
+
 pub fn denylisted_apps(store: &StoreHandle) -> Vec<String> {
     get_settings_blocking(store)
         .map(|settings| settings.denylisted_apps)

@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod hotkey;
+pub mod maintenance;
 pub mod monitor;
 pub mod state;
 pub mod tray;
@@ -35,6 +36,7 @@ pub fn run() {
                 eprintln!("clipboard-history: menu bar item unavailable ({error})");
             }
             monitor::start(app.handle(), control);
+            maintenance::start(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {

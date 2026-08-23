@@ -62,10 +62,16 @@ impl GcStepBudget {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GcStep {
     pub examined_entries: usize,
     pub orphan_candidates: usize,
+    /// Relative paths of the entries nothing refers to any more.
+    ///
+    /// Bounded by the step budget, and reported rather than acted on: whether
+    /// a blob is really unused is a question only the writer can answer without
+    /// racing an import that is adding one.
+    pub candidates: Vec<String>,
     pub complete: bool,
 }
 
@@ -390,6 +396,43 @@ impl CasStore {
         }
         Ok(CasVerification {
             byte_size: expected_size,
+        })
+    }
+
+    /// Deletes one blob and reports how many bytes it freed.
+    ///
+    /// The only place in the store that unlinks a blob. It validates the path
+    /// against the storage boundary first, so a relative path that escaped the
+    /// root — however it got there — cannot reach the filesystem.
+    pub fn remove_object(&self, relpath: &str) -> Result<u64, CasError> {
+        if !is_valid_relpath(relpath) {
+            return Err(CasError::InvalidRelativePath);
+        }
+        self.with_valid_boundary(|| {
+            let (shard_name, blob_name) = split_relpath(relpath)?;
+            if self.storage_boundary.is_some() {
+                let root = self.leased_root()?;
+                let shard = open_cap_directory(&root, shard_name)?;
+                let bytes = shard
+                    .symlink_metadata(blob_name)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                match shard.remove_file(blob_name) {
+                    Ok(()) => Ok(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+                    Err(error) => Err(CasError::Io(error)),
+                }
+            } else {
+                let path = self.root.join(shard_name).join(blob_name);
+                let bytes = fs::symlink_metadata(&path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                match fs::remove_file(&path) {
+                    Ok(()) => Ok(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+                    Err(error) => Err(CasError::Io(error)),
+                }
+            }
         })
     }
 
@@ -957,6 +1000,7 @@ impl CasGcSession {
         let mut outcome = GcStep {
             examined_entries: 0,
             orphan_candidates: 0,
+            candidates: Vec::new(),
             complete: matches!(self.state, GcState::Complete),
         };
         while !outcome.complete && outcome.examined_entries < budget.max_entries {
@@ -968,7 +1012,10 @@ impl CasGcSession {
             match progress {
                 GcProgress::Examined { orphan_candidate } => {
                     outcome.examined_entries += 1;
-                    outcome.orphan_candidates += usize::from(orphan_candidate);
+                    if let Some(relpath) = orphan_candidate {
+                        outcome.orphan_candidates += 1;
+                        outcome.candidates.push(relpath);
+                    }
                 }
                 GcProgress::Complete => {
                     self.state = GcState::Complete;
@@ -982,7 +1029,11 @@ impl CasGcSession {
 }
 
 enum GcProgress {
-    Examined { orphan_candidate: bool },
+    /// One entry looked at. `orphan_candidate` names it when nothing in the
+    /// database refers to it any more.
+    Examined {
+        orphan_candidate: Option<String>,
+    },
     Complete,
 }
 
@@ -1000,39 +1051,39 @@ fn next_direct_gc_entry(
                         Ok(name) => name,
                         Err(_) => {
                             return Ok(GcProgress::Examined {
-                                orphan_candidate: false,
+                                orphan_candidate: None,
                             });
                         }
                     };
                     let relpath = format!("{}/{blob_name}", shard.name);
                     if !is_valid_relpath(&relpath) {
                         return Ok(GcProgress::Examined {
-                            orphan_candidate: false,
+                            orphan_candidate: None,
                         });
                     }
                     let path = shard.directory.join(&blob_name);
                     let Some(file) = valid_direct_gc_file(&path)? else {
                         return Ok(GcProgress::Examined {
-                            orphan_candidate: false,
+                            orphan_candidate: None,
                         });
                     };
                     if store.verify_inner(&relpath, file.size).is_err() || is_live(&relpath)? {
                         return Ok(GcProgress::Examined {
-                            orphan_candidate: false,
+                            orphan_candidate: None,
                         });
                     }
                     let Some(after) = valid_direct_gc_file(&path)? else {
                         return Ok(GcProgress::Examined {
-                            orphan_candidate: false,
+                            orphan_candidate: None,
                         });
                     };
                     if after.identity != file.identity {
                         return Ok(GcProgress::Examined {
-                            orphan_candidate: false,
+                            orphan_candidate: None,
                         });
                     }
                     return Ok(GcProgress::Examined {
-                        orphan_candidate: true,
+                        orphan_candidate: Some(relpath),
                     });
                 }
                 None => state.shard = None,
@@ -1045,13 +1096,13 @@ fn next_direct_gc_entry(
                         Ok(name) => name,
                         Err(_) => {
                             return Ok(GcProgress::Examined {
-                                orphan_candidate: false,
+                                orphan_candidate: None,
                             });
                         }
                     };
                     if name == ".tmp" || !is_lower_hex(&name, 2) {
                         return Ok(GcProgress::Examined {
-                            orphan_candidate: false,
+                            orphan_candidate: None,
                         });
                     }
                     let path = entry.path();
@@ -1059,7 +1110,7 @@ fn next_direct_gc_entry(
                         Ok(directory) => directory,
                         Err(_) => {
                             return Ok(GcProgress::Examined {
-                                orphan_candidate: false,
+                                orphan_candidate: None,
                             });
                         }
                     };
@@ -1067,7 +1118,7 @@ fn next_direct_gc_entry(
                         Ok(entries) => entries,
                         Err(_) => {
                             return Ok(GcProgress::Examined {
-                                orphan_candidate: false,
+                                orphan_candidate: None,
                             });
                         }
                     };
@@ -1077,7 +1128,7 @@ fn next_direct_gc_entry(
                         entries,
                     });
                     return Ok(GcProgress::Examined {
-                        orphan_candidate: false,
+                        orphan_candidate: None,
                     });
                 }
                 None => return Ok(GcProgress::Complete),
@@ -1159,21 +1210,21 @@ fn next_leased_gc_entry(
                         Ok(name) => name,
                         Err(_) => {
                             return Ok(GcProgress::Examined {
-                                orphan_candidate: false,
+                                orphan_candidate: None,
                             });
                         }
                     };
                     let relpath = format!("{}/{blob_name}", shard.name);
                     if !is_valid_relpath(&relpath) {
                         return Ok(GcProgress::Examined {
-                            orphan_candidate: false,
+                            orphan_candidate: None,
                         });
                     }
                     let metadata = match shard.directory.symlink_metadata(&blob_name) {
                         Ok(metadata) => metadata,
                         Err(_) => {
                             return Ok(GcProgress::Examined {
-                                orphan_candidate: false,
+                                orphan_candidate: None,
                             });
                         }
                     };
@@ -1181,13 +1232,13 @@ fn next_leased_gc_entry(
                         Ok(identity) => identity,
                         Err(_) => {
                             return Ok(GcProgress::Examined {
-                                orphan_candidate: false,
+                                orphan_candidate: None,
                             });
                         }
                     };
                     if metadata.len() > MAX_CAS_OBJECT_BYTES as u64 {
                         return Ok(GcProgress::Examined {
-                            orphan_candidate: false,
+                            orphan_candidate: None,
                         });
                     }
                     let mut options = CapOpenOptions::new();
@@ -1196,7 +1247,7 @@ fn next_leased_gc_entry(
                         Ok(file) => file,
                         Err(_) => {
                             return Ok(GcProgress::Examined {
-                                orphan_candidate: false,
+                                orphan_candidate: None,
                             });
                         }
                     };
@@ -1204,7 +1255,7 @@ fn next_leased_gc_entry(
                         Ok(metadata) => CapFileIdentity::from_metadata(&metadata),
                         Err(_) => {
                             return Ok(GcProgress::Examined {
-                                orphan_candidate: false,
+                                orphan_candidate: None,
                             });
                         }
                     };
@@ -1213,18 +1264,18 @@ fn next_leased_gc_entry(
                         || is_live(&relpath)?
                     {
                         return Ok(GcProgress::Examined {
-                            orphan_candidate: false,
+                            orphan_candidate: None,
                         });
                     }
                     if validate_named_cap_file(&shard.directory, OsStr::new(&blob_name), identity)
                         .is_err()
                     {
                         return Ok(GcProgress::Examined {
-                            orphan_candidate: false,
+                            orphan_candidate: None,
                         });
                     }
                     return Ok(GcProgress::Examined {
-                        orphan_candidate: true,
+                        orphan_candidate: Some(relpath),
                     });
                 }
                 None => state.shard = None,
@@ -1237,20 +1288,20 @@ fn next_leased_gc_entry(
                         Ok(name) => name,
                         Err(_) => {
                             return Ok(GcProgress::Examined {
-                                orphan_candidate: false,
+                                orphan_candidate: None,
                             });
                         }
                     };
                     if name == ".tmp" || !is_lower_hex(&name, 2) {
                         return Ok(GcProgress::Examined {
-                            orphan_candidate: false,
+                            orphan_candidate: None,
                         });
                     }
                     let directory = match open_cap_directory(&state.root, &name) {
                         Ok(directory) => directory,
                         Err(_) => {
                             return Ok(GcProgress::Examined {
-                                orphan_candidate: false,
+                                orphan_candidate: None,
                             });
                         }
                     };
@@ -1258,7 +1309,7 @@ fn next_leased_gc_entry(
                         Ok(entries) => entries,
                         Err(_) => {
                             return Ok(GcProgress::Examined {
-                                orphan_candidate: false,
+                                orphan_candidate: None,
                             });
                         }
                     };
@@ -1268,7 +1319,7 @@ fn next_leased_gc_entry(
                         entries,
                     });
                     return Ok(GcProgress::Examined {
-                        orphan_candidate: false,
+                        orphan_candidate: None,
                     });
                 }
                 None => return Ok(GcProgress::Complete),

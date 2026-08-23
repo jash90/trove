@@ -16,6 +16,45 @@ fn test_cas() -> (tempfile::TempDir, CasStore) {
 }
 
 #[test]
+fn removing_an_object_frees_it_and_leaves_everything_else_alone() {
+    let directory = tempfile::tempdir().unwrap();
+    let cas = CasStore::new(directory.path().join("blobs"));
+    let doomed = cas.put(b"do usuniecia").unwrap();
+    let kept = cas.put(b"do zachowania").unwrap();
+
+    let bytes = cas.remove_object(&doomed.relpath).unwrap();
+
+    assert_eq!(bytes, b"do usuniecia".len() as u64);
+    assert!(cas.read(&doomed.relpath).is_err());
+    assert_eq!(cas.read(&kept.relpath).unwrap(), b"do zachowania");
+}
+
+#[test]
+fn removing_the_same_object_twice_is_not_an_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let cas = CasStore::new(directory.path().join("blobs"));
+    let blob = cas.put(b"payload").unwrap();
+
+    assert!(cas.remove_object(&blob.relpath).unwrap() > 0);
+    // A second pass over the same candidate must not fail the whole run: the
+    // file being gone already is the outcome it wanted.
+    assert_eq!(cas.remove_object(&blob.relpath).unwrap(), 0);
+}
+
+#[test]
+fn a_path_outside_the_store_is_refused_before_the_filesystem_is_touched() {
+    let directory = tempfile::tempdir().unwrap();
+    let cas = CasStore::new(directory.path().join("blobs"));
+
+    for relpath in ["../escape", "ab/../../escape", "not-a-blob", "/absolute"] {
+        assert!(
+            cas.remove_object(relpath).is_err(),
+            "{relpath:?} must never reach remove_file"
+        );
+    }
+}
+
+#[test]
 fn cas_is_content_addressed_and_idempotent() {
     let (_directory, cas) = test_cas();
 

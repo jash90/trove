@@ -711,6 +711,15 @@ enum WriteCommand {
         pinned: bool,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    RunRetentionBatch {
+        cutoff_ms: i64,
+        max_events: u32,
+        reply: oneshot::Sender<Result<crate::RetentionOutcome, StoreError>>,
+    },
+    ReclaimOrphans {
+        candidates: Vec<String>,
+        reply: oneshot::Sender<Result<ReclaimOutcome, StoreError>>,
+    },
     DeleteEvent {
         event_id: i64,
         reply: oneshot::Sender<Result<(), StoreError>>,
@@ -816,6 +825,52 @@ impl StoreHandle {
                 pinned,
                 reply,
             })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    /// Deletes at most `max_events` entries captured before `cutoff_ms`.
+    ///
+    /// Bounded on purpose: the writer is shared with capture, so a long cleanup
+    /// must not hold the queue while the user is copying.
+    pub async fn run_retention_batch(
+        &self,
+        cutoff_ms: i64,
+        max_events: u32,
+    ) -> Result<crate::RetentionOutcome, StoreError> {
+        let (reply, response) = oneshot::channel();
+        self.runtime
+            .runtime
+            .writer_sender()?
+            .send(WriteCommand::RunRetentionBatch {
+                cutoff_ms,
+                max_events,
+                reply,
+            })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    /// Removes blob files that a scan found unreferenced.
+    ///
+    /// The scan runs outside any transaction and can only observe; liveness is
+    /// re-checked here, under the writer, because a blob observed as orphaned
+    /// may have been referenced again by an import in the meantime.
+    pub async fn reclaim_orphans(
+        &self,
+        candidates: Vec<String>,
+    ) -> Result<ReclaimOutcome, StoreError> {
+        let (reply, response) = oneshot::channel();
+        self.runtime
+            .runtime
+            .writer_sender()?
+            .send(WriteCommand::ReclaimOrphans { candidates, reply })
             .await
             .map_err(|_| StoreError::WriterClosed)?;
         response
@@ -1132,6 +1187,20 @@ fn handle_command(
         } => {
             let _ = reply.send(with_storage_boundary(boundary, || {
                 set_pinned(connection, event_id, pinned)
+            }));
+        }
+        WriteCommand::RunRetentionBatch {
+            cutoff_ms,
+            max_events,
+            reply,
+        } => {
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                run_retention_batch(connection, cutoff_ms, max_events)
+            }));
+        }
+        WriteCommand::ReclaimOrphans { candidates, reply } => {
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                reclaim_orphans(connection, cas, &candidates)
             }));
         }
         WriteCommand::DeleteEvent { event_id, reply } => {
@@ -1662,6 +1731,82 @@ fn delete_event(connection: &mut Connection, event_id: i64) -> Result<(), StoreE
     }
     transaction.commit()?;
     Ok(())
+}
+
+/// What one blob reclamation pass did.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReclaimOutcome {
+    pub examined: usize,
+    pub removed_objects: usize,
+    /// Candidates something started referring to again between scan and here.
+    pub skipped_now_live: usize,
+    pub reclaimed_bytes: u64,
+}
+
+fn run_retention_batch(
+    connection: &mut Connection,
+    cutoff_ms: i64,
+    max_events: u32,
+) -> Result<crate::RetentionOutcome, StoreError> {
+    let limit = i64::from(max_events.min(crate::MAX_RETENTION_BATCH));
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Pinned entries survive: pinning is the user saying "keep this", which
+    // outranks a rule they set once and forgot.
+    let deleted = transaction.execute(
+        "DELETE FROM history_event
+         WHERE event_id IN (
+           SELECT event_id FROM history_event
+           WHERE captured_at_ms < ?1 AND pinned = 0
+           ORDER BY captured_at_ms
+           LIMIT ?2
+         )",
+        params![cutoff_ms, limit],
+    )?;
+    transaction.commit()?;
+    Ok(crate::RetentionOutcome {
+        deleted_events: deleted as u64,
+        more_remaining: deleted as i64 == limit,
+    })
+}
+
+fn reclaim_orphans(
+    connection: &mut Connection,
+    cas: &CasStore,
+    candidates: &[String],
+) -> Result<ReclaimOutcome, StoreError> {
+    let mut outcome = ReclaimOutcome::default();
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut still_live = transaction.prepare(
+        "SELECT EXISTS(SELECT 1 FROM raw_payload WHERE blob_relpath = ?1)
+             OR EXISTS(SELECT 1 FROM artifact WHERE blob_relpath = ?1)",
+    )?;
+    let mut removable = Vec::with_capacity(candidates.len());
+    for relpath in candidates {
+        outcome.examined += 1;
+        if still_live.query_row([relpath], |row| row.get::<_, bool>(0))? {
+            outcome.skipped_now_live += 1;
+            continue;
+        }
+        removable.push(relpath.as_str());
+    }
+    drop(still_live);
+    transaction.commit()?;
+
+    // Unlinking happens after the transaction commits. A filesystem operation
+    // inside one would hold the writer open across an unbounded wait.
+    for relpath in removable {
+        match cas.remove_object(relpath) {
+            Ok(bytes) => {
+                outcome.removed_objects += 1;
+                outcome.reclaimed_bytes = outcome.reclaimed_bytes.saturating_add(bytes);
+            }
+            Err(CasError::PrivateStorageUnavailable) => {
+                return Err(StoreError::PrivateStorageUnavailable);
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(outcome)
 }
 
 struct PreparedIngest<'a> {
