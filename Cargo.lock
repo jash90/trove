@@ -9,6 +9,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "allocation-counter"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "beb9e990c0a33699f1984d85a6abead615ccc72dd8130bf3e15dcabe2ca149c9"
+
+[[package]]
 name = "ambient-authority"
 version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -262,6 +268,7 @@ dependencies = [
 name = "clipboard-import"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
  "blake3",
  "cap-fs-ext",
  "cap-std",
@@ -320,6 +327,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "clipboard-core",
+ "clipboard-zstd-bound",
  "rusqlite",
  "rustix",
  "tempfile",
@@ -327,6 +335,13 @@ dependencies = [
  "tokio",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "clipboard-zstd-bound"
+version = "0.1.0"
+dependencies = [
+ "zstd-sys",
 ]
 
 [[package]]

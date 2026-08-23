@@ -1,4 +1,10 @@
-use std::{fs, path::Path, sync::Arc};
+use std::{
+    fs,
+    path::Path,
+    sync::{Arc, mpsc},
+    thread,
+    time::Duration,
+};
 
 use clipboard_core::{
     CaptureInput, ContentFlags, ContentKind, EventFlags, RepresentationInput, SourceConfidence,
@@ -95,6 +101,47 @@ async fn wait_for_processed(service: &ImportService, run_id: uuid::Uuid, process
 async fn begin_analyzed(service: &ImportService, path: &Path) -> ImportRunHandle {
     let analysis = service.analyze(path).unwrap();
     service.begin(analysis.analysis_id).await.unwrap()
+}
+
+#[test]
+fn async_run_to_completion_yields_while_operation_admission_is_busy() {
+    let export = tempfile::tempdir().unwrap();
+    let database = tempfile::tempdir().unwrap();
+    write_raycast_export(&export, &[raycast_record(0)]);
+    let service = ImportService::new(open_store(&database));
+    let held_permit = clipboard_store::ImportOperationGate::process_wide()
+        .acquire_blocking()
+        .unwrap();
+    let (heartbeat_tx, heartbeat_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let path = export.path().to_path_buf();
+    let worker = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async move {
+            tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                heartbeat_tx.send(()).unwrap();
+            });
+            service.run_to_completion(path).await
+        });
+        result_tx.send(result).unwrap();
+    });
+
+    let yielded_before_release = heartbeat_rx
+        .recv_timeout(Duration::from_millis(250))
+        .is_ok();
+    drop(held_permit);
+    let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    worker.join().unwrap();
+
+    assert!(
+        yielded_before_release,
+        "async preparation blocked the single Tokio worker"
+    );
+    result.unwrap();
 }
 
 #[tokio::test]

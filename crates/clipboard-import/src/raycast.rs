@@ -204,20 +204,28 @@ fn parse_timestamp(value: &str, index: usize) -> Result<i64, ImportRecordFailure
 }
 
 fn content_kind(category: &str, index: usize) -> Result<ContentKind, ImportRecordFailure> {
-    match category.to_ascii_lowercase().as_str() {
-        "text" => Ok(ContentKind::Text),
-        "link" | "url" => Ok(ContentKind::Link),
-        "image" => Ok(ContentKind::Image),
-        "file" => Ok(ContentKind::File),
-        "color" => Ok(ContentKind::Color),
-        "code" => Ok(ContentKind::Code),
-        "html" => Ok(ContentKind::Html),
-        _ => Err(record_failure(
+    let kind = if category.eq_ignore_ascii_case("text") {
+        ContentKind::Text
+    } else if category.eq_ignore_ascii_case("link") || category.eq_ignore_ascii_case("url") {
+        ContentKind::Link
+    } else if category.eq_ignore_ascii_case("image") {
+        ContentKind::Image
+    } else if category.eq_ignore_ascii_case("file") {
+        ContentKind::File
+    } else if category.eq_ignore_ascii_case("color") {
+        ContentKind::Color
+    } else if category.eq_ignore_ascii_case("code") {
+        ContentKind::Code
+    } else if category.eq_ignore_ascii_case("html") {
+        ContentKind::Html
+    } else {
+        return Err(record_failure(
             ImportSource::Raycast,
             index,
             "invalid_category",
-        )),
-    }
+        ));
+    };
+    Ok(kind)
 }
 
 fn primary_mime(kind: ContentKind) -> &'static str {
@@ -277,8 +285,21 @@ mod tests {
 
     use clipboard_store::ImportOperationGate;
 
-    use super::{MAP_RECORD_CALLS, parse_raycast_report_with_permit};
+    use super::{MAP_RECORD_CALLS, content_kind, parse_raycast_report_with_permit};
     use crate::ImportParseLimits;
+
+    #[test]
+    fn raycast_content_kind_classification_is_allocation_free() {
+        let mut kind = None;
+
+        let allocations = allocation_counter::measure(|| {
+            kind = Some(content_kind("TeXt", 1).unwrap());
+        });
+
+        assert_eq!(kind, Some(clipboard_core::ContentKind::Text));
+        assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        assert_eq!(allocations.bytes_total, 0, "{allocations:?}");
+    }
 
     #[test]
     fn bounded_raycast_json_counts_one_byte_overflow_and_keeps_the_later_record() {
@@ -302,6 +323,7 @@ mod tests {
             record_bytes: exact.len(),
             header_bytes: 1024,
             source_bytes: 64 * 1024,
+            source_control_bytes: 4 * 1024,
             auxiliary_bytes: 1024,
         };
         let gate = ImportOperationGate::with_capacity(64 * 1024).unwrap();
@@ -337,6 +359,7 @@ mod tests {
             record_bytes: record.len(),
             header_bytes: 1024,
             source_bytes: record.len() * 2 + 1024,
+            source_control_bytes: 4 * 1024,
             auxiliary_bytes: 1024,
         };
         let gate = ImportOperationGate::with_capacity(64 * 1024).unwrap();

@@ -19,4 +19,5 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+allocation-counter.workspace = true
 tempfile.workspace = true

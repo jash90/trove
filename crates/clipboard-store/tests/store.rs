@@ -63,7 +63,7 @@ async fn import_operation_permit_is_consumed_by_store_batch() {
         })
         .await
         .unwrap();
-    let gate = ImportOperationGate::with_capacity(4 * 1024).unwrap();
+    let gate = ImportOperationGate::process_wide();
     let permit = gate.acquire_blocking().unwrap();
 
     let outcome = store
@@ -72,7 +72,42 @@ async fn import_operation_permit_is_consumed_by_store_batch() {
         .unwrap();
 
     assert_eq!(outcome.processed_candidates, 0);
-    assert_eq!(gate.active_bytes(), 0);
+    assert_eq!(gate.capacity(), clipboard_store::MAX_IMPORT_OPERATION_BYTES);
+}
+
+#[tokio::test]
+async fn custom_import_operation_permit_is_rejected_before_enqueue() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+    let run = store
+        .begin_import(BeginImportRun {
+            run_id: uuid::Uuid::now_v7(),
+            source_kind: ImportSourceKind::Raycast,
+            source_fingerprint: [90; 32],
+            total_records: 0,
+            candidate_records: 0,
+            initial_failures: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let custom_gate = ImportOperationGate::with_capacity(4 * 1024).unwrap();
+    let forged_permit = custom_gate.acquire_blocking().unwrap();
+
+    let error = store
+        .import_batch(forged_permit, run.run_id, run.generation, Vec::new())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, StoreError::InvalidImportInput));
+    assert_eq!(custom_gate.active_bytes(), 0);
+    assert_eq!(
+        store
+            .import_status(run.run_id)
+            .unwrap()
+            .next_candidate_offset,
+        0
+    );
 }
 
 #[tokio::test]

@@ -1,13 +1,9 @@
 use std::{
+    ffi::OsStr,
     fmt, fs,
     io::Read,
     path::{Path, PathBuf},
 };
-
-#[cfg(test)]
-thread_local! {
-    static SCHEMA_KEY_ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
 
 use crate::{
     ImportError, ImportParseLimits, ImportSource, JsonRecord, stream_json_records_path_with_limits,
@@ -16,6 +12,10 @@ use crate::{
 /// Maximum number of top-level directory entries inspected while discovering an unnamed export
 /// manifest. Named `clipboard.json` / `clipboard.csv` files bypass discovery entirely.
 pub const MAX_MANIFEST_DISCOVERY_ENTRIES: usize = 4_096;
+const MAX_CONCURRENT_IMPORT_PATH_CAPACITIES: usize = 8;
+const MAX_IMPORT_PATH_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_IMPORT_PATH_CONTROL_BYTES: usize =
+    MAX_CONCURRENT_IMPORT_PATH_CAPACITIES * MAX_IMPORT_PATH_BYTES;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct DetectedExport {
@@ -59,8 +59,8 @@ fn detect_directory_with_limit(
     permit: &clipboard_store::ImportOperationPermit,
     limits: ImportParseLimits,
 ) -> Result<DetectedExport, ImportError> {
-    let json = directory.join("clipboard.json");
-    let csv = directory.join("clipboard.csv");
+    let json = bounded_path_join(directory, OsStr::new("clipboard.json"), limits)?;
+    let csv = bounded_path_join(directory, OsStr::new("clipboard.csv"), limits)?;
     if json.is_file() {
         match detect_file(&json, permit, limits) {
             Ok(detected) => return Ok(detected),
@@ -77,21 +77,53 @@ fn detect_directory_with_limit(
         return detect_file(&csv, permit, limits);
     }
 
-    let entries = fs::read_dir(directory)
-        .map_err(|_| ImportError::export("detection", "unreadable_export"))?
-        .map(|entry| {
-            entry.ok().map(|entry| {
-                let is_file = entry.file_type().ok().is_some_and(|kind| kind.is_file());
-                (entry.path(), is_file)
-            })
-        });
-    match select_unnamed_manifest(entries, max_examined_entries) {
-        Ok(Some(manifest)) => detect_file(&manifest, permit, limits),
-        Ok(None) => Err(ImportError::export("detection", "manifest_not_found")),
-        Err(reason) => Err(ImportError::export("detection", reason)),
+    let manifest = select_unnamed_manifest_in_directory(directory, max_examined_entries, limits)?;
+    match manifest {
+        Some(manifest) => detect_file(&manifest, permit, limits),
+        None => Err(ImportError::export("detection", "manifest_not_found")),
     }
 }
 
+fn select_unnamed_manifest_in_directory(
+    directory: &Path,
+    max_examined_entries: usize,
+    limits: ImportParseLimits,
+) -> Result<Option<PathBuf>, ImportError> {
+    let entries = fs::read_dir(directory)
+        .map_err(|_| ImportError::export("detection", "unreadable_export"))?;
+    let mut examined_entries = 0_usize;
+    let mut manifest = None;
+    for entry in entries {
+        examined_entries = examined_entries
+            .checked_add(1)
+            .ok_or_else(|| ImportError::export("detection", "export_too_large"))?;
+        if examined_entries > max_examined_entries {
+            return Err(ImportError::export("detection", "export_too_large"));
+        }
+        let Some(entry) = entry.ok() else {
+            continue;
+        };
+        if !entry.file_type().ok().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let file_name = entry.file_name();
+        if !matches!(
+            Path::new(&file_name)
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("json" | "csv")
+        ) {
+            continue;
+        }
+        if manifest.is_some() {
+            return Err(ImportError::export("detection", "ambiguous_manifest"));
+        }
+        manifest = Some(bounded_path_join(directory, &file_name, limits)?);
+    }
+    Ok(manifest)
+}
+
+#[cfg(test)]
 fn select_unnamed_manifest(
     entries: impl IntoIterator<Item = Option<(PathBuf, bool)>>,
     max_examined_entries: usize,
@@ -151,9 +183,62 @@ fn detect_file(
     };
     Ok(DetectedExport {
         source,
-        export_path: path.to_path_buf(),
+        export_path: bounded_path_copy(path, limits)?,
         source_fingerprint: source_fingerprint(source, path, limits.manifest_bytes)?,
     })
+}
+
+pub(crate) fn bounded_path_copy(
+    path: &Path,
+    limits: ImportParseLimits,
+) -> Result<PathBuf, ImportError> {
+    bounded_path_copy_with_hook(path, limits, |_, _| {})
+}
+
+fn bounded_path_copy_with_hook(
+    path: &Path,
+    limits: ImportParseLimits,
+    before_allocation: impl FnOnce(usize, usize),
+) -> Result<PathBuf, ImportError> {
+    let required = path.as_os_str().as_encoded_bytes().len();
+    let reserved = bounded_path_slot(limits);
+    if required > reserved {
+        return Err(ImportError::service("analysis_too_large"));
+    }
+    before_allocation(required, reserved);
+    let mut copied = PathBuf::with_capacity(reserved);
+    copied.push(path);
+    Ok(copied)
+}
+
+fn bounded_path_join(
+    parent: &Path,
+    child: &OsStr,
+    limits: ImportParseLimits,
+) -> Result<PathBuf, ImportError> {
+    let required = parent
+        .as_os_str()
+        .as_encoded_bytes()
+        .len()
+        .checked_add(1)
+        .and_then(|bytes| bytes.checked_add(child.as_encoded_bytes().len()))
+        .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+    let reserved = bounded_path_slot(limits);
+    if required > reserved {
+        return Err(ImportError::service("analysis_too_large"));
+    }
+    let mut joined = PathBuf::with_capacity(reserved);
+    joined.push(parent);
+    joined.push(child);
+    Ok(joined)
+}
+
+fn bounded_path_slot(limits: ImportParseLimits) -> usize {
+    limits
+        .source_control_bytes
+        .checked_div(MAX_CONCURRENT_IMPORT_PATH_CAPACITIES)
+        .unwrap_or(0)
+        .min(MAX_IMPORT_PATH_BYTES)
 }
 
 fn detect_csv_source(
@@ -596,6 +681,31 @@ mod tests {
     }
 
     #[test]
+    fn selected_path_capacity_is_authorized_before_copy() {
+        let path = PathBuf::from("synthetic-export.json");
+        let limits = ImportParseLimits {
+            manifest_bytes: 1024,
+            record_bytes: 1024,
+            header_bytes: 1024,
+            source_bytes: 4096,
+            source_control_bytes: 8 * 1024,
+            auxiliary_bytes: 1024,
+        };
+        let authorized = Cell::new(false);
+
+        let copied = bounded_path_copy_with_hook(&path, limits, |required, reserved| {
+            assert!(required > 0);
+            assert!(required <= reserved);
+            authorized.set(true);
+        })
+        .unwrap();
+
+        assert!(authorized.get());
+        assert_eq!(copied, path);
+        assert_eq!(copied.capacity(), limits.source_control_bytes / 8);
+    }
+
+    #[test]
     fn unnamed_manifest_discovery_has_a_path_free_entry_budget_error() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("synthetic.txt"), b"synthetic").unwrap();
@@ -606,6 +716,7 @@ mod tests {
             record_bytes: 1024,
             header_bytes: 1024,
             source_bytes: 4096,
+            source_control_bytes: 1024,
             auxiliary_bytes: 1024,
         };
 
@@ -621,12 +732,15 @@ mod tests {
 
     #[test]
     fn bounded_json_detection_does_not_allocate_schema_keys() {
-        SCHEMA_KEY_ALLOCATIONS.with(|allocations| allocations.set(0));
         let record = br#"{"\ud83d\ude00":{"nested":["brace } and quote \"",2,3]},"\u0063reatedAt":"2026-01-02T03:04:05Z","\u0063ategory":"text"}"#;
+        let mut source = None;
 
-        let source = detect_json_source(record).unwrap();
+        let allocations = allocation_counter::measure(|| {
+            source = Some(detect_json_source(record).unwrap());
+        });
 
-        assert_eq!(source, ImportSource::Raycast);
-        SCHEMA_KEY_ALLOCATIONS.with(|allocations| assert_eq!(allocations.get(), 0));
+        assert_eq!(source, Some(ImportSource::Raycast));
+        assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        assert_eq!(allocations.bytes_total, 0, "{allocations:?}");
     }
 }

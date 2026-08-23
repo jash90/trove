@@ -19,7 +19,8 @@ use uuid::Uuid;
 
 use crate::{
     FramedHasher, ImportCandidate, ImportError, ImportParseLimits, ImportParseReport, ImportSource,
-    detect::detect_export_with_permit, parse_detected_export_report_with_permit,
+    detect::{bounded_path_copy, detect_export_with_permit},
+    parse_detected_export_report_with_permit,
 };
 
 pub const IMPORT_BATCH_SIZE: usize = clipboard_store::IMPORT_BATCH_SIZE;
@@ -36,6 +37,24 @@ pub const PREPARED_SESSION_CAPACITY: usize = 32;
 pub const PREPARED_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const PREPARED_SESSION_OVERHEAD_BYTES: usize = 16 * 1024;
 const MAX_PREPARED_SESSION_CONTROL_BYTES: usize = 16 * 1024;
+const MAX_PREPARED_FAILURE_CONTROL_BYTES: usize = 16 * 1024;
+const MAX_IMPORT_HANDOFF_CONTROL_BYTES: usize = MAX_PREPARED_FAILURE_CONTROL_BYTES;
+const MAX_IMPORT_FAILURE_KINDS: usize = 8;
+pub const MAX_PREPARED_SOURCE_CONTROL_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PREPARED_RUNTIME_CONTROL_BYTES: usize = 64 * 1024;
+
+const _: () = assert!(
+    crate::detect::MAX_IMPORT_PATH_CONTROL_BYTES
+        + crate::supercmd::MAX_AUXILIARY_TRAVERSAL_CONTROL_BYTES
+        + MAX_PREPARED_FAILURE_CONTROL_BYTES
+        + crate::MAX_IMPORT_ANALYSIS_CONTROL_BYTES
+        + PREPARED_SESSION_OVERHEAD_BYTES
+        <= MAX_PREPARED_SOURCE_CONTROL_BYTES
+);
+const _: () = assert!(
+    MAX_PREPARED_SESSION_CONTROL_BYTES + MAX_IMPORT_HANDOFF_CONTROL_BYTES
+        <= MAX_PREPARED_RUNTIME_CONTROL_BYTES
+);
 
 /// Hard admission limits shared by analyzed sessions, resume preparations, CLI imports, and
 /// active workers. Production reserves one full per-source allowance before every parse so the
@@ -44,7 +63,9 @@ const MAX_PREPARED_SESSION_CONTROL_BYTES: usize = 16 * 1024;
 pub(crate) struct ImportAdmissionLimits {
     max_sources: usize,
     max_source_bytes: usize,
+    source_control_bytes: usize,
     prepared_cache_bytes: usize,
+    runtime_control_bytes: usize,
     operation_bytes: usize,
     runtime_bytes: usize,
 }
@@ -54,18 +75,24 @@ impl ImportAdmissionLimits {
     pub(crate) const fn new(
         max_sources: usize,
         max_source_bytes: usize,
+        source_control_bytes: usize,
         prepared_cache_bytes: usize,
+        runtime_control_bytes: usize,
         operation_bytes: usize,
         runtime_bytes: usize,
     ) -> Self {
         assert!(max_sources > 0, "source admission count must be positive");
         assert!(
-            max_source_bytes > 0,
-            "source admission size must be positive"
+            source_control_bytes > 0 && source_control_bytes < max_source_bytes,
+            "source control must be a strict carve-out of one source slot"
         );
         assert!(
-            prepared_cache_bytes >= max_source_bytes,
-            "aggregate admission size must fit one source"
+            runtime_control_bytes >= MAX_PREPARED_SESSION_CONTROL_BYTES,
+            "runtime control must fit the bounded session collection"
+        );
+        assert!(
+            matches!(runtime_control_bytes.checked_add(max_source_bytes), Some(required) if prepared_cache_bytes >= required),
+            "aggregate admission size must fit fixed control and one source"
         );
         assert!(operation_bytes > 0, "operation admission must be positive");
         assert!(
@@ -75,7 +102,9 @@ impl ImportAdmissionLimits {
         Self {
             max_sources,
             max_source_bytes,
+            source_control_bytes,
             prepared_cache_bytes,
+            runtime_control_bytes,
             operation_bytes,
             runtime_bytes,
         }
@@ -87,7 +116,9 @@ impl Default for ImportAdmissionLimits {
         Self::new(
             PREPARED_SESSION_CAPACITY,
             MAX_PREPARED_SOURCE_BYTES,
+            MAX_PREPARED_SOURCE_CONTROL_BYTES,
             MAX_PREPARED_CACHE_BYTES,
+            MAX_PREPARED_RUNTIME_CONTROL_BYTES,
             MAX_IMPORT_OPERATION_BYTES,
             MAX_IMPORT_RUNTIME_BYTES,
         )
@@ -106,30 +137,26 @@ impl ImportRuntime {
     pub(crate) fn process_wide() -> Self {
         static RUNTIME: OnceLock<ImportRuntime> = OnceLock::new();
         RUNTIME
-            .get_or_init(|| {
-                Self::with_limits_and_gate(
-                    ImportAdmissionLimits::default(),
-                    ImportOperationGate::process_wide(),
-                )
-            })
+            .get_or_init(|| Self::build(ImportAdmissionLimits::default()))
             .clone()
     }
 
     #[cfg(test)]
     pub(crate) fn with_limits(limits: ImportAdmissionLimits) -> Self {
-        let operation_gate = ImportOperationGate::with_capacity(limits.operation_bytes)
-            .expect("validated operation admission is non-zero");
-        Self::with_limits_and_gate(limits, operation_gate)
+        assert_eq!(limits.operation_bytes, MAX_IMPORT_OPERATION_BYTES);
+        Self::build(limits)
     }
 
-    fn with_limits_and_gate(
-        limits: ImportAdmissionLimits,
-        operation_gate: ImportOperationGate,
-    ) -> Self {
+    fn build(limits: ImportAdmissionLimits) -> Self {
+        // The ledger carries the fixed runtime charge before the session collection or operation
+        // gate is constructed, so those allocations never exist outside an admitted baseline.
+        let admission_budget = AdmissionBudget::new(limits);
+        let prepared_sessions = PreparedSessions::with_control(limits.runtime_control_bytes);
+        let operation_gate = ImportOperationGate::process_wide();
         Self {
-            admission_budget: AdmissionBudget::new(limits),
+            admission_budget,
             operation_gate,
-            prepared_sessions: Arc::new(Mutex::new(PreparedSessions::default())),
+            prepared_sessions: Arc::new(Mutex::new(prepared_sessions)),
             limits,
         }
     }
@@ -193,11 +220,23 @@ impl ImportRuntime {
             .min(csv_available / (size_of::<usize>() + 1))
             .max(1);
         ImportParseLimits {
-            manifest_bytes: MAX_IMPORT_MANIFEST_BYTES.min(self.limits.max_source_bytes),
+            manifest_bytes: MAX_IMPORT_MANIFEST_BYTES.min(
+                self.limits
+                    .max_source_bytes
+                    .saturating_sub(self.limits.source_control_bytes),
+            ),
             record_bytes: json_record_bytes,
             header_bytes,
-            source_bytes: self.limits.max_source_bytes,
-            auxiliary_bytes: MAX_IMPORT_AUXILIARY_BYTES.min(self.limits.max_source_bytes),
+            source_bytes: self
+                .limits
+                .max_source_bytes
+                .saturating_sub(self.limits.source_control_bytes),
+            source_control_bytes: self.limits.source_control_bytes,
+            auxiliary_bytes: MAX_IMPORT_AUXILIARY_BYTES.min(
+                self.limits
+                    .max_source_bytes
+                    .saturating_sub(self.limits.source_control_bytes),
+            ),
         }
     }
 }
@@ -515,7 +554,7 @@ impl ImportService {
         run_id: Uuid,
         path: impl AsRef<Path>,
     ) -> Result<ImportRunHandle, ImportError> {
-        let source = self.prepare(path.as_ref())?;
+        let source = self.prepare_async(path.as_ref()).await?;
         let lease = self
             .store
             .resume_import(ResumeImportRun {
@@ -545,7 +584,7 @@ impl ImportService {
         &self,
         path: impl AsRef<Path>,
     ) -> Result<ImportSummary, ImportError> {
-        let source = self.prepare(path.as_ref())?;
+        let source = self.prepare_async(path.as_ref()).await?;
         let status = self.persist_run(Uuid::now_v7(), &source.source).await?;
         match self
             .run_worker(status.run_id, status.generation, source, 0)
@@ -580,7 +619,35 @@ impl ImportService {
 
     fn prepare(&self, path: &Path) -> Result<PreparedSourceEnvelope, ImportError> {
         let operation_permit = self.runtime.acquire_operation_blocking()?;
-        let mut reservation = self.runtime.reserve_preparation()?;
+        let reservation = self.runtime.reserve_preparation()?;
+        self.prepare_with_admission(path, operation_permit, reservation)
+    }
+
+    async fn prepare_async(&self, path: &Path) -> Result<PreparedSourceEnvelope, ImportError> {
+        let runtime = self.runtime.clone();
+        let (operation_permit, reservation) = tokio::task::spawn_blocking(move || {
+            let operation_permit = runtime.acquire_operation_blocking()?;
+            let reservation = runtime.reserve_preparation()?;
+            Ok::<_, ImportError>((operation_permit, reservation))
+        })
+        .await
+        .map_err(|_| ImportError::service("analysis_unavailable"))??;
+        let limits = self.runtime.parse_limits();
+        let path = bounded_path_copy(path, limits)?;
+        let preparer = self.clone();
+        tokio::task::spawn_blocking(move || {
+            preparer.prepare_with_admission(&path, operation_permit, reservation)
+        })
+        .await
+        .map_err(|_| ImportError::service("analysis_unavailable"))?
+    }
+
+    fn prepare_with_admission(
+        &self,
+        path: &Path,
+        operation_permit: clipboard_store::ImportOperationPermit,
+        mut reservation: AdmissionReservation,
+    ) -> Result<PreparedSourceEnvelope, ImportError> {
         let limits = self.runtime.parse_limits();
         let source = prepare_source_with_permit(path, &operation_permit, limits)?;
         reservation.resize(source.retained_bytes())?;
@@ -863,7 +930,10 @@ struct AdmissionBudget {
 impl AdmissionBudget {
     fn new(limits: ImportAdmissionLimits) -> Self {
         Self {
-            ledger: Arc::new(Mutex::new(AdmissionLedger::default())),
+            ledger: Arc::new(Mutex::new(AdmissionLedger {
+                source_count: 0,
+                retained_bytes: limits.runtime_control_bytes,
+            })),
             limits,
         }
     }
@@ -894,7 +964,6 @@ impl AdmissionBudget {
     }
 }
 
-#[derive(Default)]
 struct AdmissionLedger {
     source_count: usize,
     retained_bytes: usize,
@@ -951,19 +1020,26 @@ struct PreparedSessions {
     sessions: BTreeMap<Uuid, PreparedSession>,
     insertion_order: VecDeque<Uuid>,
     ttl: Duration,
+    control_bytes: usize,
 }
 
 impl Default for PreparedSessions {
     fn default() -> Self {
-        Self {
-            sessions: BTreeMap::new(),
-            insertion_order: VecDeque::new(),
-            ttl: PREPARED_SESSION_TTL,
-        }
+        Self::with_control(MAX_PREPARED_RUNTIME_CONTROL_BYTES)
     }
 }
 
 impl PreparedSessions {
+    fn with_control(control_bytes: usize) -> Self {
+        assert!(control_bytes >= MAX_PREPARED_SESSION_CONTROL_BYTES);
+        Self {
+            sessions: BTreeMap::new(),
+            insertion_order: VecDeque::new(),
+            ttl: PREPARED_SESSION_TTL,
+            control_bytes,
+        }
+    }
+
     fn remove_owner(&mut self, owner: ServiceOwnerToken) {
         while let Some(analysis_id) = self
             .sessions
@@ -983,13 +1059,29 @@ impl PreparedSessions {
         source: PreparedSourceEnvelope,
         now: Instant,
     ) -> Uuid {
+        self.insert_with_hook(owner, analysis_id, source, now, |_, _, _| {})
+    }
+
+    fn insert_with_hook(
+        &mut self,
+        owner: ServiceOwnerToken,
+        analysis_id: Uuid,
+        source: PreparedSourceEnvelope,
+        now: Instant,
+        before_allocation: impl FnOnce(usize, usize, bool),
+    ) -> Uuid {
         self.evict_expired(now);
         while self.sessions.len() >= PREPARED_SESSION_CAPACITY {
             if !self.evict_oldest_available() {
                 break;
             }
         }
-        self.sessions.insert(
+        before_allocation(
+            MAX_PREPARED_SESSION_CONTROL_BYTES,
+            self.control_bytes,
+            self.sessions.contains_key(&analysis_id),
+        );
+        self.insert_session(
             analysis_id,
             PreparedSession {
                 owner,
@@ -999,6 +1091,11 @@ impl PreparedSessions {
         );
         self.insertion_order.push_back(analysis_id);
         analysis_id
+    }
+
+    fn insert_session(&mut self, analysis_id: Uuid, session: PreparedSession) {
+        assert!(self.control_bytes >= MAX_PREPARED_SESSION_CONTROL_BYTES);
+        self.sessions.insert(analysis_id, session);
     }
 
     fn begin(
@@ -1023,7 +1120,7 @@ impl PreparedSessions {
                 self.insertion_order
                     .retain(|candidate| *candidate != analysis_id);
                 let completion = Arc::new(PersistenceCompletion::default());
-                self.sessions.insert(
+                self.insert_session(
                     analysis_id,
                     PreparedSession {
                         owner: session.owner,
@@ -1034,7 +1131,7 @@ impl PreparedSessions {
                 BeginPreparedSession::Start { source, completion }
             }
             PreparedSessionState::Persisting(completion) => {
-                self.sessions.insert(
+                self.insert_session(
                     analysis_id,
                     PreparedSession {
                         owner: session.owner,
@@ -1045,7 +1142,7 @@ impl PreparedSessions {
                 BeginPreparedSession::Wait(completion)
             }
             PreparedSessionState::Started(completion) => {
-                self.sessions.insert(
+                self.insert_session(
                     analysis_id,
                     PreparedSession {
                         owner: session.owner,
@@ -1056,7 +1153,7 @@ impl PreparedSessions {
                 BeginPreparedSession::Wait(completion)
             }
             PreparedSessionState::Completed(handle) => {
-                self.sessions.insert(
+                self.insert_session(
                     analysis_id,
                     PreparedSession {
                         owner: session.owner,
@@ -1081,10 +1178,10 @@ impl PreparedSessions {
             return false;
         };
         let PreparedSessionState::Persisting(completion) = session.state else {
-            self.sessions.insert(analysis_id, session);
+            self.insert_session(analysis_id, session);
             return false;
         };
-        self.sessions.insert(
+        self.insert_session(
             analysis_id,
             PreparedSession {
                 owner: session.owner,
@@ -1103,7 +1200,7 @@ impl PreparedSessions {
         now: Instant,
     ) {
         self.sessions.remove(&analysis_id);
-        self.sessions.insert(
+        self.insert_session(
             analysis_id,
             PreparedSession {
                 owner,
@@ -1164,7 +1261,7 @@ impl PreparedSessions {
         {
             return;
         }
-        self.sessions.insert(
+        self.insert_session(
             analysis_id,
             PreparedSession {
                 owner,
@@ -1418,7 +1515,7 @@ fn prepare_source_with_hook(
         total_records,
         &report,
     )?;
-    let failure_counts = aggregate_failures(&report);
+    let failure_counts = aggregate_failures(&report, limits.source_control_bytes)?;
     Ok(PreparedSource {
         source_kind: store_source(detected.source),
         source_fingerprint,
@@ -1455,18 +1552,60 @@ fn prepared_snapshot_fingerprint(
     Ok(hasher.finish())
 }
 
-fn aggregate_failures(report: &ImportParseReport) -> Vec<ImportFailureCount> {
-    let mut counts = BTreeMap::<&'static str, u64>::new();
+fn aggregate_failures(
+    report: &ImportParseReport,
+    source_control_bytes: usize,
+) -> Result<Vec<ImportFailureCount>, ImportError> {
+    aggregate_failures_with_hook(report, source_control_bytes, |_, _| {})
+}
+
+fn aggregate_failures_with_hook(
+    report: &ImportParseReport,
+    source_control_bytes: usize,
+    before_allocation: impl FnOnce(usize, usize),
+) -> Result<Vec<ImportFailureCount>, ImportError> {
+    let mut counts = [("", 0_u64); MAX_IMPORT_FAILURE_KINDS];
+    let mut used = 0_usize;
     for failure in &report.failures {
-        *counts.entry(failure.reason).or_default() += 1;
+        if let Some((_, count)) = counts[..used]
+            .iter_mut()
+            .find(|(reason, _)| *reason == failure.reason)
+        {
+            *count = count
+                .checked_add(1)
+                .ok_or_else(|| ImportError::service("source_too_large"))?;
+            continue;
+        }
+        let slot = counts
+            .get_mut(used)
+            .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+        *slot = (failure.reason, 1);
+        used += 1;
     }
-    counts
-        .into_iter()
-        .map(|(reason_code, count)| ImportFailureCount {
-            reason_code: reason_code.to_owned(),
-            count,
+    counts[..used].sort_unstable_by_key(|(reason, _)| *reason);
+    let required = used
+        .checked_mul(size_of::<ImportFailureCount>())
+        .and_then(|bytes| {
+            counts[..used]
+                .iter()
+                .try_fold(bytes, |total, (reason, _)| total.checked_add(reason.len()))
         })
-        .collect()
+        .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+    let reserved = source_control_bytes.min(MAX_PREPARED_FAILURE_CONTROL_BYTES);
+    if required > reserved {
+        return Err(ImportError::service("analysis_too_large"));
+    }
+    before_allocation(required, reserved);
+    let mut failures = Vec::with_capacity(used);
+    failures.extend(
+        counts[..used]
+            .iter()
+            .map(|(reason_code, count)| ImportFailureCount {
+                reason_code: (*reason_code).to_owned(),
+                count: *count,
+            }),
+    );
+    Ok(failures)
 }
 
 fn store_source(source: ImportSource) -> ImportSourceKind {
@@ -1580,8 +1719,106 @@ mod tests {
         (retained_bytes, operation_bytes)
     }
 
+    async fn runtime_memory_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        TEST_LOCK.lock().await
+    }
+
+    #[tokio::test]
+    async fn runtime_memory_precharges_fixed_control_before_any_source() {
+        let _test_guard = runtime_memory_test_guard().await;
+        let limits = ImportAdmissionLimits::default();
+        let budget = AdmissionBudget::new(limits);
+        let ledger = budget.ledger.lock().unwrap();
+
+        assert_eq!(ledger.retained_bytes, MAX_PREPARED_RUNTIME_CONTROL_BYTES);
+        assert_eq!(ledger.source_count, 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_memory_parser_payload_carves_source_control_before_growth() {
+        let _test_guard = runtime_memory_test_guard().await;
+        let runtime = ImportRuntime::with_limits(ImportAdmissionLimits::default());
+        let parse_limits = runtime.parse_limits();
+
+        assert_eq!(
+            parse_limits
+                .source_bytes
+                .checked_add(parse_limits.source_control_bytes),
+            Some(MAX_PREPARED_SOURCE_BYTES)
+        );
+        assert_eq!(
+            parse_limits.source_control_bytes,
+            MAX_PREPARED_SOURCE_CONTROL_BYTES
+        );
+        assert!(
+            crate::detect::MAX_IMPORT_PATH_CONTROL_BYTES
+                + crate::supercmd::MAX_AUXILIARY_TRAVERSAL_CONTROL_BYTES
+                + MAX_PREPARED_FAILURE_CONTROL_BYTES
+                + crate::MAX_IMPORT_ANALYSIS_CONTROL_BYTES
+                + PREPARED_SESSION_OVERHEAD_BYTES
+                <= parse_limits.source_control_bytes
+        );
+        assert!(parse_limits.source_bytes < MAX_PREPARED_SOURCE_BYTES);
+    }
+
+    #[test]
+    fn failure_summary_capacity_is_authorized_before_growth() {
+        let mut report = ImportParseReport::with_source_limit(1, 4096);
+        report
+            .push(Err(crate::record_failure(
+                ImportSource::Raycast,
+                1,
+                "invalid_record",
+            )))
+            .unwrap();
+        let authorized = std::cell::Cell::new(false);
+
+        let failures = aggregate_failures_with_hook(
+            &report,
+            MAX_PREPARED_SOURCE_CONTROL_BYTES,
+            |required, reserved| {
+                assert!(required > 0);
+                assert!(required <= reserved);
+                authorized.set(true);
+            },
+        )
+        .unwrap();
+
+        assert!(authorized.get());
+        assert_eq!(failures.len(), 1);
+    }
+
+    #[test]
+    fn prepared_session_capacity_is_authorized_before_map_growth() {
+        let budget = AdmissionBudget::new(ImportAdmissionLimits::default());
+        let mut sessions =
+            PreparedSessions::with_control(ImportAdmissionLimits::default().runtime_control_bytes);
+        let owner = ServiceOwnerToken(Uuid::now_v7());
+        let analysis_id = Uuid::now_v7();
+        let source = admitted_source(&mut sessions, &budget, empty_source(1));
+        let authorized = std::cell::Cell::new(false);
+
+        sessions.insert_with_hook(
+            owner,
+            analysis_id,
+            source,
+            Instant::now(),
+            |required, reserved, already_present| {
+                assert!(!already_present);
+                assert!(required > 0);
+                assert!(required <= reserved);
+                authorized.set(true);
+            },
+        );
+
+        assert!(authorized.get());
+        assert!(sessions.sessions.contains_key(&analysis_id));
+    }
+
     #[tokio::test]
     async fn runtime_memory_services_share_eviction_but_not_session_authority() {
+        let _test_guard = runtime_memory_test_guard().await;
         let first_database = tempfile::tempdir().unwrap();
         let second_database = tempfile::tempdir().unwrap();
         let first_export = synthetic_export();
@@ -1589,9 +1826,11 @@ mod tests {
         let runtime = ImportRuntime::with_limits(ImportAdmissionLimits::new(
             1,
             64 * 1024,
-            64 * 1024,
             16 * 1024,
             80 * 1024,
+            16 * 1024,
+            MAX_IMPORT_OPERATION_BYTES,
+            MAX_IMPORT_OPERATION_BYTES + 80 * 1024,
         ));
         let first = ImportService::with_runtime(
             StoreHandle::open(StoreConfig::new(
@@ -1636,19 +1875,25 @@ mod tests {
         second
             .discard_analysis(second_analysis.analysis_id)
             .unwrap();
-        assert_eq!(assert_runtime_envelope(&runtime), (0, 0));
+        assert_eq!(
+            assert_runtime_envelope(&runtime),
+            (runtime.limits.runtime_control_bytes, 0)
+        );
     }
 
     #[tokio::test]
     async fn runtime_memory_completion_keeps_only_an_owner_scoped_tombstone() {
+        let _test_guard = runtime_memory_test_guard().await;
         let database = tempfile::tempdir().unwrap();
         let export = synthetic_export();
         let runtime = ImportRuntime::with_limits(ImportAdmissionLimits::new(
             2,
             64 * 1024,
+            16 * 1024,
             96 * 1024,
-            5 * 1024 * 1024,
-            5 * 1024 * 1024 + 96 * 1024,
+            16 * 1024,
+            MAX_IMPORT_OPERATION_BYTES,
+            MAX_IMPORT_OPERATION_BYTES + 96 * 1024,
         ));
         let store =
             StoreHandle::open(StoreConfig::new(database.path().join("history.sqlite"))).unwrap();
@@ -1668,12 +1913,15 @@ mod tests {
             ImportRunState::Completed
         );
         for _ in 0..50_000 {
-            if runtime.snapshot().0 == 0 {
+            if runtime.snapshot().0 == runtime.limits.runtime_control_bytes {
                 break;
             }
             tokio::task::yield_now().await;
         }
-        assert_eq!(assert_runtime_envelope(&runtime), (0, 0));
+        assert_eq!(
+            assert_runtime_envelope(&runtime),
+            (runtime.limits.runtime_control_bytes, 0)
+        );
         assert_eq!(owner.begin(analysis.analysis_id).await.unwrap(), handle);
         assert!(matches!(
             stranger.begin(analysis.analysis_id).await,
@@ -1698,14 +1946,17 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_memory_persistence_failure_restores_the_exact_reserved_snapshot() {
+        let _test_guard = runtime_memory_test_guard().await;
         let database = tempfile::tempdir().unwrap();
         let export = synthetic_export();
         let limits = ImportAdmissionLimits::new(
             2,
             64 * 1024,
+            16 * 1024,
             96 * 1024,
-            5 * 1024 * 1024,
-            5 * 1024 * 1024 + 96 * 1024,
+            16 * 1024,
+            MAX_IMPORT_OPERATION_BYTES,
+            MAX_IMPORT_OPERATION_BYTES + 96 * 1024,
         );
         let service = ImportService::with_worker_policy_and_limits(
             StoreHandle::open(StoreConfig::new(database.path().join("history.sqlite"))).unwrap(),
@@ -1738,24 +1989,30 @@ mod tests {
             ImportRunState::Completed
         );
         for _ in 0..50_000 {
-            if runtime.snapshot().0 == 0 {
+            if runtime.snapshot().0 == runtime.limits.runtime_control_bytes {
                 break;
             }
             tokio::task::yield_now().await;
         }
-        assert_eq!(assert_runtime_envelope(&runtime), (0, 0));
+        assert_eq!(
+            assert_runtime_envelope(&runtime),
+            (runtime.limits.runtime_control_bytes, 0)
+        );
     }
 
-    #[test]
-    fn runtime_memory_last_service_drop_releases_owned_available_sessions() {
+    #[tokio::test]
+    async fn runtime_memory_last_service_drop_releases_owned_available_sessions() {
+        let _test_guard = runtime_memory_test_guard().await;
         let database = tempfile::tempdir().unwrap();
         let export = synthetic_export();
         let runtime = ImportRuntime::with_limits(ImportAdmissionLimits::new(
             2,
             64 * 1024,
+            16 * 1024,
             96 * 1024,
             16 * 1024,
-            112 * 1024,
+            MAX_IMPORT_OPERATION_BYTES,
+            MAX_IMPORT_OPERATION_BYTES + 96 * 1024,
         ));
         let service = ImportService::with_runtime(
             StoreHandle::open(StoreConfig::new(database.path().join("history.sqlite"))).unwrap(),
@@ -1766,7 +2023,10 @@ mod tests {
 
         drop(service);
 
-        assert_eq!(assert_runtime_envelope(&runtime), (0, 0));
+        assert_eq!(
+            assert_runtime_envelope(&runtime),
+            (runtime.limits.runtime_control_bytes, 0)
+        );
     }
 
     #[test]
@@ -1787,6 +2047,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn begin_preserves_private_storage_through_persistence_handoff() {
+        let _test_guard = runtime_memory_test_guard().await;
         let (directory, store, data_dir) = leased_store();
         let service = ImportService::new(store);
         let export = synthetic_export();
@@ -1803,6 +2064,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn private_storage_errors_survive_import_lifecycle_boundaries() {
+        let _test_guard = runtime_memory_test_guard().await;
         let (directory, store, data_dir) = leased_store();
         let service = ImportService::new(store.clone());
         let export = synthetic_export();
@@ -1867,6 +2129,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn private_storage_from_failure_marking_overrides_generic_worker_reasons() {
+        let _test_guard = runtime_memory_test_guard().await;
         let (directory, store, data_dir) = leased_store();
         let batch_service = ImportService::with_worker_policy(
             store.clone(),
@@ -1957,7 +2220,9 @@ mod tests {
         let budget = AdmissionBudget::new(ImportAdmissionLimits::new(
             1,
             MAX_PREPARED_SOURCE_BYTES,
-            MAX_PREPARED_SOURCE_BYTES,
+            MAX_PREPARED_SOURCE_CONTROL_BYTES,
+            MAX_PREPARED_SOURCE_BYTES + MAX_PREPARED_RUNTIME_CONTROL_BYTES,
+            MAX_PREPARED_RUNTIME_CONTROL_BYTES,
             MAX_IMPORT_OPERATION_BYTES,
             MAX_IMPORT_RUNTIME_BYTES,
         ));
@@ -2045,7 +2310,9 @@ mod tests {
         let budget = AdmissionBudget::new(ImportAdmissionLimits::new(
             PREPARED_SESSION_CAPACITY,
             32 * 1024,
+            8 * 1024,
             PREPARED_SESSION_CAPACITY * 32 * 1024,
+            16 * 1024,
             4 * 1024,
             PREPARED_SESSION_CAPACITY * 32 * 1024 + 4 * 1024,
         ));
@@ -2079,9 +2346,11 @@ mod tests {
         let budget = AdmissionBudget::new(ImportAdmissionLimits::new(
             1,
             32 * 1024,
-            32 * 1024,
+            8 * 1024,
+            48 * 1024,
+            16 * 1024,
             4 * 1024,
-            36 * 1024,
+            52 * 1024,
         ));
         let now = Instant::now();
         let owner = ServiceOwnerToken(Uuid::now_v7());
@@ -2095,7 +2364,7 @@ mod tests {
         ));
         let ledger = budget.ledger.lock().unwrap();
         assert_eq!(ledger.source_count, 0);
-        assert_eq!(ledger.retained_bytes, 0);
+        assert_eq!(ledger.retained_bytes, budget.limits.runtime_control_bytes);
     }
 
     #[test]
@@ -2105,9 +2374,15 @@ mod tests {
         let budget = AdmissionBudget::new(ImportAdmissionLimits::new(
             8,
             retained_bytes,
-            retained_bytes.saturating_mul(2).saturating_sub(1),
+            1,
+            (16_usize * 1024)
+                .saturating_add(retained_bytes.saturating_mul(2))
+                .saturating_sub(1),
+            16 * 1024,
             retained_bytes,
-            retained_bytes.saturating_mul(3).saturating_sub(1),
+            (16_usize * 1024)
+                .saturating_add(retained_bytes.saturating_mul(3))
+                .saturating_sub(1),
         ));
         let mut sessions = PreparedSessions::default();
         let now = Instant::now();
@@ -2133,9 +2408,11 @@ mod tests {
         let budget = AdmissionBudget::new(ImportAdmissionLimits::new(
             8,
             retained_bytes - 1,
-            retained_bytes.saturating_mul(2),
+            1,
+            (16_usize * 1024).saturating_add(retained_bytes.saturating_mul(2)),
+            16 * 1024,
             retained_bytes,
-            retained_bytes.saturating_mul(3),
+            (16_usize * 1024).saturating_add(retained_bytes.saturating_mul(3)),
         ));
         let mut reservation = budget.try_reserve().unwrap().unwrap();
         let error = reservation.resize(source.retained_bytes()).unwrap_err();

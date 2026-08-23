@@ -40,6 +40,7 @@ pub const MAX_SEARCH_DOCUMENT_BYTES: usize = 512 * 1024;
 pub const MAX_PREVIEW_BYTES: usize = 512;
 const MAX_INLINE_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_INLINE_ZSTD_PAYLOAD_BYTES: usize = 256 * 1024;
+const IMPORT_ZSTD_COMPRESSION_LEVEL: i32 = 3;
 const MAX_IMPORT_ZSTD_OUTPUT_BYTES_PER_REPRESENTATION: usize = 263_168;
 const MAX_IMPORT_ZSTD_OUTPUT_BYTES: usize =
     MAX_IMPORT_REPRESENTATIONS * MAX_IMPORT_ZSTD_OUTPUT_BYTES_PER_REPRESENTATION;
@@ -857,6 +858,9 @@ impl StoreHandle {
         generation: u64,
         candidates: Vec<StoreImportCandidate>,
     ) -> Result<ImportBatchOutcome, StoreError> {
+        if !operation_permit.has_process_wide_origin() {
+            return Err(StoreError::InvalidImportInput);
+        }
         if validate_import_batch(&candidates, operation_permit.reserved_bytes()).is_err() {
             return Err(StoreError::ImportBatchTooLarge);
         }
@@ -1884,39 +1888,79 @@ fn stored_representations<'a>(
     if input.representations.is_empty() {
         return Err(StoreError::PayloadStorageUnavailable);
     }
-    input
-        .representations
-        .iter()
-        .map(|representation| {
-            if let Some(bytes) = representation.bytes.as_deref() {
-                if representation.missing_ref.is_some() {
-                    return Err(StoreError::PayloadStorageUnavailable);
-                }
-                return Ok(StoredRepresentation {
-                    format_id: representation.format_id.as_str(),
-                    raw_digest: *blake3::hash(bytes).as_bytes(),
-                    original_byte_size: bytes.len() as u64,
-                    payload: PreparedPayload::Stored(classify_payload(input.kind, bytes, cas)?),
-                });
-            }
-            let missing_ref = representation
-                .missing_ref
-                .as_deref()
-                .ok_or(StoreError::PayloadStorageUnavailable)?;
-            Ok(StoredRepresentation {
-                format_id: representation.format_id.as_str(),
-                raw_digest: [0; 32],
-                original_byte_size: 0,
-                payload: PreparedPayload::Missing(missing_ref),
+    let needs_compressor = !matches!(input.kind, ContentKind::Image | ContentKind::File)
+        && input.representations.iter().any(|representation| {
+            representation.bytes.as_ref().is_some_and(|bytes| {
+                (MAX_INLINE_PAYLOAD_BYTES..=MAX_INLINE_ZSTD_PAYLOAD_BYTES).contains(&bytes.len())
             })
-        })
-        .collect()
+        });
+    let mut compressor = needs_compressor.then(bounded_zstd_compressor).transpose()?;
+    let mut stored = Vec::with_capacity(input.representations.len());
+    for representation in &input.representations {
+        if let Some(bytes) = representation.bytes.as_deref() {
+            if representation.missing_ref.is_some() {
+                return Err(StoreError::PayloadStorageUnavailable);
+            }
+            stored.push(StoredRepresentation {
+                format_id: representation.format_id.as_str(),
+                raw_digest: *blake3::hash(bytes).as_bytes(),
+                original_byte_size: bytes.len() as u64,
+                payload: PreparedPayload::Stored(classify_payload_with_compressor(
+                    input.kind,
+                    bytes,
+                    cas,
+                    compressor.as_mut(),
+                )?),
+            });
+            continue;
+        }
+        let missing_ref = representation
+            .missing_ref
+            .as_deref()
+            .ok_or(StoreError::PayloadStorageUnavailable)?;
+        stored.push(StoredRepresentation {
+            format_id: representation.format_id.as_str(),
+            raw_digest: [0; 32],
+            original_byte_size: 0,
+            payload: PreparedPayload::Missing(missing_ref),
+        });
+    }
+    if compressor
+        .as_mut()
+        .is_some_and(|compressor| compressor.context_mut().sizeof() > MAX_IMPORT_ZSTD_CODEC_BYTES)
+    {
+        return Err(payload_compression_error(
+            "zstd context exceeded its approved bound",
+        ));
+    }
+    Ok(stored)
 }
 
 pub fn classify_payload(
     kind: ContentKind,
     bytes: &[u8],
     cas: &CasStore,
+) -> Result<StoredPayload, StoreError> {
+    if !matches!(kind, ContentKind::Image | ContentKind::File)
+        && (MAX_INLINE_PAYLOAD_BYTES..=MAX_INLINE_ZSTD_PAYLOAD_BYTES).contains(&bytes.len())
+    {
+        let mut compressor = bounded_zstd_compressor()?;
+        let payload = classify_payload_with_compressor(kind, bytes, cas, Some(&mut compressor))?;
+        if compressor.context_mut().sizeof() > MAX_IMPORT_ZSTD_CODEC_BYTES {
+            return Err(payload_compression_error(
+                "zstd context exceeded its approved bound",
+            ));
+        }
+        return Ok(payload);
+    }
+    classify_payload_with_compressor(kind, bytes, cas, None)
+}
+
+fn classify_payload_with_compressor(
+    kind: ContentKind,
+    bytes: &[u8],
+    cas: &CasStore,
+    compressor: Option<&mut zstd::bulk::Compressor<'static>>,
 ) -> Result<StoredPayload, StoreError> {
     if matches!(kind, ContentKind::Image | ContentKind::File)
         || bytes.len() > MAX_INLINE_ZSTD_PAYLOAD_BYTES
@@ -1929,10 +1973,42 @@ pub fn classify_payload(
         });
     }
     if bytes.len() >= MAX_INLINE_PAYLOAD_BYTES {
-        let compressed = zstd::bulk::compress(bytes, 3).map_err(StoreError::PayloadCompression)?;
+        let compressor = compressor.ok_or_else(|| {
+            payload_compression_error("zstd context was not admitted before compression")
+        })?;
+        let compressed = compressor
+            .compress(bytes)
+            .map_err(StoreError::PayloadCompression)?;
         return Ok(StoredPayload::InlineZstd(compressed));
     }
     Ok(StoredPayload::Inline(bytes.to_vec()))
+}
+
+fn bounded_zstd_compressor() -> Result<zstd::bulk::Compressor<'static>, StoreError> {
+    bounded_zstd_compressor_with(
+        || {
+            clipboard_zstd_bound::compression_context_size(IMPORT_ZSTD_COMPRESSION_LEVEL)
+                .map_err(|_| io::Error::other("zstd context estimate unavailable"))
+        },
+        || zstd::bulk::Compressor::new(IMPORT_ZSTD_COMPRESSION_LEVEL),
+    )
+}
+
+fn bounded_zstd_compressor_with(
+    estimate: impl FnOnce() -> io::Result<usize>,
+    create: impl FnOnce() -> io::Result<zstd::bulk::Compressor<'static>>,
+) -> Result<zstd::bulk::Compressor<'static>, StoreError> {
+    let required = estimate().map_err(StoreError::PayloadCompression)?;
+    if required > MAX_IMPORT_ZSTD_CODEC_BYTES {
+        return Err(payload_compression_error(
+            "zstd context estimate exceeds the approved bound",
+        ));
+    }
+    create().map_err(StoreError::PayloadCompression)
+}
+
+fn payload_compression_error(message: &'static str) -> StoreError {
+    StoreError::PayloadCompression(io::Error::other(message))
 }
 
 fn normalized_text(
@@ -1957,10 +2033,13 @@ fn normalized_text(
             primary,
             MAX_SEARCH_DERIVATION_BYTES,
         )),
-        (None, Some(ocr)) => Some(normalize_search_text_bounded(
-            ocr,
-            MAX_SEARCH_DERIVATION_BYTES,
-        )),
+        (None, Some(ocr)) => {
+            let boundary = utf8_boundary_at_or_before(ocr, MAX_SEARCH_DERIVATION_BYTES);
+            Some(normalize_search_text_bounded(
+                &ocr[..boundary],
+                MAX_SEARCH_DERIVATION_BYTES,
+            ))
+        }
         (None, None) => None,
     }
 }
@@ -2232,18 +2311,46 @@ mod tests {
     #[cfg(unix)]
     use std::{fs, os::unix::fs::PermissionsExt};
 
-    #[cfg(unix)]
     use clipboard_core::{
         CaptureInput, ContentFlags, ContentKind, EventFlags, RepresentationInput, SourceConfidence,
     };
     #[cfg(unix)]
     use rusqlite::Connection;
 
+    use super::normalized_text;
     #[cfg(unix)]
     use super::{
         BeginImportRun, CasError, CasStore, ImportSourceKind, StoreError, StoreImportCandidate,
         WriteCommand, begin_import, import_batch, read_import_status,
     };
+
+    #[test]
+    fn ocr_only_search_uses_the_raw_utf8_prefix_before_normalization() {
+        let raw_prefix = "\u{301}".repeat(super::MAX_SEARCH_DERIVATION_BYTES / 2);
+        assert_eq!(raw_prefix.len(), super::MAX_SEARCH_DERIVATION_BYTES);
+        let ocr = format!("{raw_prefix}must-not-escape-the-raw-prefix");
+        let capture = CaptureInput {
+            captured_at_ms: 1_000,
+            kind: ContentKind::Image,
+            primary_mime: "image/png".to_owned(),
+            representations: vec![RepresentationInput {
+                format_id: "image/png".to_owned(),
+                bytes: Some(b"synthetic image".to_vec()),
+                missing_ref: None,
+            }],
+            source_app_id: None,
+            source_app_name: None,
+            source_confidence: SourceConfidence::Unknown,
+            pinned: false,
+            occurrence_count: 1,
+            content_flags: ContentFlags::empty(),
+            event_flags: EventFlags::IMPORTED,
+        };
+
+        let normalized = normalized_text(&capture, None, Some(&ocr));
+
+        assert_eq!(normalized.as_deref(), Some(""));
+    }
 
     #[test]
     fn queued_import_batch_owns_the_operation_permit_until_the_command_drops() {
@@ -2316,6 +2423,11 @@ mod tests {
 
     #[test]
     fn import_writer_scratch_proof_uses_the_upstream_zstd_bound() {
+        let context_bytes =
+            clipboard_zstd_bound::compression_context_size(super::IMPORT_ZSTD_COMPRESSION_LEVEL)
+                .unwrap();
+        assert_eq!(context_bytes, 1_303_568);
+        assert!(context_bytes <= super::MAX_IMPORT_ZSTD_CODEC_BYTES);
         assert_eq!(
             zstd::zstd_safe::compress_bound(super::MAX_INLINE_ZSTD_PAYLOAD_BYTES),
             super::MAX_IMPORT_ZSTD_OUTPUT_BYTES_PER_REPRESENTATION,
@@ -2326,6 +2438,36 @@ mod tests {
                 * super::MAX_IMPORT_ZSTD_OUTPUT_BYTES_PER_REPRESENTATION,
         );
         // The peak inequalities are compile-time assertions beside the constants.
+    }
+
+    #[test]
+    fn bounded_zstd_compressor_rejects_over_budget_before_context_creation() {
+        let context_created = std::cell::Cell::new(false);
+
+        let error = match super::bounded_zstd_compressor_with(
+            || Ok(super::MAX_IMPORT_ZSTD_CODEC_BYTES + 1),
+            || {
+                context_created.set(true);
+                zstd::bulk::Compressor::new(3)
+            },
+        ) {
+            Ok(_) => panic!("over-budget context estimate must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, StoreError::PayloadCompression(_)));
+        assert!(!context_created.get());
+    }
+
+    #[test]
+    fn bounded_zstd_compressor_uses_a_compatible_level_three_frame() {
+        let mut compressor = super::bounded_zstd_compressor().unwrap();
+        let input = b"synthetic pinned zstd frame".repeat(128);
+
+        let frame = compressor.compress(&input).unwrap();
+
+        assert!(compressor.context_mut().sizeof() <= super::MAX_IMPORT_ZSTD_CODEC_BYTES);
+        assert_eq!(zstd::bulk::decompress(&frame, input.len()).unwrap(), input);
     }
 
     #[cfg(unix)]

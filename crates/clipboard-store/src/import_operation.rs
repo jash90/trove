@@ -30,12 +30,7 @@ struct ImportOperationGateInner {
 
 impl ImportOperationGate {
     pub fn process_wide() -> Self {
-        static GATE: OnceLock<ImportOperationGate> = OnceLock::new();
-        GATE.get_or_init(|| {
-            Self::with_capacity(MAX_IMPORT_OPERATION_BYTES)
-                .expect("the fixed import operation capacity is valid")
-        })
-        .clone()
+        process_wide_gate().clone()
     }
 
     #[doc(hidden)]
@@ -93,6 +88,18 @@ impl ImportOperationPermit {
     pub fn reserved_bytes(&self) -> usize {
         self.inner.capacity
     }
+
+    pub(crate) fn has_process_wide_origin(&self) -> bool {
+        Arc::ptr_eq(&self.inner, &process_wide_gate().inner)
+    }
+}
+
+fn process_wide_gate() -> &'static ImportOperationGate {
+    static GATE: OnceLock<ImportOperationGate> = OnceLock::new();
+    GATE.get_or_init(|| {
+        ImportOperationGate::with_capacity(MAX_IMPORT_OPERATION_BYTES)
+            .expect("the fixed import operation capacity is valid")
+    })
 }
 
 impl Drop for ImportOperationPermit {

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 clipboard-core = { path = "../clipboard-core" }
+clipboard-zstd-bound = { path = "../clipboard-zstd-bound" }
 blake3.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true

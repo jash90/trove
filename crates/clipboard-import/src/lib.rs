@@ -15,7 +15,7 @@ mod relocated_parser_tests {
 }
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     fmt, fs,
     io::{BufReader, Read},
     mem::size_of,
@@ -27,6 +27,7 @@ use clipboard_store::ImportOperationPermit;
 use thiserror::Error;
 
 const JSON_READER_BUFFER_BYTES: usize = 8 * 1024;
+const MAX_JSON_DELIMITER_DEPTH: usize = 128;
 pub(crate) const CSV_INPUT_BUFFER_BYTES: usize = 8 * 1024;
 pub(crate) const CSV_DRAIN_BUFFER_BYTES: usize = 8 * 1024;
 
@@ -36,6 +37,7 @@ pub(crate) struct ImportParseLimits {
     pub(crate) record_bytes: usize,
     pub(crate) header_bytes: usize,
     pub(crate) source_bytes: usize,
+    pub(crate) source_control_bytes: usize,
     pub(crate) auxiliary_bytes: usize,
 }
 
@@ -76,7 +78,8 @@ impl Default for ImportParseLimits {
             manifest_bytes: MAX_IMPORT_MANIFEST_BYTES,
             record_bytes: MAX_IMPORT_RECORD_BYTES,
             header_bytes: MAX_IMPORT_HEADER_BYTES,
-            source_bytes: MAX_PREPARED_SOURCE_BYTES,
+            source_bytes: MAX_PREPARED_SOURCE_BYTES - MAX_PREPARED_SOURCE_CONTROL_BYTES,
+            source_control_bytes: MAX_PREPARED_SOURCE_CONTROL_BYTES,
             auxiliary_bytes: MAX_IMPORT_AUXILIARY_BYTES,
         }
     }
@@ -88,8 +91,8 @@ pub use service::{
     ImportService, ImportSummary, ImportWorkerPolicy, MAX_IMPORT_AUXILIARY_BYTES,
     MAX_IMPORT_BATCH_BYTES, MAX_IMPORT_HEADER_BYTES, MAX_IMPORT_MANIFEST_BYTES,
     MAX_IMPORT_OPERATION_BYTES, MAX_IMPORT_RECORD_BYTES, MAX_IMPORT_RUNTIME_BYTES,
-    MAX_PREPARED_CACHE_BYTES, MAX_PREPARED_SOURCE_BYTES, PREPARED_SESSION_CAPACITY,
-    PREPARED_SESSION_TTL,
+    MAX_PREPARED_CACHE_BYTES, MAX_PREPARED_SOURCE_BYTES, MAX_PREPARED_SOURCE_CONTROL_BYTES,
+    PREPARED_SESSION_CAPACITY, PREPARED_SESSION_TTL,
 };
 pub use supercmd::{MAX_AUXILIARY_TRAVERSAL_DEPTH, MAX_AUXILIARY_TRAVERSAL_ENTRIES};
 
@@ -359,6 +362,18 @@ pub struct ImportKindCount {
     pub missing_payload_count: u64,
 }
 
+pub(crate) const MAX_IMPORT_ANALYSIS_CONTROL_BYTES: usize = 7 * size_of::<ImportKindCount>();
+
+const IMPORT_KIND_ORDER: [ContentKind; 7] = [
+    ContentKind::Code,
+    ContentKind::Color,
+    ContentKind::File,
+    ContentKind::Html,
+    ContentKind::Image,
+    ContentKind::Link,
+    ContentKind::Text,
+];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportExportAnalysis {
     pub source: ImportSource,
@@ -391,24 +406,9 @@ pub fn analyze_export(path: impl AsRef<Path>) -> Result<ImportExportAnalysis, Im
         .map_err(|_| ImportError::service("source_too_large"))?;
     let failed = u64::try_from(report.failures.len())
         .map_err(|_| ImportError::service("source_too_large"))?;
-    let mut counts = BTreeMap::<&'static str, (ContentKind, u64, u64)>::new();
     let mut available_image_records = 0_u64;
     let mut missing_image_records = 0_u64;
     for candidate in &report.candidates {
-        let count =
-            counts
-                .entry(candidate.capture.kind.as_str())
-                .or_insert((candidate.capture.kind, 0, 0));
-        count.1 = count
-            .1
-            .checked_add(1)
-            .ok_or_else(|| ImportError::service("source_too_large"))?;
-        if candidate.missing_payload {
-            count.2 = count
-                .2
-                .checked_add(1)
-                .ok_or_else(|| ImportError::service("source_too_large"))?;
-        }
         if candidate.capture.kind == ContentKind::Image {
             if candidate.missing_payload {
                 missing_image_records = missing_image_records
@@ -421,16 +421,8 @@ pub fn analyze_export(path: impl AsRef<Path>) -> Result<ImportExportAnalysis, Im
             }
         }
     }
-    let counts_by_kind = counts
-        .into_iter()
-        .map(
-            |(_, (kind, event_count, missing_payload_count))| ImportKindCount {
-                kind,
-                event_count,
-                missing_payload_count,
-            },
-        )
-        .collect();
+    let counts_by_kind =
+        aggregate_kind_counts_with_hook(&report, limits.source_control_bytes, |_, _| {})?;
 
     Ok(ImportExportAnalysis {
         source: detected.source,
@@ -441,6 +433,46 @@ pub fn analyze_export(path: impl AsRef<Path>) -> Result<ImportExportAnalysis, Im
         available_image_records,
         missing_image_records,
     })
+}
+
+fn aggregate_kind_counts_with_hook(
+    report: &ImportParseReport,
+    source_control_bytes: usize,
+    before_allocation: impl FnOnce(usize, usize),
+) -> Result<Vec<ImportKindCount>, ImportError> {
+    let mut counts = [(0_u64, 0_u64); IMPORT_KIND_ORDER.len()];
+    for candidate in &report.candidates {
+        let index = IMPORT_KIND_ORDER
+            .iter()
+            .position(|kind| *kind == candidate.capture.kind)
+            .ok_or_else(|| ImportError::service("source_too_large"))?;
+        counts[index].0 = counts[index]
+            .0
+            .checked_add(1)
+            .ok_or_else(|| ImportError::service("source_too_large"))?;
+        if candidate.missing_payload {
+            counts[index].1 = counts[index]
+                .1
+                .checked_add(1)
+                .ok_or_else(|| ImportError::service("source_too_large"))?;
+        }
+    }
+    let reserved = source_control_bytes.min(MAX_IMPORT_ANALYSIS_CONTROL_BYTES);
+    if reserved < MAX_IMPORT_ANALYSIS_CONTROL_BYTES {
+        return Err(ImportError::service("analysis_too_large"));
+    }
+    before_allocation(MAX_IMPORT_ANALYSIS_CONTROL_BYTES, reserved);
+    let mut result = Vec::with_capacity(IMPORT_KIND_ORDER.len());
+    result.extend(IMPORT_KIND_ORDER.into_iter().zip(counts).filter_map(
+        |(kind, (event_count, missing_payload_count))| {
+            (event_count > 0).then_some(ImportKindCount {
+                kind,
+                event_count,
+                missing_payload_count,
+            })
+        },
+    ));
+    Ok(result)
 }
 
 pub(crate) fn parse_detected_export_report_with_permit(
@@ -468,8 +500,7 @@ pub(crate) fn parse_detected_export_report_with_permit(
             let root = detected
                 .export_path
                 .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf();
+                .unwrap_or_else(|| Path::new("."));
             supercmd::parse_supercmd_report_with_permit(root, &detected.export_path, permit, limits)
         }
     }
@@ -553,6 +584,8 @@ pub(crate) fn stream_json_records_from_reader_with_limits<R: Read>(
         let mut bytes = Vec::with_capacity(record_limit);
         bytes.push(first);
         let mut too_large = false;
+        let mut expected_delimiters = [0_u8; MAX_JSON_DELIMITER_DEPTH];
+        expected_delimiters[0] = b'}';
         let mut depth = 1_usize;
         let mut in_string = false;
         let mut escaped = false;
@@ -579,12 +612,19 @@ pub(crate) fn stream_json_records_from_reader_with_limits<R: Read>(
             }
             match byte {
                 b'"' => in_string = true,
-                b'{' | b'[' => {
-                    depth = depth
-                        .checked_add(1)
-                        .ok_or_else(|| ImportError::service("record_too_large"))?;
+                opening @ (b'{' | b'[') => {
+                    if depth == expected_delimiters.len() {
+                        return Err(ImportError::export(source_kind, "invalid_document"));
+                    }
+                    expected_delimiters[depth] = if opening == b'{' { b'}' } else { b']' };
+                    depth += 1;
                 }
-                b'}' | b']' => depth -= 1,
+                closing @ (b'}' | b']') => {
+                    if expected_delimiters[depth - 1] != closing {
+                        return Err(ImportError::export(source_kind, "invalid_document"));
+                    }
+                    depth -= 1;
+                }
                 _ => {}
             }
         }
@@ -745,8 +785,25 @@ mod tests {
     };
 
     use super::{
-        ImportCandidate, ImportSource, JsonRecord, stream_json_records_from_reader_with_limits,
+        ImportCandidate, ImportParseReport, ImportSource, JsonRecord,
+        aggregate_kind_counts_with_hook, stream_json_records_from_reader_with_limits,
     };
+
+    #[test]
+    fn analysis_kind_capacity_is_authorized_before_growth() {
+        let report = ImportParseReport::with_source_limit(0, 4096);
+        let authorized = Cell::new(false);
+
+        let counts = aggregate_kind_counts_with_hook(&report, 4096, |required, reserved| {
+            assert!(required > 0);
+            assert!(required <= reserved);
+            authorized.set(true);
+        })
+        .unwrap();
+
+        assert!(authorized.get());
+        assert!(counts.is_empty());
+    }
 
     #[test]
     fn bounded_import_candidate_owns_primary_text_only_in_its_representation() {
@@ -818,6 +875,27 @@ mod tests {
         assert_eq!(observed[0], (1, Some(exact.to_vec())));
         assert_eq!(observed[1], (2, None));
         assert_eq!(observed[2], (3, Some(later.to_vec())));
+    }
+
+    #[test]
+    fn bounded_json_framing_rejects_mismatched_delimiters_before_callback() {
+        let document = br#"[{"nested":[1}}]"#;
+        let mut callback_count = 0;
+
+        let error = stream_json_records_from_reader_with_limits(
+            Cursor::new(document),
+            "synthetic",
+            document.len(),
+            document.len(),
+            |_, _| {
+                callback_count += 1;
+                Ok(true)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(callback_count, 0);
+        assert_eq!(error.to_string(), "synthetic export: invalid_document");
     }
 
     struct GrowingReader {

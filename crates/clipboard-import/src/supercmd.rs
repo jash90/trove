@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    collections::BTreeSet,
     fmt,
     io::Read,
     path::{Component, Path},
@@ -31,6 +30,8 @@ use crate::{
 pub const MAX_AUXILIARY_TRAVERSAL_DEPTH: usize = 64;
 /// Entry allowance is comfortably above normal exports while bounding directory I/O per record.
 pub const MAX_AUXILIARY_TRAVERSAL_ENTRIES: usize = 32_768;
+pub(crate) const MAX_AUXILIARY_TRAVERSAL_CONTROL_BYTES: usize =
+    (MAX_AUXILIARY_TRAVERSAL_ENTRIES + 2) * std::mem::size_of::<(Dir, usize)>();
 
 #[derive(Clone, Copy)]
 struct TraversalLimits {
@@ -722,20 +723,28 @@ fn content_kind(
     if has_image {
         return Ok(ContentKind::Image);
     }
-    match value.to_ascii_lowercase().as_str() {
-        "text" => Ok(ContentKind::Text),
-        "link" | "url" => Ok(ContentKind::Link),
-        "image" => Ok(ContentKind::Image),
-        "file" => Ok(ContentKind::File),
-        "color" => Ok(ContentKind::Color),
-        "code" => Ok(ContentKind::Code),
-        "html" => Ok(ContentKind::Html),
-        _ => Err(record_failure(
+    let kind = if value.eq_ignore_ascii_case("text") {
+        ContentKind::Text
+    } else if value.eq_ignore_ascii_case("link") || value.eq_ignore_ascii_case("url") {
+        ContentKind::Link
+    } else if value.eq_ignore_ascii_case("image") {
+        ContentKind::Image
+    } else if value.eq_ignore_ascii_case("file") {
+        ContentKind::File
+    } else if value.eq_ignore_ascii_case("color") {
+        ContentKind::Color
+    } else if value.eq_ignore_ascii_case("code") {
+        ContentKind::Code
+    } else if value.eq_ignore_ascii_case("html") {
+        ContentKind::Html
+    } else {
+        return Err(record_failure(
             ImportSource::SuperCmd,
             index,
             "invalid_type",
-        )),
-    }
+        ));
+    };
+    Ok(kind)
 }
 
 fn primary_mime(kind: ContentKind) -> &'static str {
@@ -776,11 +785,8 @@ fn resolve_payload_with_hook(
     if file_url.is_some_and(|value| !is_safe_relative_reference(value)) {
         return None;
     }
-    let names = [file_url.and_then(basename), image_hash]
-        .into_iter()
-        .flatten()
-        .collect::<BTreeSet<_>>();
-    if names.is_empty() {
+    let names = [file_url.and_then(basename), image_hash];
+    if names.iter().all(Option::is_none) {
         return None;
     }
     let AuxiliaryLookup::Unique(entry) = find_auxiliary(root, &names, traversal_limits) else {
@@ -825,12 +831,22 @@ enum AuxiliaryLookup {
     BudgetExceeded,
 }
 
-fn find_auxiliary(root: &Dir, names: &BTreeSet<&str>, limits: TraversalLimits) -> AuxiliaryLookup {
-    let mut directories = ["images", "images-external"]
-        .into_iter()
-        .filter_map(|directory| root.open_dir_nofollow(directory).ok())
-        .map(|directory| (directory, 0_usize))
-        .collect::<Vec<_>>();
+fn find_auxiliary(
+    root: &Dir,
+    names: &[Option<&str>; 2],
+    limits: TraversalLimits,
+) -> AuxiliaryLookup {
+    let directory_capacity = limits
+        .max_entries
+        .min(MAX_AUXILIARY_TRAVERSAL_ENTRIES)
+        .saturating_add(2);
+    let mut directories = Vec::with_capacity(directory_capacity);
+    directories.extend(
+        ["images", "images-external"]
+            .into_iter()
+            .filter_map(|directory| root.open_dir_nofollow(directory).ok())
+            .map(|directory| (directory, 0_usize)),
+    );
     let mut examined_entries = 0_usize;
     let mut matched = None;
     while let Some((directory, depth)) = directories.pop() {
@@ -855,6 +871,9 @@ fn find_auxiliary(root: &Dir, names: &BTreeSet<&str>, limits: TraversalLimits) -
                     return AuxiliaryLookup::BudgetExceeded;
                 }
                 if let Ok(child) = directory.open_dir_nofollow(path) {
+                    if directories.len() == directory_capacity {
+                        return AuxiliaryLookup::BudgetExceeded;
+                    }
                     directories.push((child, depth + 1));
                 }
                 continue;
@@ -864,8 +883,8 @@ fn find_auxiliary(root: &Dir, names: &BTreeSet<&str>, limits: TraversalLimits) -
             }
             let filename = path.file_name().and_then(|name| name.to_str());
             let stem = path.file_stem().and_then(|name| name.to_str());
-            if !filename.is_some_and(|name| names.contains(name))
-                && !stem.is_some_and(|name| names.contains(name))
+            if !filename.is_some_and(|name| names.iter().flatten().any(|target| name == *target))
+                && !stem.is_some_and(|name| names.iter().flatten().any(|target| name == *target))
             {
                 continue;
             }
@@ -928,6 +947,19 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn supercmd_content_kind_classification_is_allocation_free() {
+        let mut kind = None;
+
+        let allocations = allocation_counter::measure(|| {
+            kind = Some(content_kind("TeXt", false, 1).unwrap());
+        });
+
+        assert_eq!(kind, Some(ContentKind::Text));
+        assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        assert_eq!(allocations.bytes_total, 0, "{allocations:?}");
+    }
+
     fn csv_escape(value: &str) -> String {
         format!("\"{}\"", value.replace('"', "\"\""))
     }
@@ -978,6 +1010,7 @@ mod tests {
             record_bytes: record_limit,
             header_bytes: 1024,
             source_bytes: 64 * 1024,
+            source_control_bytes: 4 * 1024,
             auxiliary_bytes: 1024,
         };
         let gate = clipboard_store::ImportOperationGate::with_capacity(64 * 1024).unwrap();
@@ -1049,7 +1082,7 @@ mod tests {
         fs::write(export.path().join("images/shared.png"), b"first").unwrap();
         fs::write(export.path().join("images/shared.jpg"), b"second").unwrap();
         let root = open_export_root(export.path()).unwrap();
-        let names = BTreeSet::from(["shared"]);
+        let names = [Some("shared"), None];
 
         let result = find_auxiliary(
             &root,
