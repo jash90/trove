@@ -1,12 +1,19 @@
 # Project Environment
 
-- Inspected: 2026-08-22 (Europe/Warsaw)
-- Current state: standalone Polish HTML architecture report plus Raycast and SuperCmd clipboard-history exports; no application implementation exists yet.
-- Project type: static web document / future desktop application specification.
-- React Native / Expo / native iOS / native Android: no.
-- Recommended target described by the report: Tauri 2 shell, Rust core, React + TypeScript UI, SQLite WAL + FTS5, content-addressed blob storage.
-- Existing runnable artifact: `raport-koncowy-clipboard-manager.html` (open directly or serve with `python3 -m http.server 8000`).
-- Existing utility: `clipboard history/raycast-rayconfig-export-20260822-152334/decrypt-rayconfig.py` (Python 3; depends on `cryptography`).
-- Toolchain available at inspection: Python 3.11.8, Node 22.19.0, npm 10.9.3, pnpm 10.33.0, Bun 1.3.11.
-- Missing: `package.json`, lockfile, `Cargo.toml`, Tauri config, bundler config, tests, CI, README, and Git repository.
-- Data caution: clipboard exports contain potentially sensitive personal data and must not be logged, published, or committed.
+- Inspected: 2026-08-23 (Europe/Warsaw).
+- Current state: Tauri 2 desktop application under construction. Rust 1.96 Cargo workspace implements the clipboard domain model, SQLite WAL/FTS5 store, serialized writer, content-addressed blob storage, thumbnails, Raycast/SuperCmd parsers, a resumable import service with a hard 256 MiB memory envelope, search/ranking, a read-only verification CLI, a typed Tauri command boundary, and a React/Vite palette with a virtualized history list.
+- Rust workspace members: `clipboard-core`, `clipboard-store`, `clipboard-search`, `clipboard-images`, `clipboard-import`, `clipboard-zstd-bound`, `clipboard-history-app` (`src-tauri`), and `clipboard-import-cli` (`tools/`).
+- Frontend: `apps/desktop-ui` — React 19 + TypeScript 7 + Vite 8 + Vitest 4, `@tanstack/react-virtual`, local `@fontsource-variable` fonts (no CDN), `axe-core`. Talks to Rust through one gateway (`src/lib/gateway.ts`) mapping 13 `invoke` commands; `mockGateway.ts` renders the UI in a plain browser without Tauri.
+- Schema: `PRAGMA user_version = 2` (migration number) plus `schema_identity(identity, revision)` with `revision = 6`. Migrations in `crates/clipboard-store/src/migrations/`. Constraints are enforced in SQL `CHECK`s, not only in Rust.
+- Current host/target: macOS on `aarch64-apple-darwin`. Windows and Linux adapters are planned but not yet implemented; there is no checked-in CI.
+- Native monitoring status: clipboard capture, global shortcut, tray, autostart, retention, blob reclamation, and paste adapters are NOT implemented. CAS garbage collection is observe-only — it reports orphan candidates and deletes nothing.
+- Plan status: Plan 1 (foundation/import) complete; pre-UI hardening complete; Plan 2 (desktop UI) at Task 4 of 7 with its review open; Plan 3 (system integration) not started. Plans live in `docs/superpowers/plans/`, spec in `docs/superpowers/specs/`, per-task ledgers in `.superpowers/sdd/`.
+- Work happens on branch `feature/clipboard-manager` in the worktree `.worktrees/clipboard-manager-implementation`. `main` holds only documents until the branch is merged; treat this worktree as the source of truth.
+- Build: `cargo build --workspace --locked`; `pnpm install` then `pnpm build` for the frontend.
+- Quality gates: `cargo fmt --all --check`, `cargo check --workspace --all-targets --locked`, `cargo test --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `pnpm test -- --run`, `pnpm typecheck`, `pnpm build`.
+- Focused tests: `cargo test -p clipboard-import --test parsers --locked`, `cargo test -p clipboard-import --test service --locked`, `cargo test -p clipboard-search --test search --locked`, `cargo test -p clipboard-store --tests --locked`, `cargo test -p clipboard-import-cli --test cli --locked`, `cargo test -p clipboard-history-app --test commands`.
+- CLI: `cargo run --locked -p clipboard-import-cli -- --help`; import mutates only an explicitly supplied safe data directory, verify opens an existing database read-only.
+- Development database: `CLIPBOARD_HISTORY_DATA_DIR="data/dev" pnpm tauri dev`. `data/` is ignored and holds real private history; previous generations are preserved by directory rename, never deleted.
+- Import facts worth not rediscovering: the supplied exports hold 6503 source records (5509 Raycast + 994 SuperCmd) that deduplicate to 5382 `content` rows. The SuperCmd export contains no field linking an image record to an image file, so all 15 image entries stay without payload by design. Raycast image paths point into a cache it has already evicted (399 of 400 gone). Payloads outside the selected export root are never read.
+- Argent: installed, but no simulator/mobile workflow applies here. The Chromium/Tauri surface becomes relevant once the desktop shell runs.
+- Data caution: clipboard exports and ignored application data contain sensitive personal data. Never log, publish, commit, or copy their contents; tests use synthetic fixtures only.
