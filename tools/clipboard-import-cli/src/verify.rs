@@ -302,7 +302,7 @@ fn read_verification_snapshot_inner(
     if !epoch_is_current(connection, epoch)? {
         return Ok(VerificationSnapshot::invalidated());
     }
-    let fts_ok = fts_is_coherent(connection, claims.indexed_document_count);
+    let fts_ok = fts_is_coherent(connection, claims.indexed_document_count, observe);
     if !epoch_is_current(connection, epoch)? {
         return Ok(VerificationSnapshot::invalidated());
     }
@@ -368,6 +368,7 @@ enum VerificationPhase {
     Cas,
     DecodeHash,
     Fts,
+    FtsBackup,
     Integrity,
     PayloadFetch,
 }
@@ -1423,7 +1424,11 @@ struct FtsScratchContext<'a> {
     selected_data_dir: PathBuf,
 }
 
-fn fts_is_coherent(connection: &Connection, _document_count: i64) -> bool {
+fn fts_is_coherent(
+    connection: &Connection,
+    _document_count: i64,
+    observe: &mut impl FnMut(VerificationPhase, &Connection),
+) -> bool {
     fts_is_coherent_with_policy(
         connection,
         FtsScratchPolicy::production(),
@@ -1431,7 +1436,7 @@ fn fts_is_coherent(connection: &Connection, _document_count: i64) -> bool {
             ScratchEvent::ScratchCreated(path) => {
                 let _ = path;
             }
-            ScratchEvent::BackupStarted => {}
+            ScratchEvent::BackupStarted => observe(VerificationPhase::FtsBackup, connection),
         },
     )
 }
@@ -1991,6 +1996,7 @@ mod tests {
                                 | VerificationPhase::DecodeHash
                                 | VerificationPhase::Integrity
                                 | VerificationPhase::Fts
+                                | VerificationPhase::FtsBackup
                                 | VerificationPhase::PayloadFetch
                         ) {
                             assert!(connection.is_autocommit());
@@ -2006,6 +2012,7 @@ mod tests {
             VerificationPhase::DecodeHash,
             VerificationPhase::Integrity,
             VerificationPhase::Fts,
+            VerificationPhase::FtsBackup,
             VerificationPhase::PayloadFetch,
         ] {
             assert!(observed.borrow().contains(&phase), "missing {phase:?}");
@@ -2120,7 +2127,10 @@ mod tests {
 
     #[tokio::test]
     async fn transaction_boundary_epoch_hooks_discard_every_aggregate_claim() {
-        for target_phase in [VerificationPhase::AfterMetadataPage, VerificationPhase::Fts] {
+        for target_phase in [
+            VerificationPhase::AfterMetadataPage,
+            VerificationPhase::FtsBackup,
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let config = StoreConfig::new(directory.path().join("history.sqlite"))
                 .with_blob_root(directory.path().join("history.blobs"));
