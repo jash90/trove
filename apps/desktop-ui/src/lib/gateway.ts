@@ -38,6 +38,7 @@ export interface ClipboardGateway {
   discardImportAnalysis(analysisId: string): Promise<void>;
   getImportStatus(runId: string): Promise<ImportProgress>;
   revealSource(eventId: number): Promise<void>;
+  openSettingsWindow(): Promise<void>;
   /**
    * Calls back whenever the core records something new. Returns a function
    * that stops listening; without it the palette would show a history that is
@@ -48,7 +49,6 @@ export interface ClipboardGateway {
    */
   onHistoryChanged?(listener: () => void): () => void;
   /** The menu bar asking this window to open its settings. */
-  onOpenSettingsRequested?(listener: () => void): () => void;
   getThumbnail(eventId: number): Promise<Thumbnail | null>;
   getSettings(): Promise<AppSettings>;
   isAutostartEnabled(): Promise<boolean>;
@@ -111,7 +111,7 @@ export const tauriGateway: ClipboardGateway = {
       validateImportProgress(progress, runId),
     ),
   revealSource: (eventId) => invoke<void>('reveal_source', { eventId }),
-  onOpenSettingsRequested: (listener) => subscribe('open-settings', listener),
+  openSettingsWindow: () => invoke<void>('open_settings_window'),
   onHistoryChanged: (listener) => subscribe('history-changed', listener),
   getThumbnail: (eventId) => invoke<Thumbnail | null>('get_thumbnail', { eventId }),
   getSettings: () => invoke<AppSettings>('get_settings'),

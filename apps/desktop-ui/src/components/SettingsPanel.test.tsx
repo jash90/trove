@@ -300,26 +300,21 @@ describe('SettingsPanel validation and transactions', () => {
   });
 });
 
-describe('Settings dialog and storage semantics', () => {
-  it('labels the dialog, explains UI-only hotkey behavior, and traps initial focus', async () => {
-    const user = userEvent.setup();
+describe('Settings page and storage semantics', () => {
+  it('labels the page, explains hotkey behavior, and starts on the first field', async () => {
     render(<SettingsPanel gateway={makeGateway()} />);
     const hotkey = await loadSettings();
 
-    const dialog = screen.getByRole('dialog', { name: 'Ustawienia' });
-    expect(dialog).toHaveAttribute('aria-modal', 'true');
-    expect(dialog).toHaveAccessibleDescription(/ustawienia pozostają lokalne/i);
-    // Saving now rebinds the shortcut with the system, so the screen must say
-    // that rather than promising it takes effect on the next launch.
+    // Its own window now, so there is nothing behind it to trap focus against
+    // and nothing to mark as modal.
+    const page = screen.getByRole('main', { name: 'Ustawienia' });
+    expect(page).not.toHaveAttribute('aria-modal');
+    expect(page).toHaveAccessibleDescription(/ustawienia pozostają lokalne/i);
+    // Saving rebinds the shortcut with the system, so the screen must say that
+    // rather than promising it takes effect on the next launch.
     expect(screen.getByText(/zapisanie zmienia aktywny skrót od razu/i)).toBeVisible();
     expect(hotkey).toHaveFocus();
-
-    const close = screen.getByRole('button', { name: 'Zamknij ustawienia' });
-    close.focus();
-    await user.tab();
-    expect(hotkey).toHaveFocus();
-    await user.tab({ shift: true });
-    expect(close).toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Zamknij ustawienia' })).toBeVisible();
   });
 
   it('describes the database main file and referenced blobs without claiming total disk use', () => {

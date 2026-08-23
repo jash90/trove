@@ -17,6 +17,27 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 /// The label of the window the shortcut toggles.
 const PALETTE_WINDOW: &str = "main";
 
+/// The label of the settings window.
+///
+/// Declared in the configuration and started hidden, so showing it is a matter
+/// of asking rather than of building one — and it keeps its own size and
+/// position between openings.
+const SETTINGS_WINDOW: &str = "settings";
+
+/// Brings the settings window up, wherever it was last left.
+///
+/// Separate from the palette on purpose: settings are read and edited slowly,
+/// and doing that on top of the list meant the list could not be consulted
+/// while doing it.
+pub fn show_settings<R: Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window(SETTINGS_WINDOW) else {
+        return;
+    };
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+}
+
 /// The window the user was working in before the palette appeared.
 ///
 /// Recorded on the way in, because once the palette has focus the frontmost

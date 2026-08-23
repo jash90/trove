@@ -41,6 +41,7 @@ macro_rules! clipboard_history_command_registry {
             get_storage_stats => $crate::commands::get_storage_stats,
             get_thumbnail => $crate::commands::get_thumbnail,
             reveal_source => $crate::commands::reveal_source,
+            open_settings_window => $crate::commands::open_settings_window,
         }
     };
 }
@@ -501,6 +502,15 @@ pub async fn get_import_status_service(
             .map_err(|error| import_error_code(&error, "import_status_unavailable"))
     })
     .await
+}
+
+/// Brings the settings window up.
+///
+/// The palette asks rather than draws: settings are their own window now, so
+/// the list stays readable while they are open.
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_settings_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    crate::hotkey::show_settings(&app);
 }
 
 #[tauri::command(rename_all = "camelCase")]

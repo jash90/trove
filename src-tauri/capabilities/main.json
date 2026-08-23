@@ -1,9 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
-  "description": "Main clipboard palette access",
+  "description": "Clipboard palette and settings window access",
   "windows": [
-    "main"
+    "main",
+    "settings"
   ],
   "platforms": [
     "linux",

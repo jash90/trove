@@ -8,7 +8,6 @@ import {
 
 import { ActionBar } from './components/ActionBar';
 import { ImportWizard } from './components/ImportWizard';
-import { SettingsPanel } from './components/SettingsPanel';
 import { PaletteHeader } from './components/PaletteHeader';
 import { PaletteWorkspace } from './components/PaletteWorkspace';
 import { useHistoryActions } from './hooks/useHistoryActions';
@@ -56,7 +55,7 @@ const ClipboardPalette = (): React.JSX.Element => {
   const { query, setQuery, status, refreshing, items } = useHistorySearch(gateway);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
-  const [workspace, setWorkspace] = useState<'none' | 'import' | 'settings'>('none');
+  const [workspace, setWorkspace] = useState<'none' | 'import'>('none');
   const focusSearch = (): void => searchInputRef.current?.focus();
   useEffect(() => {
     searchInputRef.current?.focus();
@@ -85,10 +84,8 @@ const ClipboardPalette = (): React.JSX.Element => {
     selectedItem?.kind === 'image',
   );
 
-  useEffect(
-    () => gateway.onOpenSettingsRequested?.(() => setWorkspace('settings')),
-    [gateway],
-  );
+  // Settings are their own window; the palette only asks for it.
+  const openSettings = (): void => void gateway.openSettingsWindow().catch(() => undefined);
 
   const modalOpen = actions.deleteTargetId !== null || workspace !== 'none';
 
@@ -140,7 +137,7 @@ const ClipboardPalette = (): React.JSX.Element => {
     }
     if (primaryModifier && !event.shiftKey && key === ',') {
       event.preventDefault();
-      setWorkspace('settings');
+      openSettings();
       return;
     }
     if (navigation.selectedId === null) return;
@@ -246,7 +243,7 @@ const ClipboardPalette = (): React.JSX.Element => {
               type="button"
               className="footer-action"
               aria-label="Otwórz ustawienia"
-              onClick={() => setWorkspace('settings')}
+              onClick={openSettings}
             >
               Ustawienia <kbd>⌘,</kbd>
             </button>
@@ -255,9 +252,6 @@ const ClipboardPalette = (): React.JSX.Element => {
       </section>
       {workspace === 'import' ? (
         <ImportWizard gateway={gateway} onClose={closeWorkspace} />
-      ) : null}
-      {workspace === 'settings' ? (
-        <SettingsPanel gateway={gateway} onClose={closeWorkspace} />
       ) : null}
     </main>
   );

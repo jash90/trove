@@ -16,9 +16,6 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 /// instead of showing a history that is already out of date.
 pub const HISTORY_CHANGED_EVENT: &str = "history-changed";
 
-/// Emitted when the menu bar asks the window to open its settings.
-pub const OPEN_SETTINGS_EVENT: &str = "open-settings";
-
 /// How long a write of ours may account for the next pasteboard change.
 ///
 /// Putting an entry back on the clipboard changes it, and without this the

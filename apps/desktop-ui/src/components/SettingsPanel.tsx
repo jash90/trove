@@ -1,7 +1,6 @@
 import { KeyRound, Power, ShieldBan, Timer, X } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEventHandler, type KeyboardEventHandler } from 'react';
 
-import { useModalFocus } from '../hooks/useModalFocus';
 import type { AppSettings, StorageStats as StorageStatsContract } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
 import { StorageStats } from './StorageStats';
@@ -122,11 +121,11 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [saved, setSaved] = useState(false);
   const [pending, setPending] = useState(false);
   const hotkeyRef = useRef<HTMLInputElement>(null);
-  const modalFocus = useModalFocus({
-    active: persisted !== null,
-    initialFocusRef: hotkeyRef,
-    focusKey: persisted === null ? 'loading' : 'loaded',
-  });
+  // Its own window now, so the first field takes focus when the settings
+  // arrive — no trap to build, because there is nothing behind it to escape to.
+  useEffect(() => {
+    if (persisted !== null) hotkeyRef.current?.focus();
+  }, [persisted]);
 
   useEffect(() => {
     let cancelled = false;
@@ -246,7 +245,6 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   };
 
   const handleKeyDown: KeyboardEventHandler<HTMLDivElement> = (event) => {
-    modalFocus.onKeyDown(event);
     if (event.key === 'Escape') {
       event.preventDefault();
       onClose?.();
@@ -257,11 +255,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
     persisted !== null && nativeAutostart !== null && persisted.autostart !== nativeAutostart;
 
   return (
-    <div className="workflow-backdrop" data-testid="settings-backdrop">
-      <div
-        className="workflow-dialog workflow-dialog--wide"
-        role="dialog"
-        aria-modal="true"
+    <div className="settings-page">
+      <main
+        className="settings-page__sheet"
         aria-labelledby="settings-dialog-title"
         aria-describedby="settings-dialog-description"
         onKeyDown={handleKeyDown}
@@ -415,7 +411,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
           <X size={16} aria-hidden="true" />
           Zamknij
         </button>
-      </div>
+      </main>
     </div>
   );
 };

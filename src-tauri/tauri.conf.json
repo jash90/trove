@@ -20,9 +20,27 @@
         "minHeight": 520,
         "center": true,
         "resizable": true
+      },
+      {
+        "label": "settings",
+        "title": "Ustawienia — Clipboard History",
+        "url": "index.html#settings",
+        "width": 720,
+        "height": 760,
+        "minWidth": 560,
+        "minHeight": 480,
+        "center": true,
+        "resizable": true,
+        "visible": false
       }
     ],
-    "security": { "capabilities": ["main-capability"] }
+    "security": {
+      "capabilities": [
+        "main-capability"
+      ]
+    }
   },
-  "bundle": { "active": true }
+  "bundle": {
+    "active": true
+  }
 }

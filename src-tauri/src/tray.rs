@@ -6,7 +6,7 @@
 //! the way.
 
 use tauri::{
-    AppHandle, Emitter, Manager, Runtime,
+    AppHandle, Manager, Runtime,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
 };
@@ -76,11 +76,7 @@ fn on_menu_event<R: Runtime>(
 ) {
     match event.id().as_ref() {
         SHOW_ID => show_palette(app),
-        SETTINGS_ID => {
-            show_palette(app);
-            // The window owns its own navigation; the tray only asks.
-            let _ = app.emit_to("main", crate::monitor::OPEN_SETTINGS_EVENT, ());
-        }
+        SETTINGS_ID => crate::hotkey::show_settings(app),
         PAUSE_ID => {
             let paused = !control.is_paused();
             control.set_paused(paused);

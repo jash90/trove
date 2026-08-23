@@ -75,20 +75,22 @@ describe('the palette end to end', () => {
     ).toBeVisible();
   });
 
-  it('opens the import wizard and the settings workspace from the header', async () => {
+  it('opens the import wizard here and asks for the settings window elsewhere', async () => {
     const user = userEvent.setup();
-    render(<App gateway={mockGateway} />);
+    const openSettingsWindow = vi.fn(async () => undefined);
+    render(<App gateway={{ ...mockGateway, openSettingsWindow }} />);
     await settle();
 
     await user.click(screen.getByRole('button', { name: 'Importuj archiwum' }));
     expect(screen.getByRole('dialog', { name: 'Importuj historię' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Zamknij import' }));
 
+    // Settings are their own OS window, so the palette asks for it and keeps
+    // showing the list rather than covering it.
     await user.click(screen.getByRole('button', { name: 'Otwórz ustawienia' }));
-    expect(await screen.findByRole('dialog', { name: 'Ustawienia' })).toBeVisible();
-    // Retention is off by default, so history stays unbounded.
-    expect(screen.getByRole('checkbox', { name: 'Bez limitu retencji' })).toBeChecked();
-    await user.click(screen.getByRole('button', { name: 'Zamknij ustawienia' }));
+    expect(openSettingsWindow).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('dialog', { name: 'Ustawienia' })).not.toBeInTheDocument();
+    expect(historyList().getAllByRole('option').length).toBeGreaterThan(0);
   });
 
   it('has no serious automated accessibility violations', async () => {
