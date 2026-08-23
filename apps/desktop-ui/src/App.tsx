@@ -194,6 +194,9 @@ const ClipboardPalette = (): React.JSX.Element => {
           actions={actionBar}
           onSelect={handleSelect}
           onActivate={handleActivate}
+          onRevealSource={() => {
+            if (navigation.selectedId !== null) void gateway.revealSource(navigation.selectedId);
+          }}
           onOpenPreview={() => setMobilePreviewOpen(true)}
           onClosePreview={() => {
             setMobilePreviewOpen(false);

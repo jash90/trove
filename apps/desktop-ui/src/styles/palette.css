@@ -1343,3 +1343,61 @@
     display: none;
   }
 }
+
+/* Source location of a file or image entry (path only, never its bytes) */
+
+.source-location {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 13px 14px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.source-location h3 {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  word-break: break-word;
+}
+
+.source-location__path {
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.source-location__reveal {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  cursor: pointer;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.source-location__reveal:hover {
+  border-color: var(--accent);
+}
+
+.source-location__missing {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--pin);
+  font-size: 12px;
+  font-weight: 600;
+}

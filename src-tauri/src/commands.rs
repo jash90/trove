@@ -39,6 +39,7 @@ macro_rules! clipboard_history_command_registry {
             save_settings => $crate::commands::save_settings,
             get_storage_stats => $crate::commands::get_storage_stats,
             get_thumbnail => $crate::commands::get_thumbnail,
+            reveal_source => $crate::commands::reveal_source,
         }
     };
 }
@@ -64,6 +65,11 @@ pub struct PreviewDto {
     pub byte_size: u64,
     pub source_app_name: Option<String>,
     pub missing_payload: bool,
+    /// Where the entry came from, decoded for display. Present only for entries
+    /// whose source recorded a location; the importer never read its bytes.
+    pub source_path: Option<String>,
+    /// Whether that location still resolves to something on this machine.
+    pub source_exists: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -169,6 +175,10 @@ fn get_preview_blocking(store: &StoreHandle, event_id: i64) -> Result<PreviewDto
     } else {
         None
     };
+    let source_path = read_source_path(store, event_id)?;
+    let source_exists = source_path
+        .as_deref()
+        .is_some_and(|path| std::fs::metadata(path).is_ok());
     Ok(PreviewDto {
         event_id,
         kind: metadata.kind,
@@ -177,7 +187,108 @@ fn get_preview_blocking(store: &StoreHandle, event_id: i64) -> Result<PreviewDto
         byte_size: metadata.byte_size,
         source_app_name: metadata.source_app_name,
         missing_payload,
+        source_path,
+        source_exists,
     })
+}
+
+/// Longest source reference kept for display. The schema already caps a
+/// representation, but this read must be bounded on its own terms.
+const MAX_SOURCE_REFERENCE_BYTES: usize = 4 * 1024;
+
+/// Reads the `text/uri-list` reference a file or image entry carries beside its
+/// primary representation, and returns it as a local path when it names one.
+fn read_source_path(store: &StoreHandle, event_id: i64) -> Result<Option<String>, String> {
+    let reference = store
+        .with_reader(|connection| {
+            connection
+                .query_row(
+                    "SELECT rp.inline_payload
+                     FROM event_representation er
+                     JOIN raw_payload rp ON rp.raw_payload_id = er.raw_payload_id
+                     WHERE er.event_id = ?1
+                       AND er.format_id = 'text/uri-list'
+                       AND er.ordinal > 0
+                       AND rp.storage_kind = 'inline'
+                       AND length(rp.inline_payload) <= ?2",
+                    rusqlite::params![event_id, MAX_SOURCE_REFERENCE_BYTES as i64],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+        })
+        .map_err(|error| store_error_code(&error, "preview_unavailable"))?;
+    let Some(reference) = reference else {
+        return Ok(None);
+    };
+    let reference = String::from_utf8(reference).map_err(|_| "preview_unavailable".to_owned())?;
+    Ok(file_uri_to_path(&reference))
+}
+
+/// Turns a `file:` URI back into a local path. Any other scheme names something
+/// this application will not open, so it yields nothing rather than a path the
+/// interface would wrongly offer to reveal.
+fn file_uri_to_path(reference: &str) -> Option<String> {
+    let encoded = reference.strip_prefix("file://")?;
+    if !encoded.starts_with('/') {
+        return None;
+    }
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = bytes.get(index + 1..index + 3)?;
+            let text = std::str::from_utf8(hex).ok()?;
+            decoded.push(u8::from_str_radix(text, 16).ok()?);
+            index += 3;
+            continue;
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    let path = String::from_utf8(decoded).ok()?;
+    // A NUL byte would truncate the path once it reaches the operating system.
+    (!path.contains('\0')).then_some(path)
+}
+
+pub async fn reveal_source_service(state: &AppState, event_id: i64) -> Result<(), String> {
+    let store = state.store.clone();
+    run_blocking("source_unavailable", move || {
+        let Some(path) = read_source_path(&store, event_id)? else {
+            return Err("source_unavailable".to_owned());
+        };
+        if std::fs::metadata(&path).is_err() {
+            return Err("source_missing".to_owned());
+        }
+        reveal_in_file_manager(&path)
+    })
+    .await
+}
+
+/// Opens the containing folder and selects the entry. The path is passed as a
+/// single argument, never through a shell, and only after it was proven to
+/// exist, so a crafted export cannot turn this into command execution.
+fn reveal_in_file_manager(path: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(path)
+            .status()
+            .map_err(|_| "reveal_failed".to_owned())
+            .and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err("reveal_failed".to_owned())
+                }
+            })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Err("reveal_unsupported".to_owned())
+    }
 }
 
 pub async fn set_pinned_service(
@@ -206,6 +317,11 @@ pub async fn get_preview(
     event_id: i64,
 ) -> Result<PreviewDto, String> {
     get_preview_service(state.inner(), event_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn reveal_source(state: tauri::State<'_, AppState>, event_id: i64) -> Result<(), String> {
+    reveal_source_service(state.inner(), event_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

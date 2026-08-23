@@ -21,6 +21,7 @@ interface PaletteWorkspaceProps {
   onActivate: (eventId: number) => void;
   onOpenPreview: () => void;
   onClosePreview: () => void;
+  onRevealSource: () => void;
 }
 
 export const PaletteWorkspace = ({
@@ -37,6 +38,7 @@ export const PaletteWorkspace = ({
   onActivate,
   onOpenPreview,
   onClosePreview,
+  onRevealSource,
 }: PaletteWorkspaceProps): React.JSX.Element => (
   <div className="palette-content">
     <div className="history-column">
@@ -72,6 +74,7 @@ export const PaletteWorkspace = ({
         thumbnailUrl={thumbnailUrl}
         thumbnailStatus={thumbnailStatus}
         onClose={onClosePreview}
+        onRevealSource={onRevealSource}
         actions={actions}
       />
     </div>

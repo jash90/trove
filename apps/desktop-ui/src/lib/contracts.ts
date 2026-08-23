@@ -39,6 +39,10 @@ export interface Preview {
   byteSize: number;
   sourceAppName: string | null;
   missingPayload: boolean;
+  /** Where the entry came from, when its source recorded a location. */
+  sourcePath: string | null;
+  /** Whether that location still resolves on this machine. */
+  sourceExists: boolean;
 }
 
 export type CopyMode =

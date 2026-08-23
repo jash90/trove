@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 import type { Preview } from '../lib/contracts';
 import { formatByteSize, KIND_LABELS } from '../lib/format';
 import { ImagePreview, type ThumbnailStatus } from './ImagePreview';
+import { SourceLocation } from './SourceLocation';
 import { TextPreview } from './TextPreview';
 
 export type PreviewStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -15,6 +16,7 @@ interface PreviewPaneProps {
   thumbnailStatus: ThumbnailStatus;
   actions?: ReactNode;
   onClose?: () => void;
+  onRevealSource?: () => void;
 }
 
 export const PreviewPane = ({
@@ -24,6 +26,7 @@ export const PreviewPane = ({
   thumbnailStatus,
   actions,
   onClose,
+  onRevealSource,
 }: PreviewPaneProps): React.JSX.Element => {
   return (
     <aside className="preview-pane" aria-label="Podgląd zaznaczonego wpisu">
@@ -75,6 +78,13 @@ export const PreviewPane = ({
             ) : (
               <TextPreview preview={preview} />
             )}
+            {preview.sourcePath ? (
+              <SourceLocation
+                path={preview.sourcePath}
+                exists={preview.sourceExists}
+                onReveal={onRevealSource}
+              />
+            ) : null}
             <dl className="preview-metadata">
               <div>
                 <dt>Źródło</dt>

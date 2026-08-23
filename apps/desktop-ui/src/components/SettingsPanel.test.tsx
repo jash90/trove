@@ -63,6 +63,7 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
     getImportStatus: vi.fn(async () => {
       throw new Error('unused');
     }),
+    revealSource: vi.fn(async () => undefined),
     getThumbnail: vi.fn(async () => null),
     getSettings: vi.fn(async () => persistedSettings),
     saveSettings: vi.fn(async (nextSettings) => nextSettings),

@@ -42,6 +42,8 @@ const makePreview = (eventId: number, overrides: Partial<Preview> = {}): Preview
   byteSize: 32,
   sourceAppName: 'Synthetic Editor',
   missingPayload: false,
+  sourcePath: null,
+  sourceExists: false,
   ...overrides,
 });
 
@@ -109,6 +111,7 @@ const makeGateway = (
     })),
     discardImportAnalysis: vi.fn(async () => undefined),
     getImportStatus: vi.fn(async () => importProgress),
+    revealSource: vi.fn(async () => undefined),
     getThumbnail: vi.fn(async (): Promise<Thumbnail | null> => null),
     getSettings: vi.fn(async () => settings),
     isAutostartEnabled: vi.fn(async () => settings.autostart),
@@ -313,6 +316,66 @@ describe('selected preview sequencing', () => {
 
     await user.click(screen.getByRole('button', { name: 'Zamknij podgląd' }));
     expect(previewColumn).not.toHaveClass('is-mobile-open');
+  });
+});
+
+describe('source location', () => {
+  it('shows the full path and offers to reveal an existing file', async () => {
+    const revealSource = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(
+      <App
+        gateway={makeGateway([makeItem(1, { kind: 'file', missingPayload: true })], {
+          revealSource,
+          preview: vi.fn(async (eventId) =>
+            makePreview(eventId, {
+              kind: 'file',
+              missingPayload: true,
+              sourcePath: '/Users/synthetic/Pobrane/raport syntetyczny.pdf',
+              sourceExists: true,
+            }),
+          ),
+        })}
+      />,
+    );
+    await settleInitialSearch();
+
+    expect(
+      await screen.findByText('/Users/synthetic/Pobrane/raport syntetyczny.pdf'),
+    ).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'raport syntetyczny.pdf' })).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Pokaż w Finderze' }));
+    expect(revealSource).toHaveBeenCalledWith(1);
+  });
+
+  it('states plainly that a moved file is gone instead of offering to reveal it', async () => {
+    render(
+      <App
+        gateway={makeGateway([makeItem(1, { kind: 'file', missingPayload: true })], {
+          preview: vi.fn(async (eventId) =>
+            makePreview(eventId, {
+              kind: 'file',
+              missingPayload: true,
+              sourcePath: '/Users/synthetic/Pobrane/usuniety.pdf',
+              sourceExists: false,
+            }),
+          ),
+        })}
+      />,
+    );
+    await settleInitialSearch();
+
+    expect(await screen.findByText('Plik nie istnieje')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Pokaż w Finderze' })).toBeNull();
+  });
+
+  it('shows no location block for an entry whose source recorded none', async () => {
+    render(<App gateway={makeGateway([makeItem(1)])} />);
+    await settleInitialSearch();
+
+    await screen.findByText('Synthetic preview 1');
+    expect(screen.queryByText('Lokalizacja źródłowa')).toBeNull();
   });
 });
 

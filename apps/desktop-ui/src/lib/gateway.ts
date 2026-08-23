@@ -32,6 +32,7 @@ export interface ClipboardGateway {
   startImport(analysisId: string): Promise<ImportRunHandle>;
   discardImportAnalysis(analysisId: string): Promise<void>;
   getImportStatus(runId: string): Promise<ImportProgress>;
+  revealSource(eventId: number): Promise<void>;
   getThumbnail(eventId: number): Promise<Thumbnail | null>;
   getSettings(): Promise<AppSettings>;
   isAutostartEnabled(): Promise<boolean>;
@@ -69,6 +70,7 @@ export const tauriGateway: ClipboardGateway = {
     invoke<ImportProgress>('get_import_status', { runId }).then((progress) =>
       validateImportProgress(progress, runId),
     ),
+  revealSource: (eventId) => invoke<void>('reveal_source', { eventId }),
   getThumbnail: (eventId) => invoke<Thumbnail | null>('get_thumbnail', { eventId }),
   getSettings: () => invoke<AppSettings>('get_settings'),
   isAutostartEnabled: () => isEnabled(),

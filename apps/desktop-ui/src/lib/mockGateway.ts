@@ -37,6 +37,9 @@ export const mockGateway: ClipboardGateway = {
       byteSize: item.byteSize,
       sourceAppName: item.sourceAppName,
       missingPayload: item.missingPayload,
+      sourcePath:
+        item.kind === 'file' ? '/synthetic/archiwum/notatka-syntetyczna.pdf' : null,
+      sourceExists: false,
     };
   },
   setPinned: async (eventId, pinned) => {
@@ -68,6 +71,9 @@ export const mockGateway: ClipboardGateway = {
       ? { ...SYNTHETIC_IMPORT_PROGRESS.summary }
       : null,
   }),
+  revealSource: async () => {
+    throw new Error('source_unavailable');
+  },
   getThumbnail: async (eventId) =>
     eventId === 103 ? { mimeType: 'image/png', base64: 'c3ludGhldGlj' } : null,
   getSettings: async () => ({ ...settings, denylistedApps: [...settings.denylistedApps] }),

@@ -56,6 +56,132 @@ async fn search_command_returns_camel_case_page_without_payload_bytes() {
     assert!(json["items"][0].get("blobRelpath").is_none());
 }
 
+fn file_capture(reference_uri: &str, captured_at_ms: i64) -> clipboard_core::CaptureInput {
+    clipboard_core::CaptureInput {
+        captured_at_ms,
+        kind: clipboard_core::ContentKind::File,
+        primary_mime: "application/octet-stream".to_owned(),
+        representations: vec![
+            clipboard_core::RepresentationInput {
+                format_id: "application/octet-stream".to_owned(),
+                bytes: None,
+                missing_ref: Some("synthetic-missing:reference".to_owned()),
+            },
+            clipboard_core::RepresentationInput {
+                format_id: "text/uri-list".to_owned(),
+                bytes: Some(reference_uri.as_bytes().to_vec()),
+                missing_ref: None,
+            },
+        ],
+        source_app_id: None,
+        source_app_name: None,
+        source_confidence: clipboard_core::SourceConfidence::Unknown,
+        pinned: false,
+        occurrence_count: 1,
+        content_flags: clipboard_core::ContentFlags::MISSING_PAYLOAD,
+        event_flags: clipboard_core::EventFlags::IMPORTED,
+    }
+}
+
+#[tokio::test]
+async fn preview_reports_an_existing_source_path_as_revealable() {
+    let elsewhere = tempfile::tempdir().unwrap();
+    let present = elsewhere.path().join("synthetic report.pdf");
+    fs::write(&present, b"synthetic").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let outcome = state
+        .store
+        .ingest(file_capture(
+            &format!("file://{}", present.display()).replace(' ', "%20"),
+            1_725_000_000_000,
+        ))
+        .await
+        .unwrap();
+
+    let preview = commands::get_preview_service(&state, outcome.event_id)
+        .await
+        .unwrap();
+    let json = serde_json::to_value(&preview).unwrap();
+
+    assert_eq!(
+        json["sourcePath"].as_str(),
+        Some(present.to_str().unwrap()),
+        "the preview shows the decoded path, not the percent-encoded reference"
+    );
+    assert_eq!(json["sourceExists"], serde_json::Value::Bool(true));
+}
+
+#[tokio::test]
+async fn preview_marks_a_vanished_source_path_as_unavailable() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let outcome = state
+        .store
+        .ingest(file_capture(
+            "file:///synthetic/never/existed.pdf",
+            1_725_000_000_000,
+        ))
+        .await
+        .unwrap();
+
+    let preview = commands::get_preview_service(&state, outcome.event_id)
+        .await
+        .unwrap();
+    let json = serde_json::to_value(&preview).unwrap();
+
+    assert_eq!(
+        json["sourcePath"].as_str(),
+        Some("/synthetic/never/existed.pdf")
+    );
+    assert_eq!(json["sourceExists"], serde_json::Value::Bool(false));
+}
+
+#[tokio::test]
+async fn revealing_a_vanished_source_reports_a_stable_code_without_the_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let outcome = state
+        .store
+        .ingest(file_capture(
+            "file:///synthetic/never/existed.pdf",
+            1_725_000_000_000,
+        ))
+        .await
+        .unwrap();
+
+    let error = commands::reveal_source_service(&state, outcome.event_id)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, "source_missing");
+}
+
+#[tokio::test]
+async fn a_text_entry_has_no_source_path_to_reveal() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let outcome = state
+        .store
+        .ingest(text_capture("bez odniesienia", 1_725_000_000_000))
+        .await
+        .unwrap();
+
+    let preview = commands::get_preview_service(&state, outcome.event_id)
+        .await
+        .unwrap();
+    let json = serde_json::to_value(&preview).unwrap();
+
+    assert_eq!(json["sourcePath"], serde_json::Value::Null);
+    assert_eq!(json["sourceExists"], serde_json::Value::Bool(false));
+    assert_eq!(
+        commands::reveal_source_service(&state, outcome.event_id)
+            .await
+            .unwrap_err(),
+        "source_unavailable"
+    );
+}
+
 fn text_capture(value: &str, captured_at_ms: i64) -> clipboard_core::CaptureInput {
     clipboard_core::CaptureInput {
         captured_at_ms,
@@ -325,6 +451,7 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "save_settings",
             "get_storage_stats",
             "get_thumbnail",
+            "reveal_source",
         ]
     );
 
