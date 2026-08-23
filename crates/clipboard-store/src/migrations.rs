@@ -57,6 +57,33 @@ impl Migrations {
     }
 }
 
+pub(crate) fn validate_current_schema(connection: &Connection) -> Result<(), StoreError> {
+    let version =
+        connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+    if version != LATEST_SCHEMA_VERSION {
+        return Err(if version > LATEST_SCHEMA_VERSION {
+            StoreError::UnsupportedSchemaVersion(version)
+        } else {
+            StoreError::IncompatibleSchema
+        });
+    }
+    validate_schema_identity(connection)
+}
+
+fn validate_schema_identity(connection: &Connection) -> Result<(), StoreError> {
+    let marker = connection.query_row(
+        "SELECT identity, revision FROM schema_identity WHERE identity = ?1",
+        [SCHEMA_IDENTITY],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    );
+    match marker {
+        Ok((identity, revision)) if identity == SCHEMA_IDENTITY && revision == SCHEMA_REVISION => {
+            Ok(())
+        }
+        _ => Err(StoreError::IncompatibleSchema),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -121,32 +148,5 @@ mod tests {
         assert_eq!(version, 2);
         assert_eq!(revision, 6);
         assert_eq!(sentinel, "preserved");
-    }
-}
-
-pub(crate) fn validate_current_schema(connection: &Connection) -> Result<(), StoreError> {
-    let version =
-        connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
-    if version != LATEST_SCHEMA_VERSION {
-        return Err(if version > LATEST_SCHEMA_VERSION {
-            StoreError::UnsupportedSchemaVersion(version)
-        } else {
-            StoreError::IncompatibleSchema
-        });
-    }
-    validate_schema_identity(connection)
-}
-
-fn validate_schema_identity(connection: &Connection) -> Result<(), StoreError> {
-    let marker = connection.query_row(
-        "SELECT identity, revision FROM schema_identity WHERE identity = ?1",
-        [SCHEMA_IDENTITY],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-    );
-    match marker {
-        Ok((identity, revision)) if identity == SCHEMA_IDENTITY && revision == SCHEMA_REVISION => {
-            Ok(())
-        }
-        _ => Err(StoreError::IncompatibleSchema),
     }
 }
