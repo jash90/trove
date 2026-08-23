@@ -1,10 +1,14 @@
 import { Clipboard, Import, Search, Settings } from 'lucide-react';
 import type { ChangeEventHandler, KeyboardEventHandler, Ref } from 'react';
 
+import { formatCount } from '../lib/format';
+
 interface PaletteHeaderProps {
   query: string;
   selectedId: number | null;
   resultCount: number;
+  /** True when the list is full, so more entries match than are shown. */
+  resultsTruncated: boolean;
   searchInputRef?: Ref<HTMLInputElement>;
   importButtonRef?: Ref<HTMLButtonElement>;
   settingsButtonRef?: Ref<HTMLButtonElement>;
@@ -18,6 +22,7 @@ export const PaletteHeader = ({
   query,
   selectedId,
   resultCount,
+  resultsTruncated,
   searchInputRef,
   importButtonRef,
   settingsButtonRef,
@@ -33,19 +38,16 @@ export const PaletteHeader = ({
   return (
     <header className="palette-header">
       <div className="palette-header__masthead">
-        <div className="palette-header__identity">
+        <h1 className="palette-header__title">
           <span className="palette-header__mark" aria-hidden="true">
-            <Clipboard size={16} strokeWidth={1.8} />
+            <Clipboard size={15} strokeWidth={1.8} />
           </span>
-          <div>
-            <p className="palette-eyebrow">Lokalne archiwum</p>
-            <h1>Historia schowka</h1>
-          </div>
-        </div>
+          Historia schowka
+        </h1>
         <div className="palette-header__tools">
           <div className="capture-status" aria-label="Monitoring schowka aktywny">
             <span className="capture-status__dot" aria-hidden="true" />
-            Nasłuch aktywny
+            Nasłuch
           </div>
           <button
             ref={importButtonRef}
@@ -90,14 +92,15 @@ export const PaletteHeader = ({
           onChange={handleChange}
           onKeyDown={onKeyDown}
         />
-        <kbd aria-label="Wyczyść wyszukiwanie klawiszem Escape">esc</kbd>
+        {/* The list is a page, not the whole history: saying "80 wyników"
+            when thousands match reads as a total and is simply untrue. */}
+        <span className="search-field__count" aria-live="polite">
+          {formatCount(resultCount)}
+          {resultsTruncated ? '+' : ''}
+        </span>
       </label>
 
-      <div className="palette-header__ledger" aria-live="polite">
-        <span>{resultCount.toLocaleString('pl-PL')} wyników</span>
-        <span aria-hidden="true">↑↓ wybierz</span>
-        <span aria-hidden="true">↵ wklej</span>
-      </div>
+
     </header>
   );
 };

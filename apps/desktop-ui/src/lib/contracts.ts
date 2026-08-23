@@ -107,6 +107,9 @@ export type ImportRunState = 'running' | 'completed' | 'failed';
  */
 export const MAX_THUMBNAIL_BASE64_BYTES = 262_144;
 
+/** How many entries one page of history holds. */
+export const HISTORY_PAGE_SIZE = 80;
+
 export interface ImportProgress {
   runId: string;
   state: ImportRunState;

@@ -82,9 +82,20 @@ export const tauriGateway: ClipboardGateway = {
     ),
   revealSource: (eventId) => invoke<void>('reveal_source', { eventId }),
   onHistoryChanged: (listener) => {
-    const unlisten = listen('history-changed', () => listener());
+    // A refresh signal is a convenience: if the event bridge is unavailable the
+    // palette must still open, so a failure here degrades to a history that
+    // updates on the next query rather than to a blank window.
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    void listen('history-changed', () => listener())
+      .then((unlisten) => {
+        if (cancelled) unlisten();
+        else stop = unlisten;
+      })
+      .catch(() => undefined);
     return () => {
-      void unlisten.then((stop) => stop());
+      cancelled = true;
+      stop?.();
     };
   },
   getThumbnail: (eventId) => invoke<Thumbnail | null>('get_thumbnail', { eventId }),

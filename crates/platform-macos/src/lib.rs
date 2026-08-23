@@ -119,12 +119,20 @@ mod platform {
     fn frontmost_application() -> Option<(String, String)> {
         let workspace = NSWorkspace::sharedWorkspace();
         let application = workspace.frontmostApplication()?;
-        let identifier = application.bundleIdentifier()?.to_string();
-        let name = application
-            .localizedName()
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| identifier.clone());
-        Some((identifier, name))
+        let identifier = application
+            .bundleIdentifier()
+            .map(|value| value.to_string());
+        let name = application.localizedName().map(|value| value.to_string());
+        // A command-line tool has no bundle identifier, and an application
+        // bundle may withhold a localized name. Either alone still tells the
+        // user where something came from, so the pair falls back to whichever
+        // one is there rather than discarding both.
+        match (identifier, name) {
+            (Some(identifier), Some(name)) => Some((identifier, name)),
+            (Some(identifier), None) => Some((identifier.clone(), identifier)),
+            (None, Some(name)) => Some((name.clone(), name)),
+            (None, None) => None,
+        }
     }
 }
 

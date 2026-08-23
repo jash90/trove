@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import type { ClipboardGateway } from '../lib/gateway';
-import type { HistoryItem, HistoryPage } from '../lib/contracts';
+import { HISTORY_PAGE_SIZE, type HistoryItem, type HistoryPage } from '../lib/contracts';
 
 type HistorySearchStatus = 'loading' | 'ready' | 'error';
 
@@ -43,7 +43,7 @@ export const useHistorySearch = (gateway: ClipboardGateway): UseHistorySearchRes
 
     const timer = window.setTimeout(() => {
       void gateway
-        .search({ query, limit: 80, cursor: null })
+        .search({ query, limit: HISTORY_PAGE_SIZE, cursor: null })
         .then((page) => {
           if (active && id === requestId.current) {
             setState({ status: 'ready', page });

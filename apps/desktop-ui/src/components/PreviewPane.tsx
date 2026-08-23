@@ -31,10 +31,7 @@ export const PreviewPane = ({
   return (
     <aside className="preview-pane" aria-label="Podgląd zaznaczonego wpisu">
       <header className="preview-pane__header">
-        <div>
-          <span className="preview-label">Podgląd</span>
-          <h2>{preview ? KIND_LABELS[preview.kind] : 'Zaznacz wpis'}</h2>
-        </div>
+        <h2>{preview ? KIND_LABELS[preview.kind] : 'Zaznacz wpis'}</h2>
         {onClose ? (
           <button
             type="button"

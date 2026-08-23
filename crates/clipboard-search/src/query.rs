@@ -116,13 +116,20 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery, QueryError> {
     })
 }
 
+/// Builds the FTS5 `MATCH` expression for a query.
+///
+/// The final term is matched as a prefix. A palette is typed into one character
+/// at a time, and a whole-word match shows nothing until the word is finished —
+/// so a search for `supercm` found nothing while `supercmd` found eight
+/// entries. Earlier terms stay exact: the user finished typing those.
 pub fn build_fts_match_expression(normalized_text: &str) -> Result<String, QueryError> {
     let mut expression = String::with_capacity(normalized_text.len().min(MAX_FTS_MATCH_BYTES));
     let mut term_count = 0_usize;
-    for term in normalized_text
+    let mut terms = normalized_text
         .split(|character: char| !character.is_alphanumeric())
         .filter(|term| !term.is_empty())
-    {
+        .peekable();
+    while let Some(term) = terms.next() {
         if term.len() > MAX_SEARCH_TERM_BYTES {
             return Err(QueryError::SearchTermTooLong);
         }
@@ -130,16 +137,18 @@ pub fn build_fts_match_expression(normalized_text: &str) -> Result<String, Query
         if term_count > MAX_SEARCH_TERMS {
             return Err(QueryError::TooManySearchTerms);
         }
+        let is_last = terms.peek().is_none();
         let separator_bytes = if expression.is_empty() {
             0
         } else {
             " AND ".len()
         };
+        let quoting_bytes = if is_last { 3 } else { 2 };
         let required = expression
             .len()
             .checked_add(separator_bytes)
             .and_then(|length| length.checked_add(term.len()))
-            .and_then(|length| length.checked_add(2))
+            .and_then(|length| length.checked_add(quoting_bytes))
             .ok_or(QueryError::MatchExpressionTooLong)?;
         if required > MAX_FTS_MATCH_BYTES {
             return Err(QueryError::MatchExpressionTooLong);
@@ -150,6 +159,9 @@ pub fn build_fts_match_expression(normalized_text: &str) -> Result<String, Query
         expression.push('"');
         expression.push_str(term);
         expression.push('"');
+        if is_last {
+            expression.push('*');
+        }
     }
     Ok(expression)
 }

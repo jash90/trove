@@ -122,6 +122,49 @@ fn serde_defaults_diagnostic_history_capability_to_false() {
 }
 
 #[tokio::test]
+async fn a_partial_word_finds_what_the_user_is_still_typing() {
+    let (_directory, store) = open_store();
+    for (index, text) in ["supercmd i raycast", "zupelnie inny wpis"]
+        .into_iter()
+        .enumerate()
+    {
+        store
+            .ingest(text_capture(
+                text,
+                1_000 + index as i64,
+                "com.example.editor",
+                "Example Editor",
+                false,
+                1,
+            ))
+            .await
+            .unwrap();
+    }
+
+    // A palette is typed into one character at a time. Whole-word matching
+    // showed nothing until the word was finished, which meant an empty list
+    // for most of the typing.
+    for prefix in ["s", "super", "supercm", "supercmd"] {
+        let page = store
+            .search(request(prefix, 10, None))
+            .expect("search must succeed");
+        assert_eq!(
+            page.items.len(),
+            1,
+            "prefix {prefix:?} should already find the entry"
+        );
+    }
+
+    let page = store
+        .search(request("supercmdx", 10, None))
+        .expect("search must succeed");
+    assert!(
+        page.items.is_empty(),
+        "a prefix nothing starts with matches nothing"
+    );
+}
+
+#[tokio::test]
 async fn non_indexable_content_is_hidden_from_default_history_but_available_diagnostically() {
     let (_directory, store) = open_store();
     let mut hidden = text_capture(

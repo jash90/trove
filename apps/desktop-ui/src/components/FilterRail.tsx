@@ -46,7 +46,6 @@ export const FilterRail = ({
 
   return (
     <nav className="filter-rail" aria-label="Filtry historii">
-      <span className="filter-rail__label">Widok</span>
       <div className="filter-rail__options">
         {FILTERS.map((filter) => {
           const Icon = filter.icon;

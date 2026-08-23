@@ -17,6 +17,7 @@ import { useHistorySearch } from './hooks/useHistorySearch';
 import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
 import { useSelectedPreview } from './hooks/useSelectedPreview';
 import { useThumbnail } from './hooks/useThumbnail';
+import { HISTORY_PAGE_SIZE } from './lib/contracts';
 import {
   GatewayProvider,
   useGateway,
@@ -181,6 +182,7 @@ const ClipboardPalette = (): React.JSX.Element => {
           query={query}
           selectedId={navigation.selectedId}
           resultCount={actions.visibleItems.length}
+          resultsTruncated={actions.visibleItems.length >= HISTORY_PAGE_SIZE}
           searchInputRef={searchInputRef}
           importButtonRef={importButtonRef}
           settingsButtonRef={settingsButtonRef}
@@ -219,7 +221,7 @@ const ClipboardPalette = (): React.JSX.Element => {
           </p>
         ) : null}
         <footer className="palette-footer">
-          <span>↵ wklej · ⌘C kopiuj · ⌘⇧V zwykły tekst</span>
+          <span>↵ wklej · ⌘C kopiuj · ⌘⇧V zwykły tekst · ⌘⇧Space przywołaj</span>
           <span className="palette-footer__privacy">Tylko na tym urządzeniu</span>
         </footer>
       </section>
