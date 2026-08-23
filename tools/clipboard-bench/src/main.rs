@@ -139,7 +139,9 @@ fn measure(data_dir: &Path, queries: u32, output: Option<&Path>) -> Result<(), S
     let report = MeasureReport {
         events: stats.event_count,
         contents: stats.content_count,
-        search: timed_searches(&store, queries)?,
+        common_search: timed_searches(&store, queries, &COMMON_TERMS)?,
+        selective_search: timed_searches(&store, queries, &SELECTIVE_TERMS)?,
+        selective_search_shared_reader: shared_reader_searches(&store, queries)?,
         first_page_ms: duration_ms(time_first_page(&store)?),
         pagination: paginate(&store)?,
         blob_reclamation_ms: duration_ms(time_reclamation_scan(&store)?),
@@ -154,11 +156,13 @@ fn measure(data_dir: &Path, queries: u32, output: Option<&Path>) -> Result<(), S
     Ok(())
 }
 
-/// The queries a benchmark rotates through.
+/// Terms that a large share of the synthetic history contains.
 ///
-/// A single repeated query would measure one cached plan. These differ in
-/// selectivity, in diacritics, and in whether they match at all.
-const QUERY_TERMS: [&str; 8] = [
+/// Every generated record is built from a twelve-word vocabulary, so each of
+/// these matches a sixth of the database or more. That is the worst case for a
+/// ranked search — relevance cannot be decided without scoring every match —
+/// and a real history's long tail of words rarely produces it.
+const COMMON_TERMS: [&str; 8] = [
     "Łódź",
     "lodz",
     "gęślą",
@@ -169,11 +173,24 @@ const QUERY_TERMS: [&str; 8] = [
     "nieistniejące",
 ];
 
-fn timed_searches(store: &StoreHandle, queries: u32) -> Result<SearchReport, String> {
+/// Terms that match a handful of records, which is what a person searching for
+/// something they remember copying actually types.
+/// Bare record numbers: each appears in one record and in no posting list that
+/// the rest of the history shares. Pairing one with a word like "notatka" would
+/// still walk that word's whole posting list and measure the common case again.
+const SELECTIVE_TERMS: [&str; 8] = [
+    "100237", "413900", "777001", "919283", "640077", "12345", "500500", "888321",
+];
+
+fn timed_searches(
+    store: &StoreHandle,
+    queries: u32,
+    terms: &[&str],
+) -> Result<SearchReport, String> {
     let mut timings = Vec::with_capacity(queries as usize);
     let mut matched = 0_u64;
     for index in 0..queries {
-        let term = QUERY_TERMS[(index as usize) % QUERY_TERMS.len()];
+        let term = terms[(index as usize) % terms.len()];
         let started = Instant::now();
         let page = store
             .search(SearchRequest::from_text(term))
@@ -190,6 +207,21 @@ fn timed_searches(store: &StoreHandle, queries: u32) -> Result<SearchReport, Str
         p99_ms: duration_ms(percentile(&timings, 99)),
         max_ms: duration_ms(timings.last().copied().unwrap_or_default()),
     })
+}
+
+/// Runs the selective queries with a single reader held open around all of them.
+///
+/// A nested `with_reader` reuses the connection the outer one opened, so this
+/// is the same work minus the per-call connection setup.
+fn shared_reader_searches(store: &StoreHandle, queries: u32) -> Result<SearchReport, String> {
+    let mut inner = None;
+    store
+        .with_reader(|_| {
+            inner = Some(timed_searches(store, queries, &SELECTIVE_TERMS));
+            Ok(())
+        })
+        .map_err(|error| format!("shared reader unavailable: {error}"))?;
+    inner.unwrap_or_else(|| Err("shared reader produced no measurement".to_owned()))
 }
 
 /// The cost of the very first page, which is what a summoned window waits on.
@@ -365,7 +397,16 @@ struct GenerateReport {
 struct MeasureReport {
     events: i64,
     contents: i64,
-    search: SearchReport,
+    /// Terms a large share of the history contains — the ranked worst case.
+    common_search: SearchReport,
+    /// Terms that match a handful of records — the ordinary case.
+    selective_search: SearchReport,
+    /// The same queries with one reader held open for all of them.
+    ///
+    /// The store opens a connection per call, and on a large database that
+    /// setup costs more than the query. Measuring both says how much of the
+    /// latency is the search and how much is getting to it.
+    selective_search_shared_reader: SearchReport,
     first_page_ms: f64,
     pagination: PaginationReport,
     blob_reclamation_ms: f64,

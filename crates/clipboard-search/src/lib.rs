@@ -50,12 +50,18 @@ const RANKED_SEARCH_SQL: &str = "WITH matched_candidates AS MATERIALIZED (
      candidate_content AS MATERIALIZED (
        SELECT DISTINCT content_id FROM bounded_candidates
      ),
+     -- CROSS JOIN fixes the order deliberately. A materialized CTE carries no
+     -- row estimate, so the planner drove this from history_event and scanned
+     -- every row in it to find the handful belonging to the candidates: a fixed
+     -- cost that grew with the whole history and, at a million rows, dominated
+     -- the search it was attached to. Driving from the candidates instead makes
+     -- it as small as the result set.
      candidate_usage AS MATERIALIZED (
        SELECT usage.content_id,
               SUM(usage.occurrence_count) AS occurrence_count,
               SUM(usage.paste_count) AS paste_count
-       FROM history_event usage
-       JOIN candidate_content candidate ON candidate.content_id = usage.content_id
+       FROM candidate_content candidate
+       CROSS JOIN history_event usage ON usage.content_id = candidate.content_id
        GROUP BY usage.content_id
      ),
      truncation AS (
