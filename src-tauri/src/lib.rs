@@ -17,21 +17,7 @@ pub fn run() {
             app.manage(app_state);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            commands::search_history,
-            commands::get_preview,
-            commands::set_pinned,
-            commands::delete_event,
-            commands::copy_event,
-            commands::analyze_import,
-            commands::start_import,
-            commands::discard_import_analysis,
-            commands::get_import_status,
-            commands::get_settings,
-            commands::save_settings,
-            commands::get_storage_stats,
-            commands::get_thumbnail,
-        ])
+        .invoke_handler(commands::invoke_handler())
         .run(tauri::generate_context!())
         .expect("error while running Clipboard History");
 }

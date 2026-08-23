@@ -116,6 +116,8 @@ pub enum StoreError {
     InvalidImportInput,
     #[error("invalid_content_flags")]
     InvalidContentFlags,
+    #[error("history_event_not_found")]
+    HistoryEventNotFound,
     #[error("invalid_app_setting")]
     InvalidAppSetting,
     #[error("import run not found")]
@@ -1624,17 +1626,24 @@ fn fail_import(
 
 fn set_pinned(connection: &mut Connection, event_id: i64, pinned: bool) -> Result<(), StoreError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute(
+    let updated = transaction.execute(
         "UPDATE history_event SET pinned = ?1 WHERE event_id = ?2",
         params![i64::from(pinned), event_id],
     )?;
+    if updated == 0 {
+        return Err(StoreError::HistoryEventNotFound);
+    }
     transaction.commit()?;
     Ok(())
 }
 
 fn delete_event(connection: &mut Connection, event_id: i64) -> Result<(), StoreError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute("DELETE FROM history_event WHERE event_id = ?1", [event_id])?;
+    let deleted =
+        transaction.execute("DELETE FROM history_event WHERE event_id = ?1", [event_id])?;
+    if deleted == 0 {
+        return Err(StoreError::HistoryEventNotFound);
+    }
     transaction.commit()?;
     Ok(())
 }

@@ -5,7 +5,36 @@ use clipboard_history_app::{
 use clipboard_search::SearchRequest;
 use clipboard_store::{StoreConfig, StoreHandle};
 use serde_json::json;
-use std::fs;
+use std::{
+    fs,
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
+use tauri::Manager;
+
+fn ipc_request(cmd: &str, body: serde_json::Value) -> tauri::webview::InvokeRequest {
+    tauri::webview::InvokeRequest {
+        cmd: cmd.to_owned(),
+        callback: tauri::ipc::CallbackFn(0),
+        error: tauri::ipc::CallbackFn(1),
+        url: "tauri://localhost".parse().unwrap(),
+        body: tauri::ipc::InvokeBody::Json(body),
+        headers: Default::default(),
+        invoke_key: tauri::test::INVOKE_KEY.to_owned(),
+    }
+}
+
+fn command_test_app(state: AppState) -> tauri::App<tauri::test::MockRuntime> {
+    tauri::test::mock_builder()
+        .manage(state)
+        .invoke_handler(commands::invoke_handler())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap()
+}
 
 #[tokio::test]
 async fn search_command_returns_camel_case_page_without_payload_bytes() {
@@ -251,6 +280,98 @@ async fn copy_preparation_restores_text_and_sanitizes_missing_payload_errors() {
     );
 }
 
+#[tokio::test]
+async fn plain_text_copy_rejects_present_utf8_image_payload_before_any_clipboard_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let image = state
+        .store
+        .ingest(image_capture(vec![b'\t'; 32], 1_725_000_000_450))
+        .await
+        .unwrap();
+
+    let error = commands::prepare_copy_text_service(&state, image.event_id, true)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, "copy_format_unavailable");
+    assert!(!error.contains("\t"));
+    assert!(!error.contains("image"));
+}
+
+#[test]
+fn generated_command_handler_registers_each_desktop_command_once_and_accepts_camel_case_arguments()
+{
+    macro_rules! collect_command_names {
+        ($( $name:ident => $command:path, )*) => {
+            &[$(stringify!($name)),*]
+        };
+    }
+
+    let names = clipboard_history_app::clipboard_history_command_registry!(collect_command_names);
+    assert_eq!(
+        names.as_slice(),
+        &[
+            "search_history",
+            "get_preview",
+            "set_pinned",
+            "delete_event",
+            "copy_event",
+            "analyze_import",
+            "start_import",
+            "discard_import_analysis",
+            "get_import_status",
+            "get_settings",
+            "save_settings",
+            "get_storage_stats",
+            "get_thumbnail",
+        ]
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let app = command_test_app(AppState::open_data_dir(directory.path()).unwrap());
+    let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .unwrap();
+
+    let saved = tauri::test::get_ipc_response(
+        &window,
+        ipc_request(
+            "save_settings",
+            json!({
+                "settings": {
+                    "schemaVersion": 1,
+                    "hotkey": "CommandOrControl+Shift+Space",
+                    "autostart": true,
+                    "retentionDays": 365,
+                    "denylistedApps": ["com.example.synthetic"]
+                }
+            }),
+        ),
+    )
+    .unwrap()
+    .deserialize::<serde_json::Value>()
+    .unwrap();
+    assert_eq!(saved["schemaVersion"], 1);
+    assert_eq!(saved["retentionDays"], 365);
+    assert!(saved.get("schema_version").is_none());
+
+    let state = app.state::<AppState>();
+    let image = state
+        .store
+        .ingest(image_capture(vec![b'\t'; 32], 1_725_000_000_451));
+    let image = tauri::async_runtime::block_on(image).unwrap();
+    let error = tauri::test::get_ipc_response(
+        &window,
+        ipc_request(
+            "copy_event",
+            json!({ "eventId": image.event_id, "plainText": true }),
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(error, json!("copy_format_unavailable"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn command_boundary_preserves_the_stable_private_storage_error() {
@@ -272,6 +393,93 @@ async fn command_boundary_preserves_the_stable_private_storage_error() {
 
     assert_eq!(error, "private_storage_unavailable");
     fs::set_permissions(&blob_root, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[tokio::test]
+async fn writer_mutations_report_zero_rows_and_concurrent_delete_has_one_winner() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    assert!(matches!(
+        state.store.set_pinned(99_999, true).await,
+        Err(clipboard_store::StoreError::HistoryEventNotFound)
+    ));
+    assert!(matches!(
+        state.store.delete_event(99_999).await,
+        Err(clipboard_store::StoreError::HistoryEventNotFound)
+    ));
+
+    let event = state
+        .store
+        .ingest(text_capture("concurrent delete", 1_725_000_000_700))
+        .await
+        .unwrap();
+    let first = state.store.clone();
+    let second = state.store.clone();
+    let first_delete = tokio::spawn(async move { first.delete_event(event.event_id).await });
+    let second_delete = tokio::spawn(async move { second.delete_event(event.event_id).await });
+    let outcomes = [first_delete.await.unwrap(), second_delete.await.unwrap()];
+
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                Err(clipboard_store::StoreError::HistoryEventNotFound)
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn blocked_reader_command_yields_the_tokio_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let occupied = Arc::new(Barrier::new(clipboard_store::MAX_STORE_READERS + 1));
+    let release = Arc::new(Barrier::new(clipboard_store::MAX_STORE_READERS + 1));
+    let mut readers = Vec::new();
+    for _ in 0..clipboard_store::MAX_STORE_READERS {
+        let store = state.store.clone();
+        let occupied = Arc::clone(&occupied);
+        let release = Arc::clone(&release);
+        readers.push(thread::spawn(move || {
+            store
+                .with_reader(|_| {
+                    occupied.wait();
+                    release.wait();
+                    Ok::<_, rusqlite::Error>(())
+                })
+                .unwrap();
+        }));
+    }
+    occupied.wait();
+    let releaser = {
+        let release = Arc::clone(&release);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            release.wait();
+        })
+    };
+    let heartbeat = Arc::new(AtomicBool::new(false));
+    let heartbeat_task = {
+        let heartbeat = Arc::clone(&heartbeat);
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            heartbeat.store(true, Ordering::Release);
+        })
+    };
+
+    commands::search_history_service(&state, SearchRequest::default())
+        .await
+        .unwrap();
+
+    assert!(heartbeat.load(Ordering::Acquire));
+    heartbeat_task.await.unwrap();
+    releaser.join().unwrap();
+    for reader in readers {
+        reader.join().unwrap();
+    }
 }
 
 #[tokio::test]

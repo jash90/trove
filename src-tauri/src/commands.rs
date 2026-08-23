@@ -4,7 +4,7 @@ use base64::Engine;
 use clipboard_core::ContentFlags;
 use clipboard_import::{ImportAnalysis, ImportError, ImportProgress, ImportRunHandle};
 use clipboard_search::{HistoryPage, SearchError, SearchRequest, SearchStoreExt};
-use clipboard_store::{CasError, StoreError};
+use clipboard_store::{CasError, StoreError, StoreHandle};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -20,6 +20,38 @@ const MAX_DENYLISTED_APP_BYTES: usize = 256;
 const MAX_PREVIEW_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_COPY_TEXT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_THUMBNAIL_BASE64_BYTES: usize = 256 * 1024;
+
+#[macro_export]
+macro_rules! clipboard_history_command_registry {
+    ($consumer:ident) => {
+        $consumer! {
+            search_history => $crate::commands::search_history,
+            get_preview => $crate::commands::get_preview,
+            set_pinned => $crate::commands::set_pinned,
+            delete_event => $crate::commands::delete_event,
+            copy_event => $crate::commands::copy_event,
+            analyze_import => $crate::commands::analyze_import,
+            start_import => $crate::commands::start_import,
+            discard_import_analysis => $crate::commands::discard_import_analysis,
+            get_import_status => $crate::commands::get_import_status,
+            get_settings => $crate::commands::get_settings,
+            save_settings => $crate::commands::save_settings,
+            get_storage_stats => $crate::commands::get_storage_stats,
+            get_thumbnail => $crate::commands::get_thumbnail,
+        }
+    };
+}
+
+pub fn invoke_handler<R: tauri::Runtime>()
+-> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    macro_rules! generate_command_handler {
+        ($( $name:ident => $command:path, )*) => {
+            tauri::generate_handler![$($command),*]
+        };
+    }
+
+    crate::clipboard_history_command_registry!(generate_command_handler)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,10 +125,13 @@ pub async fn search_history_service(
     state: &AppState,
     request: SearchRequest,
 ) -> Result<HistoryPage, String> {
-    state
-        .store
-        .search(request)
-        .map_err(|error| search_error_code(&error))
+    let store = state.store.clone();
+    run_blocking("search_unavailable", move || {
+        store
+            .search(request)
+            .map_err(|error| search_error_code(&error))
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -108,13 +143,21 @@ pub async fn search_history(
 }
 
 pub async fn get_preview_service(state: &AppState, event_id: i64) -> Result<PreviewDto, String> {
-    let metadata = read_primary_metadata(state, event_id, "preview_unavailable")?;
+    let store = state.store.clone();
+    run_blocking("preview_unavailable", move || {
+        get_preview_blocking(&store, event_id)
+    })
+    .await
+}
+
+fn get_preview_blocking(store: &StoreHandle, event_id: i64) -> Result<PreviewDto, String> {
+    let metadata = read_primary_metadata(store, event_id, "preview_unavailable")?;
     let missing_payload = metadata.missing_payload;
     let text = if missing_payload {
         None
     } else if is_text_preview(&metadata.kind, &metadata.mime_type, &metadata.format_id) {
         let bytes = read_primary_bytes(
-            state,
+            store,
             &metadata,
             MAX_PREVIEW_PAYLOAD_BYTES,
             "preview_too_large",
@@ -141,7 +184,6 @@ pub async fn set_pinned_service(
     event_id: i64,
     pinned: bool,
 ) -> Result<(), String> {
-    require_event(state, event_id)?;
     state
         .store
         .set_pinned(event_id, pinned)
@@ -150,7 +192,6 @@ pub async fn set_pinned_service(
 }
 
 pub async fn delete_event_service(state: &AppState, event_id: i64) -> Result<(), String> {
-    require_event(state, event_id)?;
     state
         .store
         .delete_event(event_id)
@@ -181,8 +222,8 @@ pub async fn delete_event(state: tauri::State<'_, AppState>, event_id: i64) -> R
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn copy_event(
-    app: tauri::AppHandle,
+pub async fn copy_event<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     event_id: i64,
     plain_text: bool,
@@ -202,12 +243,26 @@ pub async fn prepare_copy_text_service(
     event_id: i64,
     plain_text: bool,
 ) -> Result<String, String> {
-    let metadata = read_primary_metadata(state, event_id, "copy_unavailable")?;
-    if !plain_text && !is_text_preview(&metadata.kind, &metadata.mime_type, &metadata.format_id) {
+    let store = state.store.clone();
+    run_blocking("copy_unavailable", move || {
+        prepare_copy_text_blocking(&store, event_id, plain_text)
+    })
+    .await
+}
+
+fn prepare_copy_text_blocking(
+    store: &StoreHandle,
+    event_id: i64,
+    _plain_text: bool,
+) -> Result<String, String> {
+    let metadata = read_primary_metadata(store, event_id, "copy_unavailable")?;
+    if !metadata.missing_payload
+        && !is_text_preview(&metadata.kind, &metadata.mime_type, &metadata.format_id)
+    {
         return Err("copy_format_unavailable".to_owned());
     }
     let bytes = read_primary_bytes(
-        state,
+        store,
         &metadata,
         MAX_COPY_TEXT_BYTES,
         "copy_too_large",
@@ -256,10 +311,13 @@ pub async fn get_import_status_service(
     run_id: &str,
 ) -> Result<ImportProgress, String> {
     let run_id = Uuid::parse_str(run_id).map_err(|_| "invalid_run_id".to_owned())?;
-    state
-        .importer
-        .status(run_id)
-        .map_err(|error| import_error_code(&error, "import_status_unavailable"))
+    let importer = state.importer.clone();
+    run_blocking("import_status_unavailable", move || {
+        importer
+            .status(run_id)
+            .map_err(|error| import_error_code(&error, "import_status_unavailable"))
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -295,8 +353,15 @@ pub async fn get_import_status(
 }
 
 pub async fn get_storage_stats_service(state: &AppState) -> Result<StorageStatsDto, String> {
-    let (content_count, event_count, missing_payload_count, blob_bytes) = state
-        .store
+    let store = state.store.clone();
+    run_blocking("storage_stats_unavailable", move || {
+        get_storage_stats_blocking(&store)
+    })
+    .await
+}
+
+fn get_storage_stats_blocking(store: &StoreHandle) -> Result<StorageStatsDto, String> {
+    let (content_count, event_count, missing_payload_count, blob_bytes) = store
         .with_reader(|connection| {
             connection.query_row(
                 "SELECT
@@ -318,7 +383,7 @@ pub async fn get_storage_stats_service(state: &AppState) -> Result<StorageStatsD
             )
         })
         .map_err(|error| store_error_code(&error, "storage_stats_unavailable"))?;
-    let database_bytes = std::fs::metadata(state.store.config().database_path())
+    let database_bytes = std::fs::metadata(store.config().database_path())
         .map_err(|_| "storage_stats_unavailable".to_owned())?
         .len();
     Ok(StorageStatsDto {
@@ -334,8 +399,18 @@ pub async fn get_thumbnail_service(
     state: &AppState,
     event_id: i64,
 ) -> Result<Option<ThumbnailDto>, String> {
-    let artifact = state
-        .store
+    let store = state.store.clone();
+    run_blocking("thumbnail_unavailable", move || {
+        get_thumbnail_blocking(&store, event_id)
+    })
+    .await
+}
+
+fn get_thumbnail_blocking(
+    store: &StoreHandle,
+    event_id: i64,
+) -> Result<Option<ThumbnailDto>, String> {
+    let artifact = store
         .with_reader(|connection| {
             connection
                 .query_row(
@@ -368,8 +443,7 @@ pub async fn get_thumbnail_service(
     if encoded_size > MAX_THUMBNAIL_BASE64_BYTES {
         return Err("thumbnail_too_large".to_owned());
     }
-    let cas = state
-        .store
+    let cas = store
         .cas_store()
         .map_err(|error| store_error_code(&error, "thumbnail_unavailable"))?;
     cas.verify(&relpath, byte_size as u64)
@@ -403,7 +477,15 @@ pub async fn get_thumbnail(
 }
 
 pub async fn get_settings_service(state: &AppState) -> Result<AppSettingsDto, String> {
-    let settings = match state.store.get_setting(APP_SETTINGS_KEY) {
+    let store = state.store.clone();
+    run_blocking("settings_unavailable", move || {
+        get_settings_blocking(&store)
+    })
+    .await
+}
+
+fn get_settings_blocking(store: &StoreHandle) -> Result<AppSettingsDto, String> {
+    let settings = match store.get_setting(APP_SETTINGS_KEY) {
         Ok(Some(value_json)) => {
             serde_json::from_str(&value_json).map_err(|_| "invalid_settings".to_owned())?
         }
@@ -441,6 +523,18 @@ pub async fn save_settings(
     save_settings_service(state.inner(), settings).await
 }
 
+async fn run_blocking<T>(
+    unavailable_code: &'static str,
+    operation: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|_| unavailable_code.to_owned())?
+}
+
 struct PrimaryMetadata {
     kind: String,
     mime_type: String,
@@ -456,15 +550,14 @@ struct PrimaryMetadata {
 }
 
 fn read_primary_metadata(
-    state: &AppState,
+    store: &StoreHandle,
     event_id: i64,
     unavailable_code: &str,
 ) -> Result<PrimaryMetadata, String> {
     if event_id <= 0 {
         return Err("history_event_not_found".to_owned());
     }
-    let raw = state
-        .store
+    let raw = store
         .with_reader(|connection| {
             connection
                 .query_row(
@@ -531,7 +624,7 @@ fn read_primary_metadata(
 }
 
 fn read_primary_bytes(
-    state: &AppState,
+    store: &StoreHandle,
     metadata: &PrimaryMetadata,
     maximum: usize,
     too_large_code: &str,
@@ -557,8 +650,7 @@ fn read_primary_bytes(
             if stored_size > maximum.saturating_add(1024) {
                 return Err(too_large_code.to_owned());
             }
-            let bytes = state
-                .store
+            let bytes = store
                 .with_reader(|connection| {
                     connection.query_row(
                         "SELECT inline_payload FROM raw_payload
@@ -591,8 +683,7 @@ fn read_primary_bytes(
                 .blob_relpath
                 .as_deref()
                 .ok_or_else(|| unavailable_code.to_owned())?;
-            let cas = state
-                .store
+            let cas = store
                 .cas_store()
                 .map_err(|error| store_error_code(&error, unavailable_code))?;
             cas.verify(relpath, original_size as u64)
@@ -606,24 +697,6 @@ fn read_primary_bytes(
             Ok(Some(bytes))
         }
         _ => Err(unavailable_code.to_owned()),
-    }
-}
-
-fn require_event(state: &AppState, event_id: i64) -> Result<(), String> {
-    let exists = state
-        .store
-        .with_reader(|connection| {
-            connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM history_event WHERE event_id = ?1)",
-                [event_id],
-                |row| row.get::<_, bool>(0),
-            )
-        })
-        .map_err(|error| store_error_code(&error, "history_unavailable"))?;
-    if exists {
-        Ok(())
-    } else {
-        Err("history_event_not_found".to_owned())
     }
 }
 
@@ -662,6 +735,7 @@ fn search_error_code(error: &SearchError) -> String {
 
 fn store_error_code(error: &StoreError, fallback: &str) -> String {
     match error {
+        StoreError::HistoryEventNotFound => "history_event_not_found".to_owned(),
         StoreError::PrivateStorageUnavailable
         | StoreError::Cas(CasError::PrivateStorageUnavailable) => {
             "private_storage_unavailable".to_owned()
