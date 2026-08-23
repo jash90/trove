@@ -1,4 +1,4 @@
-import { Clipboard, Search } from 'lucide-react';
+import { Clipboard, Import, Search, Settings } from 'lucide-react';
 import type { ChangeEventHandler, KeyboardEventHandler, Ref } from 'react';
 
 interface PaletteHeaderProps {
@@ -6,8 +6,12 @@ interface PaletteHeaderProps {
   selectedId: number | null;
   resultCount: number;
   searchInputRef?: Ref<HTMLInputElement>;
+  importButtonRef?: Ref<HTMLButtonElement>;
+  settingsButtonRef?: Ref<HTMLButtonElement>;
   onQueryChange: (query: string) => void;
   onKeyDown: KeyboardEventHandler<HTMLInputElement>;
+  onOpenImport: () => void;
+  onOpenSettings: () => void;
 }
 
 export const PaletteHeader = ({
@@ -15,8 +19,12 @@ export const PaletteHeader = ({
   selectedId,
   resultCount,
   searchInputRef,
+  importButtonRef,
+  settingsButtonRef,
   onQueryChange,
   onKeyDown,
+  onOpenImport,
+  onOpenSettings,
 }: PaletteHeaderProps): React.JSX.Element => {
   const handleChange: ChangeEventHandler<HTMLInputElement> = (event) => {
     onQueryChange(event.currentTarget.value);
@@ -34,9 +42,31 @@ export const PaletteHeader = ({
             <h1>Historia schowka</h1>
           </div>
         </div>
-        <div className="capture-status" aria-label="Monitoring schowka aktywny">
-          <span className="capture-status__dot" aria-hidden="true" />
-          Nasłuch aktywny
+        <div className="palette-header__tools">
+          <div className="capture-status" aria-label="Monitoring schowka aktywny">
+            <span className="capture-status__dot" aria-hidden="true" />
+            Nasłuch aktywny
+          </div>
+          <button
+            ref={importButtonRef}
+            type="button"
+            className="header-action"
+            aria-label="Importuj archiwum"
+            onClick={onOpenImport}
+          >
+            <Import size={15} aria-hidden="true" />
+            <span>Import</span>
+          </button>
+          <button
+            ref={settingsButtonRef}
+            type="button"
+            className="header-action"
+            aria-label="Otwórz ustawienia"
+            onClick={onOpenSettings}
+          >
+            <Settings size={15} aria-hidden="true" />
+            <span>Ustawienia</span>
+          </button>
         </div>
       </div>
 

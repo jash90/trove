@@ -1,13 +1,12 @@
-import type { ContentKind, Thumbnail } from './contracts';
+import { MAX_THUMBNAIL_BASE64_BYTES, type ContentKind, type Thumbnail } from './contracts';
 
-const MAX_THUMBNAIL_BASE64_CHARACTERS = 360_000;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 export const thumbnailDataUrl = (value: Thumbnail): string => {
   if (value.mimeType !== 'image/png') {
     throw new Error('thumbnail_invalid_mime');
   }
-  if (value.base64.length > MAX_THUMBNAIL_BASE64_CHARACTERS) {
+  if (value.base64.length > MAX_THUMBNAIL_BASE64_BYTES) {
     throw new Error('thumbnail_too_large');
   }
   if (value.base64.length === 0 || !BASE64_PATTERN.test(value.base64)) {
@@ -15,6 +14,15 @@ export const thumbnailDataUrl = (value: Thumbnail): string => {
   }
   return `data:image/png;base64,${value.base64}`;
 };
+
+/**
+ * Polish CLDR leaves four-digit numbers ungrouped, so 6503 and 65030 would be
+ * rendered inconsistently side by side. Group every three digits with a plain
+ * space: deterministic across ICU versions and free of non-breaking separators
+ * that make counts hard to read and hard to assert on.
+ */
+export const formatCount = (value: number): string =>
+  String(value).replace(/\B(?=(?:\d{3})+(?!\d))/gu, ' ');
 
 export const fileBasename = (value: string): string => {
   const segments = value.split(/[\\/]/u).filter(Boolean);

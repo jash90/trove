@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { validateImportProgress, type ImportProgress } from './contracts';
+import {
+  validateImportAnalysis,
+  validateImportProgress,
+  validateImportSummary,
+  validateStorageStats,
+  type ImportProgress,
+} from './contracts';
 
 const completed: ImportProgress = {
   runId: '0198f000-0000-7000-8000-000000000000',
@@ -24,7 +30,7 @@ const completed: ImportProgress = {
 
 describe('validateImportProgress', () => {
   it('accepts a completed run only when every source record is accounted for', () => {
-    expect(validateImportProgress(completed)).toBe(completed);
+    expect(validateImportProgress(completed, completed.runId)).toBe(completed);
   });
 
   it('rejects inconsistent processed and outcome counts', () => {
@@ -96,6 +102,12 @@ describe('validateImportProgress', () => {
     ).toThrow('invalid_import_progress');
   });
 
+  it('rejects a status response for a different requested run', () => {
+    expect(() => validateImportProgress(completed, 'different-run')).toThrow(
+      'invalid_import_progress',
+    );
+  });
+
   it('accepts only native-shaped running and failed progress', () => {
     const running: ImportProgress = {
       ...completed,
@@ -115,5 +127,99 @@ describe('validateImportProgress', () => {
     expect(() => validateImportProgress({ ...failed, errorCode: '' })).toThrow(
       'invalid_import_progress',
     );
+  });
+});
+
+describe('validateImportAnalysis', () => {
+  it('accepts only safe count-only analyses with exact accounting', () => {
+    const analysis = {
+      analysisId: '0198f000-0000-7000-8000-000000000000',
+      total: 6_503,
+      candidateRecords: 6_500,
+      failed: 3,
+    };
+
+    expect(validateImportAnalysis(analysis)).toBe(analysis);
+  });
+
+  it.each([
+    ['blank id', { analysisId: ' ', total: 1, candidateRecords: 1, failed: 0 }],
+    ['fraction', { analysisId: 'a', total: 1.5, candidateRecords: 1, failed: 0 }],
+    ['unsafe count', { analysisId: 'a', total: Number.MAX_SAFE_INTEGER + 1, candidateRecords: 1, failed: 0 }],
+    ['missing accounting', { analysisId: 'a', total: 3, candidateRecords: 1, failed: 1 }],
+  ])('rejects a malformed analysis: %s', (_label, analysis) => {
+    expect(() => validateImportAnalysis(analysis)).toThrow('invalid_import_analysis');
+  });
+});
+
+describe('validateImportSummary', () => {
+  it('keeps already-present records as a separate terminal outcome', () => {
+    const summary = {
+      runId: '0198f000-0000-7000-8000-000000000000',
+      total: 10,
+      imported: 6,
+      alreadyPresent: 2,
+      skipped: 1,
+      failed: 1,
+    };
+
+    expect(validateImportSummary(summary)).toBe(summary);
+  });
+
+  it('requires every terminal outcome to sum exactly to total', () => {
+    expect(() =>
+      validateImportSummary({
+        runId: '0198f000-0000-7000-8000-000000000000',
+        total: 10,
+        imported: 8,
+        alreadyPresent: 0,
+        skipped: 1,
+        failed: 0,
+      }),
+    ).toThrow('invalid_import_summary');
+  });
+
+  it('rejects unsafe summary counters', () => {
+    expect(() =>
+      validateImportSummary({
+        runId: 'run',
+        total: Number.MAX_SAFE_INTEGER + 1,
+        imported: 0,
+        alreadyPresent: 0,
+        skipped: 0,
+        failed: 0,
+      }),
+    ).toThrow('invalid_import_summary');
+  });
+});
+
+describe('validateStorageStats', () => {
+  it('accepts safe database and referenced-blob counts', () => {
+    const stats = {
+      contentCount: 4,
+      eventCount: 5,
+      missingPayloadCount: 1,
+      databaseBytes: 1_024,
+      blobBytes: 2_048,
+    };
+
+    expect(validateStorageStats(stats)).toBe(stats);
+  });
+
+  it.each([
+    ['unsafe count', { contentCount: Number.MAX_SAFE_INTEGER + 1 }],
+    ['impossible missing count', { contentCount: 1, missingPayloadCount: 2 }],
+    ['unsafe byte sum', { databaseBytes: Number.MAX_SAFE_INTEGER, blobBytes: 1 }],
+  ])('rejects unsafe storage stats: %s', (_label, overrides) => {
+    expect(() =>
+      validateStorageStats({
+        contentCount: 4,
+        eventCount: 5,
+        missingPayloadCount: 1,
+        databaseBytes: 1_024,
+        blobBytes: 2_048,
+        ...overrides,
+      }),
+    ).toThrow('invalid_storage_stats');
   });
 });

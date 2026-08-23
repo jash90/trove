@@ -8,6 +8,7 @@ import {
 
 let historyItems = SYNTHETIC_HISTORY_ITEMS.map((item) => ({ ...item }));
 let settings = { ...SYNTHETIC_SETTINGS, denylistedApps: [...SYNTHETIC_SETTINGS.denylistedApps] };
+let autostartEnabled = SYNTHETIC_SETTINGS.autostart;
 
 export const mockGateway: ClipboardGateway = {
   search: async (request) => {
@@ -51,8 +52,10 @@ export const mockGateway: ClipboardGateway = {
     historyItems = remaining;
   },
   copyEvent: async (_eventId, plainText) => ({ mode: 'copied', plainText }),
+  chooseImportFile: async () => 'synthetic://clipboard-export.json',
+  chooseImportDirectory: async () => 'synthetic://clipboard-export',
   analyzeImport: async (_path) => ({
-    analysisId: '0198f000-0000-7000-8000-000000000200',
+    analysisId: SYNTHETIC_IMPORT_PROGRESS.runId,
     total: 3,
     candidateRecords: 3,
     failed: 0,
@@ -68,6 +71,10 @@ export const mockGateway: ClipboardGateway = {
   getThumbnail: async (eventId) =>
     eventId === 103 ? { mimeType: 'image/png', base64: 'c3ludGhldGlj' } : null,
   getSettings: async () => ({ ...settings, denylistedApps: [...settings.denylistedApps] }),
+  isAutostartEnabled: async () => autostartEnabled,
+  setAutostartEnabled: async (enabled) => {
+    autostartEnabled = enabled;
+  },
   saveSettings: async (nextSettings) => {
     settings = { ...nextSettings, denylistedApps: [...nextSettings.denylistedApps] };
     return { ...settings, denylistedApps: [...settings.denylistedApps] };

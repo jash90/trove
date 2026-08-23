@@ -96,6 +96,14 @@ export interface ImportSummary {
 
 export type ImportRunState = 'running' | 'completed' | 'failed';
 
+/**
+ * Mirror of MAX_THUMBNAIL_BASE64_BYTES in src-tauri/src/commands.rs. Base64 is
+ * ASCII, so the byte cap and the character cap are the same number. Keep both
+ * sides equal: a looser bound here can never fire and would hide a broken
+ * contract instead of reporting it.
+ */
+export const MAX_THUMBNAIL_BASE64_BYTES = 262_144;
+
 export interface ImportProgress {
   runId: string;
   state: ImportRunState;
@@ -109,11 +117,84 @@ export interface ImportProgress {
   summary: ImportSummary | null;
 }
 
-export function validateImportProgress(progress: ImportProgress): ImportProgress {
+const isSafeCount = (value: number): boolean =>
+  Number.isSafeInteger(value) && value >= 0;
+
+const safeCounterSum = (counters: readonly number[], errorCode: string): number => {
+  const total = counters.reduce((sum, counter) => sum + counter, 0);
+  if (!Number.isSafeInteger(total)) throw new Error(errorCode);
+  return total;
+};
+
+export const validateImportAnalysis = (analysis: ImportAnalysis): ImportAnalysis => {
+  if (
+    typeof analysis?.analysisId !== 'string' ||
+    analysis.analysisId.trim() !== analysis.analysisId ||
+    analysis.analysisId.length === 0 ||
+    ![analysis.total, analysis.candidateRecords, analysis.failed].every(isSafeCount) ||
+    safeCounterSum(
+      [analysis.candidateRecords, analysis.failed],
+      'invalid_import_analysis',
+    ) !== analysis.total
+  ) {
+    throw new Error('invalid_import_analysis');
+  }
+  return analysis;
+};
+
+export const validateImportSummary = (summary: ImportSummary): ImportSummary => {
+  if (
+    typeof summary?.runId !== 'string' ||
+    summary.runId.trim() !== summary.runId ||
+    summary.runId.length === 0
+  ) {
+    throw new Error('invalid_import_summary');
+  }
+  const counters = [
+    summary.total,
+    summary.imported,
+    summary.alreadyPresent,
+    summary.skipped,
+    summary.failed,
+  ];
+  if (!counters.every(isSafeCount)) throw new Error('invalid_import_summary');
+  const outcomes = safeCounterSum(counters.slice(1), 'invalid_import_summary');
+  if (outcomes !== summary.total) throw new Error('invalid_import_summary');
+  return summary;
+};
+
+export const validateStorageStats = (stats: StorageStats): StorageStats => {
+  const counters = [
+    stats?.contentCount,
+    stats?.eventCount,
+    stats?.missingPayloadCount,
+    stats?.databaseBytes,
+    stats?.blobBytes,
+  ];
+  if (
+    !counters.every(isSafeCount) ||
+    stats.missingPayloadCount > stats.contentCount ||
+    !Number.isSafeInteger(stats.databaseBytes + stats.blobBytes)
+  ) {
+    throw new Error('invalid_storage_stats');
+  }
+  return stats;
+};
+
+export function validateImportProgress(
+  progress: ImportProgress,
+  expectedRunId: string = progress.runId,
+): ImportProgress {
   const invalid = (): never => {
     throw new Error('invalid_import_progress');
   };
-  if (progress.runId.trim().length === 0) invalid();
+  if (
+    typeof progress?.runId !== 'string' ||
+    progress.runId.trim().length === 0 ||
+    progress.runId !== expectedRunId
+  ) {
+    invalid();
+  }
   const counters = [
     progress.processed,
     progress.total,
@@ -122,9 +203,11 @@ export function validateImportProgress(progress: ImportProgress): ImportProgress
     progress.skipped,
     progress.failed,
   ];
-  if (!counters.every((counter) => Number.isSafeInteger(counter) && counter >= 0)) invalid();
-  const outcomes =
-    progress.imported + progress.alreadyPresent + progress.skipped + progress.failed;
+  if (!counters.every(isSafeCount)) invalid();
+  const outcomes = safeCounterSum(
+    [progress.imported, progress.alreadyPresent, progress.skipped, progress.failed],
+    'invalid_import_progress',
+  );
   if (progress.processed !== outcomes || progress.processed > progress.total) {
     invalid();
   }
@@ -150,22 +233,18 @@ export function validateImportProgress(progress: ImportProgress): ImportProgress
   if (progress.errorCode !== null || outcomes !== progress.total) invalid();
   const summary = progress.summary;
   if (summary === null) throw new Error('invalid_import_progress');
-  const summaryCounters = [
-    summary.total,
-    summary.imported,
-    summary.alreadyPresent,
-    summary.skipped,
-    summary.failed,
-  ];
-  if (!summaryCounters.every((counter) => Number.isSafeInteger(counter) && counter >= 0)) invalid();
+  try {
+    validateImportSummary(summary);
+  } catch {
+    invalid();
+  }
   if (
     summary.runId !== progress.runId ||
     summary.total !== progress.total ||
     summary.imported !== progress.imported ||
     summary.alreadyPresent !== progress.alreadyPresent ||
     summary.skipped !== progress.skipped ||
-    summary.failed !== progress.failed ||
-    summary.imported + summary.alreadyPresent + summary.skipped + summary.failed !== summary.total
+    summary.failed !== progress.failed
   ) {
     invalid();
   }

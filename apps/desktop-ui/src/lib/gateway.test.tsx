@@ -3,6 +3,8 @@ import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { invoke } from '@tauri-apps/api/core';
+import { disable, enable, isEnabled } from '@tauri-apps/plugin-autostart';
+import { open } from '@tauri-apps/plugin-dialog';
 
 import type { AppSettings, ImportProgress } from './contracts';
 import {
@@ -15,6 +17,16 @@ import {
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
+}));
+
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: vi.fn(),
+}));
+
+vi.mock('@tauri-apps/plugin-autostart', () => ({
+  disable: vi.fn(),
+  enable: vi.fn(),
+  isEnabled: vi.fn(),
 }));
 
 const settings: AppSettings = {
@@ -41,6 +53,10 @@ const progress: ImportProgress = {
 describe('tauriGateway', () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset().mockResolvedValue(undefined);
+    vi.mocked(open).mockReset().mockResolvedValue(null);
+    vi.mocked(isEnabled).mockReset().mockResolvedValue(false);
+    vi.mocked(enable).mockReset().mockResolvedValue(undefined);
+    vi.mocked(disable).mockReset().mockResolvedValue(undefined);
   });
 
   it('maps every gateway method to the exact Rust command and camelCase arguments', async () => {
@@ -50,14 +66,32 @@ describe('tauriGateway', () => {
     await tauriGateway.setPinned(7, true);
     await tauriGateway.deleteEvent(7);
     await tauriGateway.copyEvent(7, true);
+    await tauriGateway.chooseImportFile();
+    await tauriGateway.chooseImportDirectory();
+    vi.mocked(invoke).mockResolvedValueOnce({
+      analysisId: 'analysis-id',
+      total: 1,
+      candidateRecords: 1,
+      failed: 0,
+    });
     await tauriGateway.analyzeImport('/synthetic/import.json');
     await tauriGateway.startImport('analysis-id');
     await tauriGateway.discardImportAnalysis('analysis-id');
     vi.mocked(invoke).mockResolvedValueOnce(progress);
-    await tauriGateway.getImportStatus('run-id');
+    await tauriGateway.getImportStatus(progress.runId);
     await tauriGateway.getThumbnail(7);
     await tauriGateway.getSettings();
+    await tauriGateway.isAutostartEnabled();
+    await tauriGateway.setAutostartEnabled(true);
+    await tauriGateway.setAutostartEnabled(false);
     await tauriGateway.saveSettings(settings);
+    vi.mocked(invoke).mockResolvedValueOnce({
+      contentCount: 1,
+      eventCount: 1,
+      missingPayloadCount: 0,
+      databaseBytes: 1,
+      blobBytes: 0,
+    });
     await tauriGateway.getStorageStats();
 
     expect(vi.mocked(invoke).mock.calls).toEqual([
@@ -69,12 +103,32 @@ describe('tauriGateway', () => {
       ['analyze_import', { path: '/synthetic/import.json' }],
       ['start_import', { analysisId: 'analysis-id' }],
       ['discard_import_analysis', { analysisId: 'analysis-id' }],
-      ['get_import_status', { runId: 'run-id' }],
+      ['get_import_status', { runId: progress.runId }],
       ['get_thumbnail', { eventId: 7 }],
       ['get_settings'],
       ['save_settings', { settings }],
       ['get_storage_stats'],
     ]);
+    expect(vi.mocked(open).mock.calls).toEqual([
+      [
+        {
+          title: 'Wybierz eksport historii schowka',
+          multiple: false,
+          filters: [{ name: 'Eksport JSON', extensions: ['json'] }],
+        },
+      ],
+      [
+        {
+          title: 'Wybierz katalog eksportu historii schowka',
+          directory: true,
+          recursive: true,
+          multiple: false,
+        },
+      ],
+    ]);
+    expect(isEnabled).toHaveBeenCalledOnce();
+    expect(enable).toHaveBeenCalledOnce();
+    expect(disable).toHaveBeenCalledOnce();
   });
 
   it('keeps native and browser gateways at runtime surface parity', () => {
@@ -87,9 +141,37 @@ describe('tauriGateway', () => {
   it('rejects an inconsistent import status at the IPC boundary', async () => {
     vi.mocked(invoke).mockResolvedValue({ ...progress, processed: 1 });
 
-    await expect(tauriGateway.getImportStatus('run-id')).rejects.toThrow(
+    await expect(tauriGateway.getImportStatus(progress.runId)).rejects.toThrow(
       'invalid_import_progress',
     );
+  });
+
+  it('rejects a status response for a different run at the IPC boundary', async () => {
+    vi.mocked(invoke).mockResolvedValue(progress);
+
+    await expect(tauriGateway.getImportStatus('0198f000-0000-7000-8000-0000000000ff'))
+      .rejects.toThrow('invalid_import_progress');
+  });
+
+  it('rejects malformed analysis and storage responses at the IPC boundary', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      analysisId: 'analysis',
+      total: 2,
+      candidateRecords: 1,
+      failed: 0,
+    });
+    await expect(tauriGateway.analyzeImport('/private/export.json')).rejects.toThrow(
+      'invalid_import_analysis',
+    );
+
+    vi.mocked(invoke).mockResolvedValueOnce({
+      contentCount: 1,
+      eventCount: 1,
+      missingPayloadCount: 0,
+      databaseBytes: Number.MAX_SAFE_INTEGER,
+      blobBytes: 1,
+    });
+    await expect(tauriGateway.getStorageStats()).rejects.toThrow('invalid_storage_stats');
   });
 });
 

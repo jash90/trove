@@ -3,9 +3,23 @@ import { useMemo, useState } from 'react';
 import type { CopyMode, HistoryItem } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
 
-const copyFeedback = (mode: CopyMode): string => {
-  if (mode === 'pasted') return 'Wklejono zaznaczony wpis.';
-  if (mode === 'copied') return 'Skopiowano do schowka.';
+export type HistoryActionIntent = 'copy' | 'paste' | 'pastePlain';
+
+const copyFeedback = (mode: CopyMode, intent: HistoryActionIntent): string => {
+  if (mode === 'pasted') {
+    return intent === 'pastePlain'
+      ? 'Wklejono jako zwykły tekst.'
+      : 'Wklejono zaznaczony wpis.';
+  }
+  if (mode === 'copied') {
+    if (intent === 'paste') {
+      return 'Skopiowano jako fallback — automatyczne wklejenie jest niedostępne.';
+    }
+    if (intent === 'pastePlain') {
+      return 'Skopiowano jako zwykły tekst — automatyczne wklejenie jest niedostępne.';
+    }
+    return 'Skopiowano do schowka.';
+  }
   return 'Skopiowano. Automatyczne wklejenie nie jest dostępne.';
 };
 
@@ -23,7 +37,7 @@ interface UseHistoryActionsResult {
   deletePending: boolean;
   feedback: string | null;
   clearFeedback: () => void;
-  copy: (eventId: number, plainText: boolean) => void;
+  copy: (eventId: number, intent: HistoryActionIntent) => void;
   togglePin: (item: HistoryItem) => void;
   requestDelete: (eventId: number) => void;
   cancelDelete: () => void;
@@ -54,11 +68,12 @@ export const useHistoryActions = ({
     [deletedIds, items, pinOverrides],
   );
 
-  const copy = (eventId: number, plainText: boolean): void => {
+  const copy = (eventId: number, intent: HistoryActionIntent): void => {
+    const plainText = intent === 'pastePlain';
     setFeedback(null);
     void gateway
       .copyEvent(eventId, plainText)
-      .then((result) => setFeedback(copyFeedback(result.mode)))
+      .then((result) => setFeedback(copyFeedback(result.mode, intent)))
       .catch(() => setFeedback('Nie udało się skopiować wpisu.'));
   };
 

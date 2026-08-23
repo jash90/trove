@@ -7,6 +7,8 @@ import {
 } from 'react';
 
 import { ActionBar } from './components/ActionBar';
+import { ImportWizard } from './components/ImportWizard';
+import { SettingsPanel } from './components/SettingsPanel';
 import { FilterRail } from './components/FilterRail';
 import { PaletteHeader } from './components/PaletteHeader';
 import { PaletteWorkspace } from './components/PaletteWorkspace';
@@ -46,6 +48,9 @@ const ClipboardPalette = (): React.JSX.Element => {
   const { query, setQuery, status, items } = useHistorySearch(gateway);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
+  const [workspace, setWorkspace] = useState<'none' | 'import' | 'settings'>('none');
+  const importButtonRef = useRef<HTMLButtonElement>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const focusSearch = (): void => searchInputRef.current?.focus();
   useEffect(() => {
     searchInputRef.current?.focus();
@@ -56,7 +61,7 @@ const ClipboardPalette = (): React.JSX.Element => {
     onFocusSearch: focusSearch,
     onOpenPreview: () => setMobilePreviewOpen(true),
   });
-  const handleActivate = (eventId: number): void => actions.copy(eventId, false);
+  const handleActivate = (eventId: number): void => actions.copy(eventId, 'paste');
   const navigation = useKeyboardNavigation({
     items: actions.visibleItems,
     onActivate: handleActivate,
@@ -71,6 +76,16 @@ const ClipboardPalette = (): React.JSX.Element => {
     selectedItem?.kind === 'image' && selectedItem.hasThumbnail && !selectedItem.missingPayload,
   );
 
+  const modalOpen = actions.deleteTargetId !== null || workspace !== 'none';
+
+  // Only one workspace at a time, and the invoker gets focus back so keyboard
+  // users are not dropped at the top of the document when a dialog closes.
+  const closeWorkspace = (): void => {
+    const invoker = workspace === 'import' ? importButtonRef : settingsButtonRef;
+    setWorkspace('none');
+    queueMicrotask(() => invoker.current?.focus());
+  };
+
   const handleSelect = (eventId: number): void => {
     navigation.setSelectedId(eventId);
     actions.clearFeedback();
@@ -84,10 +99,13 @@ const ClipboardPalette = (): React.JSX.Element => {
     if (actions.deleteTargetId === null) navigation.handleKeyDown(event);
   };
   const handleCopy = (): void => {
-    if (navigation.selectedId !== null) actions.copy(navigation.selectedId, false);
+    if (navigation.selectedId !== null) actions.copy(navigation.selectedId, 'copy');
   };
-  const handleCopyPlainText = (): void => {
-    if (navigation.selectedId !== null) actions.copy(navigation.selectedId, true);
+  const handlePaste = (): void => {
+    if (navigation.selectedId !== null) actions.copy(navigation.selectedId, 'paste');
+  };
+  const handlePastePlainText = (): void => {
+    if (navigation.selectedId !== null) actions.copy(navigation.selectedId, 'pastePlain');
   };
   const handleTogglePin = (): void => {
     if (selectedItem) actions.togglePin(selectedItem);
@@ -97,7 +115,7 @@ const ClipboardPalette = (): React.JSX.Element => {
   };
   const handlePaletteKeyDown: KeyboardEventHandler<HTMLElement> = (event) => {
     if (
-      shortcutIsBlocked(event, actions.deleteTargetId !== null) ||
+      shortcutIsBlocked(event, modalOpen) ||
       navigation.selectedId === null
     ) {
       return;
@@ -109,7 +127,7 @@ const ClipboardPalette = (): React.JSX.Element => {
       handleCopy();
     } else if (primaryModifier && event.shiftKey && key === 'v') {
       event.preventDefault();
-      handleCopyPlainText();
+      handlePastePlainText();
     } else if (primaryModifier && !event.shiftKey && key === 'p') {
       event.preventDefault();
       handleTogglePin();
@@ -130,8 +148,8 @@ const ClipboardPalette = (): React.JSX.Element => {
       deletePending={actions.deletePending}
       feedback={actions.feedback}
       deleteConfirmationOpen={actions.deleteTargetId !== null}
-      onCopy={handleCopy}
-      onCopyPlainText={handleCopyPlainText}
+      onPaste={handlePaste}
+      onPastePlainText={handlePastePlainText}
       onTogglePin={handleTogglePin}
       onRequestDelete={handleRequestDelete}
       onCancelDelete={actions.cancelDelete}
@@ -146,14 +164,22 @@ const ClipboardPalette = (): React.JSX.Element => {
       aria-label="Historia schowka"
       onKeyDown={handlePaletteKeyDown}
     >
-      <section className="palette-shell" aria-label="Paleta historii schowka">
+      <section
+        className="palette-shell"
+        aria-label="Paleta historii schowka"
+        inert={modalOpen}
+      >
         <PaletteHeader
           query={query}
           selectedId={navigation.selectedId}
           resultCount={actions.visibleItems.length}
           searchInputRef={searchInputRef}
+          importButtonRef={importButtonRef}
+          settingsButtonRef={settingsButtonRef}
           onQueryChange={handleQueryChange}
           onKeyDown={handleSearchKeyDown}
+          onOpenImport={() => setWorkspace('import')}
+          onOpenSettings={() => setWorkspace('settings')}
         />
         <FilterRail query={query} onQueryChange={handleQueryChange} />
         <PaletteWorkspace
@@ -174,14 +200,24 @@ const ClipboardPalette = (): React.JSX.Element => {
             focusSearch();
           }}
         />
-        <p className="sr-only" aria-live="polite">
-          {actions.feedback}
-        </p>
+        {/* ActionBar owns the live region while a row is selected; this covers
+            the case where the last item was just deleted and it unmounted. */}
+        {selectedItem === null && actions.feedback ? (
+          <p className="sr-only" role="status" aria-live="polite">
+            {actions.feedback}
+          </p>
+        ) : null}
         <footer className="palette-footer">
           <span>↵ wklej · ⌘C kopiuj · ⌘⇧V zwykły tekst</span>
           <span className="palette-footer__privacy">Tylko na tym urządzeniu</span>
         </footer>
       </section>
+      {workspace === 'import' ? (
+        <ImportWizard gateway={gateway} onClose={closeWorkspace} />
+      ) : null}
+      {workspace === 'settings' ? (
+        <SettingsPanel gateway={gateway} onClose={closeWorkspace} />
+      ) : null}
     </main>
   );
 };

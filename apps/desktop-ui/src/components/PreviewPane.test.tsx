@@ -4,16 +4,17 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from '../App';
-import type {
-  AppSettings,
-  HistoryItem,
-  HistoryPage,
-  ImportAnalysis,
-  ImportProgress,
-  ImportRunHandle,
-  Preview,
-  StorageStats,
-  Thumbnail,
+import {
+  MAX_THUMBNAIL_BASE64_BYTES,
+  type AppSettings,
+  type HistoryItem,
+  type HistoryPage,
+  type ImportAnalysis,
+  type ImportProgress,
+  type ImportRunHandle,
+  type Preview,
+  type StorageStats,
+  type Thumbnail,
 } from '../lib/contracts';
 import { thumbnailDataUrl } from '../lib/format';
 import type { ClipboardGateway } from '../lib/gateway';
@@ -95,6 +96,8 @@ const makeGateway = (
       mode: 'copied' as const,
       plainText,
     })),
+    chooseImportFile: vi.fn(async () => null),
+    chooseImportDirectory: vi.fn(async () => null),
     analyzeImport: vi.fn(async (): Promise<ImportAnalysis> => ({
       analysisId: '0198f000-0000-7000-8000-000000000501',
       total: 1,
@@ -108,6 +111,8 @@ const makeGateway = (
     getImportStatus: vi.fn(async () => importProgress),
     getThumbnail: vi.fn(async (): Promise<Thumbnail | null> => null),
     getSettings: vi.fn(async () => settings),
+    isAutostartEnabled: vi.fn(async () => settings.autostart),
+    setAutostartEnabled: vi.fn(async () => undefined),
     saveSettings: vi.fn(async (nextSettings) => nextSettings),
     getStorageStats: vi.fn(async (): Promise<StorageStats> => ({
       contentCount: 1,
@@ -187,7 +192,7 @@ describe('safe preview rendering', () => {
       thumbnailDataUrl({ mimeType: 'image/jpeg', base64: 'c3ludGhldGlj' }),
     ).toThrow('thumbnail_invalid_mime');
     expect(() =>
-      thumbnailDataUrl({ mimeType: 'image/png', base64: 'A'.repeat(360_001) }),
+      thumbnailDataUrl({ mimeType: 'image/png', base64: 'A'.repeat(MAX_THUMBNAIL_BASE64_BYTES + 1) }),
     ).toThrow('thumbnail_too_large');
   });
 });
@@ -357,9 +362,28 @@ describe('history actions', () => {
     expect(dialog).toBeVisible();
     expect(cancel).toHaveFocus();
     expect(screen.getByRole('button', { name: 'Usuń wpis bezpowrotnie' })).toBeVisible();
+    expect(screen.getByLabelText('Paleta historii schowka')).toHaveAttribute('inert');
 
     await user.click(cancel);
     expect(dialog).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Usuń wpis' })).toHaveFocus();
+    expect(screen.getByLabelText('Paleta historii schowka')).not.toHaveAttribute('inert');
+  });
+
+  it('traps forward and reverse focus inside delete confirmation', async () => {
+    const user = userEvent.setup();
+    render(<App gateway={makeGateway([makeItem(1)])} />);
+    await settleInitialSearch();
+
+    await user.click(screen.getByRole('button', { name: 'Usuń wpis' }));
+    const cancel = screen.getByRole('button', { name: 'Anuluj usuwanie' });
+    const confirm = screen.getByRole('button', { name: 'Usuń wpis bezpowrotnie' });
+    expect(cancel).toHaveFocus();
+
+    await user.tab({ shift: true });
+    expect(confirm).toHaveFocus();
+    await user.tab();
+    expect(cancel).toHaveFocus();
   });
 
   it('removes a deleted item and moves selection without stale activation', async () => {
@@ -407,6 +431,34 @@ describe('history actions', () => {
     expect(copyEvent).toHaveBeenCalledWith(1, true);
     expect(setPinned).toHaveBeenCalledWith(1, true);
     expect(screen.getByRole('dialog', { name: 'Usunąć wpis z historii?' })).toBeVisible();
+  });
+
+  it('preserves copy, paste, and plain-text paste intent in fallback feedback', async () => {
+    const copyEvent = vi.fn(async (_eventId: number, plainText: boolean) => ({
+      mode: 'copied' as const,
+      plainText,
+    }));
+    const user = userEvent.setup();
+    render(<App gateway={makeGateway([makeItem(1)], { copyEvent })} />);
+    await settleInitialSearch();
+
+    await user.keyboard('{Enter}');
+    expect(await screen.findByText('Skopiowano jako fallback — automatyczne wklejenie jest niedostępne.')).toBeVisible();
+
+    await user.keyboard('{Meta>}c{/Meta}');
+    expect(await screen.findByText('Skopiowano do schowka.')).toBeVisible();
+
+    await user.keyboard('{Meta>}{Shift>}v{/Shift}{/Meta}');
+    expect(
+      await screen.findByText(
+        'Skopiowano jako zwykły tekst — automatyczne wklejenie jest niedostępne.',
+      ),
+    ).toBeVisible();
+    expect(copyEvent.mock.calls).toEqual([
+      [1, false],
+      [1, false],
+      [1, true],
+    ]);
   });
 
   it('suppresses history hotkeys while a dialog owns focus', async () => {
