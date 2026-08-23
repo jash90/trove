@@ -1799,6 +1799,9 @@ pub struct LinkPreviewRecord {
     pub title: Option<String>,
     pub icon: Option<Vec<u8>>,
     pub icon_mime: Option<String>,
+    /// The page's own picture, already downscaled by the caller.
+    pub image: Option<Vec<u8>>,
+    pub image_mime: Option<String>,
 }
 
 /// How a link fetch ended.
@@ -1837,16 +1840,24 @@ fn store_link_preview(
         .as_ref()
         .map(|bytes| cas.put(bytes))
         .transpose()?;
+    let image = record
+        .image
+        .as_ref()
+        .map(|bytes| cas.put(bytes))
+        .transpose()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute(
         "INSERT INTO link_preview
-           (content_id, status, title, icon_relpath, icon_mime, fetched_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+           (content_id, status, title, icon_relpath, icon_mime,
+            image_relpath, image_mime, fetched_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(content_id) DO UPDATE SET
            status = excluded.status,
            title = excluded.title,
            icon_relpath = excluded.icon_relpath,
            icon_mime = excluded.icon_mime,
+           image_relpath = excluded.image_relpath,
+           image_mime = excluded.image_mime,
            fetched_at_ms = excluded.fetched_at_ms",
         rusqlite::params![
             content_id,
@@ -1854,6 +1865,8 @@ fn store_link_preview(
             record.title,
             icon.as_ref().map(|blob| blob.relpath.clone()),
             icon.as_ref().and(record.icon_mime.clone()),
+            image.as_ref().map(|blob| blob.relpath.clone()),
+            image.as_ref().and(record.image_mime.clone()),
             now_ms(),
         ],
     )?;
@@ -1967,7 +1980,9 @@ fn reclaim_orphans(
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut still_live = transaction.prepare(
         "SELECT EXISTS(SELECT 1 FROM raw_payload WHERE blob_relpath = ?1)
-             OR EXISTS(SELECT 1 FROM artifact WHERE blob_relpath = ?1)",
+             OR EXISTS(SELECT 1 FROM artifact WHERE blob_relpath = ?1)
+             OR EXISTS(SELECT 1 FROM link_preview WHERE icon_relpath = ?1)
+             OR EXISTS(SELECT 1 FROM link_preview WHERE image_relpath = ?1)",
     )?;
     let mut removable = Vec::with_capacity(candidates.len());
     for relpath in candidates {

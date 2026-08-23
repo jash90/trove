@@ -309,7 +309,9 @@ fn is_referenced(connection: &rusqlite::Connection, relpath: &str) -> bool {
     connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM raw_payload WHERE blob_relpath = ?1)
-                 OR EXISTS(SELECT 1 FROM artifact WHERE blob_relpath = ?1)",
+                 OR EXISTS(SELECT 1 FROM artifact WHERE blob_relpath = ?1)
+                 OR EXISTS(SELECT 1 FROM link_preview WHERE icon_relpath = ?1)
+                 OR EXISTS(SELECT 1 FROM link_preview WHERE image_relpath = ?1)",
             [relpath],
             |row| row.get::<_, bool>(0),
         )

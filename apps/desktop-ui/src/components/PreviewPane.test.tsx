@@ -233,6 +233,8 @@ describe('link previews', () => {
     title: null,
     iconMime: null,
     iconBase64: null,
+    imageMime: null,
+    imageBase64: null,
     localOnly: false,
     ...overrides,
   });
@@ -262,6 +264,29 @@ describe('link previews', () => {
     // Still no clickable link: a preview must not be a way to open a page by
     // accident.
     expect(container.querySelector('a')).toBeNull();
+  });
+
+  it('shows the picture a page nominates, from local bytes only', () => {
+    const { container } = render(
+      <PreviewPane
+        preview={makePreview(1, { kind: 'link', text: 'https://example.invalid/synthetic/page' })}
+        thumbnailUrl={null}
+        thumbnailStatus="idle"
+        linkPreview={linkPreview({
+          title: 'Synthetic page',
+          imageMime: 'image/png',
+          imageBase64: 'AQID',
+        })}
+      />,
+    );
+
+    const images = [...container.querySelectorAll('img')];
+    expect(images).not.toHaveLength(0);
+    // A favicon is a mark; this is the page's own card, and it must still come
+    // from bytes rather than from an address the window would fetch.
+    for (const image of images) {
+      expect(image.getAttribute('src')).toMatch(/^data:image\//);
+    }
   });
 
   it('shows the address alone when fetching is off, and says so', () => {

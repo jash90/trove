@@ -13,6 +13,15 @@ interface LinkPreviewCardProps {
 /// answer — the address alone still reads as a place rather than a string.
 export const LinkPreviewCard = ({ preview }: LinkPreviewCardProps): React.JSX.Element => (
   <div className="link-card">
+    {preview.imageBase64 && preview.imageMime ? (
+      // The page's own card, fetched by the core and handed over as bytes.
+      // Never a remote address: the window itself reaches out for nothing.
+      <img
+        className="link-card__image"
+        src={`data:${preview.imageMime};base64,${preview.imageBase64}`}
+        alt=""
+      />
+    ) : null}
     <div className="link-card__identity">
       {preview.iconBase64 && preview.iconMime ? (
         // A local blob, never a remote address: the page's icon is fetched by

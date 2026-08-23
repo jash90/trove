@@ -33,11 +33,32 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 /// How many redirects are followed before giving up.
 const MAX_REDIRECTS: usize = 4;
 
-/// How much of a page is read before the scan gives up on finding a title.
-const MAX_DOCUMENT_BYTES: usize = 512 * 1024;
+/// How much of a page is read before the scan gives up.
+///
+/// Measured rather than guessed: on YouTube the `<title>` sits at byte 688,630
+/// and `og:image` just after it, because the head is padded with inline
+/// script. A half-megabyte cap read neither and cached the page as having no
+/// title, which is exactly the bug this number exists to avoid.
+const MAX_DOCUMENT_BYTES: usize = 3 * 1024 * 1024;
+
+/// Everything worth reading lives in the head, so the body is never fetched
+/// when the head has already closed.
+const HEAD_CLOSE_TAG: &str = "</head>";
+
+// A page whose head is padded with inline script pushes its title far down;
+// YouTube's sits past byte 688,000. A budget below that reads neither the title
+// nor the picture and remembers the page as having none.
+const _: () = assert!(MAX_DOCUMENT_BYTES > 700_000);
 
 /// How large an icon may be.
 const MAX_ICON_BYTES: usize = 256 * 1024;
+
+/// How large the picture a page nominates may be.
+///
+/// Bigger than an icon because it is a real photograph or card, and still
+/// bounded: this is downscaled before it is kept, so what arrives here only has
+/// to be large enough to downscale well.
+const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 
 /// What was learned about a link.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -45,12 +66,15 @@ pub struct LinkPreview {
     pub title: Option<String>,
     pub icon: Option<Vec<u8>>,
     pub icon_mime: Option<String>,
+    /// The picture the page nominated for itself, as fetched.
+    pub image: Option<Vec<u8>>,
+    pub image_mime: Option<String>,
 }
 
 impl LinkPreview {
     /// True when the fetch found nothing worth remembering.
     pub fn is_empty(&self) -> bool {
-        self.title.is_none() && self.icon.is_none()
+        self.title.is_none() && self.icon.is_none() && self.image.is_none()
     }
 }
 
@@ -103,15 +127,23 @@ impl LinkPreviewFetcher {
             if !status.is_success() {
                 return Err(LinkPreviewError::Refused);
             }
-            let document = read_bounded_text(response, MAX_DOCUMENT_BYTES).await?;
+            let document = read_document_head(response).await?;
             let metadata = html::read_metadata(&document);
             let icon = self
                 .fetch_icon(&current, metadata.icon_href.as_deref())
                 .await;
+            // The picture the page nominates is what a preview is really for; a
+            // favicon is a mark, not a picture of the thing linked to.
+            let image = match metadata.image_href.as_deref() {
+                Some(href) => self.fetch_image(&current, href).await,
+                None => None,
+            };
             return Ok(LinkPreview {
                 title: metadata.title,
                 icon: icon.as_ref().map(|(bytes, _)| bytes.clone()),
                 icon_mime: icon.map(|(_, mime)| mime),
+                image: image.as_ref().map(|(bytes, _)| bytes.clone()),
+                image_mime: image.map(|(_, mime)| mime),
             });
         }
         Err(LinkPreviewError::TooManyRedirects)
@@ -157,6 +189,33 @@ impl LinkPreviewFetcher {
         Ok(next)
     }
 
+    /// Fetches the picture a page nominated for itself.
+    ///
+    /// It usually lives on a different host from the page — a content network,
+    /// an image service — so it is judged from scratch rather than inheriting
+    /// the page's permission.
+    async fn fetch_image(&self, page: &url::Url, href: &str) -> Option<(Vec<u8>, String)> {
+        let candidate = page.join(href).ok()?;
+        policy::url_is_fetchable(&candidate).ok()?;
+        self.fetch_picture(&candidate, MAX_IMAGE_BYTES).await
+    }
+
+    /// Fetches one image and returns it with the type the server declared.
+    async fn fetch_picture(&self, url: &url::Url, maximum: usize) -> Option<(Vec<u8>, String)> {
+        let response = self.request(url).await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let mime = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.split(';').next().unwrap_or(value).trim().to_owned())
+            .filter(|mime| mime.starts_with("image/"))?;
+        let bytes = read_bounded_bytes(response, maximum).await.ok()?;
+        (!bytes.is_empty()).then_some((bytes, mime))
+    }
+
     /// Fetches the icon a page declared, or the one at the conventional path.
     async fn fetch_icon(
         &self,
@@ -168,18 +227,7 @@ impl LinkPreviewFetcher {
             None => page.join("/favicon.ico").ok()?,
         };
         policy::url_is_fetchable(&candidate).ok()?;
-        let response = self.request(&candidate).await.ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        let mime = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.split(';').next().unwrap_or(value).trim().to_owned())
-            .filter(|mime| mime.starts_with("image/"))?;
-        let bytes = read_bounded_bytes(response, MAX_ICON_BYTES).await.ok()?;
-        (!bytes.is_empty()).then_some((bytes, mime))
+        self.fetch_picture(&candidate, MAX_ICON_BYTES).await
     }
 }
 
@@ -239,12 +287,38 @@ async fn read_bounded_bytes(
     Ok(bytes)
 }
 
-async fn read_bounded_text(
-    response: reqwest::Response,
-    maximum: usize,
-) -> Result<String, LinkPreviewError> {
-    let bytes = read_bounded_bytes(response, maximum).await?;
+/// Reads a page as far as its head, and no further.
+///
+/// Stopping at `</head>` keeps the usual page to a few kilobytes while still
+/// letting a page that pads its head with script be read to the end of it.
+/// Without the stop, the cap alone would pull whole documents down for nothing.
+async fn read_document_head(mut response: reqwest::Response) -> Result<String, LinkPreviewError> {
+    let mut bytes = Vec::new();
+    let mut searched_to = 0_usize;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| LinkPreviewError::Unreachable)?
+    {
+        let remaining = MAX_DOCUMENT_BYTES.saturating_sub(bytes.len());
+        if remaining == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        // Overlap by the tag's length so a boundary cannot split it.
+        let from = searched_to.saturating_sub(HEAD_CLOSE_TAG.len());
+        if find_head_close(&bytes[from..]) {
+            break;
+        }
+        searched_to = bytes.len();
+    }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn find_head_close(haystack: &[u8]) -> bool {
+    haystack
+        .windows(HEAD_CLOSE_TAG.len())
+        .any(|window| window.eq_ignore_ascii_case(HEAD_CLOSE_TAG.as_bytes()))
 }
 
 /// Reads what a link says about itself without contacting anything.
@@ -314,6 +388,16 @@ mod tests {
             assert!(rendered.starts_with("link_"), "{rendered}");
             assert!(!rendered.contains("://"), "{rendered}");
         }
+    }
+
+    #[test]
+    fn the_head_close_tag_is_found_however_it_is_written() {
+        assert!(find_head_close(
+            b"<html><head><title>x</title></head><body>"
+        ));
+        assert!(find_head_close(b"</HEAD>"));
+        assert!(find_head_close(b"</Head>"));
+        assert!(!find_head_close(b"<html><head><title>never closed"));
     }
 
     #[test]

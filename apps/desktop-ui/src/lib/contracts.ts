@@ -86,6 +86,9 @@ export interface LinkPreview {
   title: string | null;
   iconMime: string | null;
   iconBase64: string | null;
+  /** The picture the page nominates for itself, downscaled. */
+  imageMime: string | null;
+  imageBase64: string | null;
   /** True when nothing was fetched and nothing will be. */
   localOnly: boolean;
 }

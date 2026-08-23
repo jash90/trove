@@ -112,11 +112,19 @@ async fn reclaim_unused_blobs(store: &StoreHandle) {
     let _ = store.reclaim_orphans(step.candidates).await;
 }
 
+/// Whether anything still points at one blob.
+///
+/// Every table that stores a `blob_relpath` has to be named here. A table that
+/// is not gets its files collected as orphans and deleted out from under it —
+/// which is exactly what happened to link previews when this list was written
+/// before that table existed.
 fn is_referenced(connection: &rusqlite::Connection, relpath: &str) -> bool {
     connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM raw_payload WHERE blob_relpath = ?1)
-                 OR EXISTS(SELECT 1 FROM artifact WHERE blob_relpath = ?1)",
+                 OR EXISTS(SELECT 1 FROM artifact WHERE blob_relpath = ?1)
+                 OR EXISTS(SELECT 1 FROM link_preview WHERE icon_relpath = ?1)
+                 OR EXISTS(SELECT 1 FROM link_preview WHERE image_relpath = ?1)",
             [relpath],
             |row| row.get::<_, bool>(0),
         )

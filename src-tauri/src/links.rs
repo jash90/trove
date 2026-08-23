@@ -21,6 +21,13 @@ pub const LINK_PREVIEW_READY_EVENT: &str = "link-preview-ready";
 /// Largest icon handed to the interface, once encoded.
 const MAX_ICON_BASE64_BYTES: usize = 256 * 1024;
 
+/// Largest page picture handed to the interface, once encoded.
+///
+/// Sized separately from the icon: a favicon is a few kilobytes, while a page's
+/// own card downscaled to 320 pixels of lossless PNG runs to a few hundred.
+/// Sharing the icon's cap dropped every one of them silently.
+const MAX_IMAGE_BASE64_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkPreviewDto {
@@ -32,6 +39,9 @@ pub struct LinkPreviewDto {
     pub title: Option<String>,
     pub icon_mime: Option<String>,
     pub icon_base64: Option<String>,
+    /// The picture the page nominates for itself, downscaled.
+    pub image_mime: Option<String>,
+    pub image_base64: Option<String>,
     /// True when nothing has been fetched for this link and nothing will be
     /// until the setting is turned on.
     pub local_only: bool,
@@ -43,6 +53,8 @@ struct CachedPreview {
     title: Option<String>,
     icon_relpath: Option<String>,
     icon_mime: Option<String>,
+    image_relpath: Option<String>,
+    image_mime: Option<String>,
 }
 
 /// Describes a link, without ever waiting for the network.
@@ -79,6 +91,8 @@ pub async fn link_preview_service<R: Runtime>(
         title: None,
         icon_mime: None,
         icon_base64: None,
+        image_mime: None,
+        image_base64: None,
         local_only: !fetching,
     }))
 }
@@ -120,6 +134,11 @@ async fn fetch_once(url: &str) -> LinkPreviewRecord {
             title: preview.title,
             icon: preview.icon,
             icon_mime: preview.icon_mime,
+            // Downscaled before it is kept. A page's card is often a megabyte
+            // or more, and a history of links would otherwise turn into a
+            // picture archive.
+            image: preview.image.as_deref().and_then(downscale),
+            image_mime: preview.image.as_ref().map(|_| "image/png".to_owned()),
         },
         Err(clipboard_link_preview::LinkPreviewError::NotFetchable) => LinkPreviewRecord {
             status: LinkPreviewStatus::Refused,
@@ -142,27 +161,44 @@ fn render(
     let icon_base64 = cached
         .icon_relpath
         .as_deref()
-        .and_then(|relpath| read_icon(store, relpath));
+        .and_then(|relpath| read_stored_image(store, relpath, MAX_ICON_BASE64_BYTES));
+    let image_base64 = cached
+        .image_relpath
+        .as_deref()
+        .and_then(|relpath| read_stored_image(store, relpath, MAX_IMAGE_BASE64_BYTES));
     LinkPreviewDto {
         host,
         rest,
         title: cached.title.filter(|_| cached.status == "ok"),
         icon_mime: cached.icon_mime.filter(|_| icon_base64.is_some()),
         icon_base64,
+        image_mime: cached.image_mime.filter(|_| image_base64.is_some()),
+        image_base64,
         local_only,
     }
 }
 
-fn read_icon(store: &StoreHandle, relpath: &str) -> Option<String> {
+fn read_stored_image(store: &StoreHandle, relpath: &str, maximum: usize) -> Option<String> {
     let cas = store.cas_store().ok()?;
     let bytes = cas.read(relpath).ok()?;
-    encode_icon(&bytes)
+    encode_bounded(&bytes, maximum)
 }
 
-fn encode_icon(bytes: &[u8]) -> Option<String> {
+/// Shrinks a fetched picture to something worth keeping and sending.
+///
+/// A page that offers no decodable image simply has none: an unreadable card is
+/// not a failure the user can act on.
+fn downscale(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() > clipboard_images::MAX_IMAGE_INPUT_BYTES {
+        return None;
+    }
+    clipboard_images::make_thumbnail(bytes, clipboard_images::MAX_THUMBNAIL_DIMENSION).ok()
+}
+
+fn encode_bounded(bytes: &[u8], maximum: usize) -> Option<String> {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    (encoded.len() <= MAX_ICON_BASE64_BYTES).then_some(encoded)
+    (encoded.len() <= maximum).then_some(encoded)
 }
 
 /// Reads the address a link entry holds, if the entry is a link at all.
@@ -201,7 +237,8 @@ fn read_cached(store: &StoreHandle, content_id: i64) -> Result<Option<CachedPrev
         .with_reader(|connection| {
             connection
                 .query_row(
-                    "SELECT status, title, icon_relpath, icon_mime
+                    "SELECT status, title, icon_relpath, icon_mime,
+                            image_relpath, image_mime
                      FROM link_preview WHERE content_id = ?1",
                     [content_id],
                     |row| {
@@ -210,6 +247,8 @@ fn read_cached(store: &StoreHandle, content_id: i64) -> Result<Option<CachedPrev
                             title: row.get(1)?,
                             icon_relpath: row.get(2)?,
                             icon_mime: row.get(3)?,
+                            image_relpath: row.get(4)?,
+                            image_mime: row.get(5)?,
                         })
                     },
                 )

@@ -299,14 +299,14 @@ fn existing_revision_six_database_upgrades_to_settings_without_losing_data() {
 
     let config = StoreConfig::new(&database_path).with_blob_root(directory.path().join("blobs"));
     let store = StoreHandle::open(config.clone()).unwrap();
-    assert_eq!(schema_version(&store), 4);
+    assert_eq!(schema_version(&store), 5);
     assert_eq!(schema_revision(&store), 6);
     assert!(settings_table_exists(&store));
     assert_eq!(content_count(&store), 1);
     drop(store);
 
     let reopened = StoreHandle::open(config).unwrap();
-    assert_eq!(schema_version(&reopened), 4);
+    assert_eq!(schema_version(&reopened), 5);
     assert_eq!(schema_revision(&reopened), 6);
     assert!(settings_table_exists(&reopened));
     assert_eq!(content_count(&reopened), 1);
@@ -319,13 +319,13 @@ fn fresh_database_opens_at_settings_schema_and_reopens_idempotently() {
         .with_blob_root(directory.path().join("blobs"));
 
     let store = StoreHandle::open(config.clone()).unwrap();
-    assert_eq!(schema_version(&store), 4);
+    assert_eq!(schema_version(&store), 5);
     assert_eq!(schema_revision(&store), 6);
     assert!(settings_table_exists(&store));
     drop(store);
 
     let reopened = StoreHandle::open(config).unwrap();
-    assert_eq!(schema_version(&reopened), 4);
+    assert_eq!(schema_version(&reopened), 5);
     assert_eq!(schema_revision(&reopened), 6);
     assert!(settings_table_exists(&reopened));
 }
@@ -1052,6 +1052,81 @@ async fn a_link_is_described_whatever_its_address_looks_like() {
             .await
             .unwrap();
         assert!(preview.is_some(), "{url} produced no description");
+    }
+}
+
+#[tokio::test]
+async fn a_link_preview_blob_is_not_collected_as_an_orphan() {
+    // A table that stores a blob path has to be named in the liveness check.
+    // This one was added without being named, so the cleanup pass deleted
+    // every icon and picture it stored, sixty seconds after they arrived.
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let link = state
+        .store
+        .ingest(link_capture(
+            "https://example.invalid/page",
+            1_725_000_001_100,
+        ))
+        .await
+        .unwrap();
+    let content_id = state
+        .store
+        .with_reader(|connection| {
+            connection.query_row(
+                "SELECT content_id FROM history_event WHERE event_id = ?1",
+                [link.event_id],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .unwrap();
+    state
+        .store
+        .store_link_preview(
+            content_id,
+            clipboard_store::LinkPreviewRecord {
+                status: clipboard_store::LinkPreviewStatus::Ok,
+                title: Some("Synthetic page".to_owned()),
+                icon: Some(vec![1, 2, 3]),
+                icon_mime: Some("image/png".to_owned()),
+                image: Some(vec![4, 5, 6, 7]),
+                image_mime: Some("image/png".to_owned()),
+            },
+        )
+        .await
+        .unwrap();
+
+    let relpaths: Vec<String> = state
+        .store
+        .with_reader(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT icon_relpath FROM link_preview WHERE icon_relpath IS NOT NULL
+                 UNION ALL
+                 SELECT image_relpath FROM link_preview WHERE image_relpath IS NOT NULL",
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap();
+    assert_eq!(relpaths.len(), 2);
+
+    // Both must be seen as live; anything else and the next pass removes them.
+    for relpath in &relpaths {
+        let referenced = state
+            .store
+            .with_reader(|connection| {
+                connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM raw_payload WHERE blob_relpath = ?1)
+                         OR EXISTS(SELECT 1 FROM artifact WHERE blob_relpath = ?1)
+                         OR EXISTS(SELECT 1 FROM link_preview WHERE icon_relpath = ?1)
+                         OR EXISTS(SELECT 1 FROM link_preview WHERE image_relpath = ?1)",
+                    [relpath],
+                    |row| row.get::<_, bool>(0),
+                )
+            })
+            .unwrap();
+        assert!(referenced, "{relpath} would be collected as an orphan");
+        assert!(directory.path().join("blobs").join(relpath).is_file());
     }
 }
 

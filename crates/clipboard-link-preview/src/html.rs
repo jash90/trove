@@ -14,6 +14,11 @@ pub struct PageMetadata {
     pub title: Option<String>,
     /// The icon reference exactly as the page wrote it, still relative.
     pub icon_href: Option<String>,
+    /// The picture the page nominates to represent itself, when it has one.
+    ///
+    /// This is what a link preview elsewhere shows — a favicon is a 16-pixel
+    /// mark, not a picture of the thing being linked to.
+    pub image_href: Option<String>,
 }
 
 /// Pulls the title and the icon reference out of a document.
@@ -21,7 +26,61 @@ pub fn read_metadata(document: &str) -> PageMetadata {
     PageMetadata {
         title: read_title(document).map(|title| collapse_whitespace(&title)),
         icon_href: read_icon_href(document),
+        image_href: read_image_href(document),
     }
+}
+
+/// The properties a page uses to nominate its own picture, best first.
+///
+/// `og:image` is the one nearly everything writes. The secure variant is
+/// preferred where both exist, and Twitter's is a common fallback on pages that
+/// predate Open Graph or only ever tested against one crawler.
+const IMAGE_PROPERTIES: [&str; 4] = [
+    "og:image:secure_url",
+    "og:image:url",
+    "og:image",
+    "twitter:image",
+];
+
+/// Finds the picture a page nominates for itself.
+fn read_image_href(document: &str) -> Option<String> {
+    let lowered = document.to_ascii_lowercase();
+    IMAGE_PROPERTIES
+        .iter()
+        .find_map(|property| read_meta_content(document, &lowered, property))
+}
+
+/// Reads the `content` of the first `<meta>` naming one property.
+///
+/// Both spellings are accepted: Open Graph specifies `property`, and a great
+/// many pages write `name` instead.
+fn read_meta_content(document: &str, lowered: &str, property: &str) -> Option<String> {
+    let mut cursor = 0_usize;
+    while let Some(offset) = lowered[cursor..].find("<meta") {
+        let start = cursor + offset;
+        let length = lowered[start..].find('>')?;
+        let tag = &document[start..start + length];
+        let lowered_tag = &lowered[start..start + length];
+        cursor = start + length + 1;
+        // A tag naming neither is simply not this one — `<meta charset>` opens
+        // most documents, and treating it as the end of the search meant the
+        // scan never reached the picture at all.
+        let Some(declared) = read_attribute(tag, lowered_tag, "property")
+            .or_else(|| read_attribute(tag, lowered_tag, "name"))
+        else {
+            continue;
+        };
+        if !declared.trim().eq_ignore_ascii_case(property) {
+            continue;
+        }
+        if let Some(content) = read_attribute(tag, lowered_tag, "content") {
+            let content = content.trim();
+            if !content.is_empty() {
+                return Some(decode_entities(content));
+            }
+        }
+    }
+    None
 }
 
 fn read_title(document: &str) -> Option<String> {
@@ -161,6 +220,64 @@ mod tests {
         let document = r#"<link rel="stylesheet" href="/style.css">"#;
 
         assert_eq!(read_metadata(document).icon_href, None);
+    }
+
+    #[test]
+    fn the_picture_a_page_nominates_is_read() {
+        for document in [
+            r#"<meta property="og:image" content="https://example.invalid/card.png">"#,
+            r#"<meta content="https://example.invalid/card.png" property="og:image">"#,
+            // Written with `name` instead of `property`, which many pages do.
+            r#"<meta name="og:image" content="https://example.invalid/card.png">"#,
+            r#"<meta name="twitter:image" content="https://example.invalid/card.png">"#,
+        ] {
+            assert_eq!(
+                read_metadata(document).image_href.as_deref(),
+                Some("https://example.invalid/card.png"),
+                "{document}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_secure_variant_wins_where_a_page_offers_both() {
+        let document = concat!(
+            r#"<meta property="og:image" content="http://example.invalid/plain.png">"#,
+            r#"<meta property="og:image:secure_url" content="https://example.invalid/secure.png">"#,
+        );
+
+        assert_eq!(
+            read_metadata(document).image_href.as_deref(),
+            Some("https://example.invalid/secure.png")
+        );
+    }
+
+    #[test]
+    fn an_unrelated_meta_tag_is_not_mistaken_for_the_picture() {
+        let document = concat!(
+            r#"<meta charset="utf-8">"#,
+            r#"<meta name="description" content="not a picture">"#,
+            r#"<meta property="og:title" content="also not a picture">"#,
+        );
+
+        assert_eq!(read_metadata(document).image_href, None);
+    }
+
+    #[test]
+    fn a_meta_tag_with_no_name_does_not_end_the_search() {
+        // Every real document opens with `<meta charset>`, which names neither
+        // `property` nor `name`. Stopping there found nothing on any page in
+        // the world, while the tests still passed.
+        let document = concat!(
+            r#"<meta charset="utf-8">"#,
+            r#"<meta http-equiv="X-UA-Compatible" content="IE=edge">"#,
+            r#"<meta property="og:image" content="https://example.invalid/card.png">"#,
+        );
+
+        assert_eq!(
+            read_metadata(document).image_href.as_deref(),
+            Some("https://example.invalid/card.png")
+        );
     }
 
     #[test]

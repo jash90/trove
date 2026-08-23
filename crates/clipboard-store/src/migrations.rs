@@ -7,7 +7,8 @@ const SETTINGS_MIGRATION: &str = include_str!("migrations/002_settings.sql");
 const BLOB_REFERENCE_INDEX_MIGRATION: &str =
     include_str!("migrations/003_blob_reference_indexes.sql");
 const LINK_PREVIEW_MIGRATION: &str = include_str!("migrations/004_link_preview.sql");
-const LATEST_SCHEMA_VERSION: i64 = 4;
+const LINK_PREVIEW_IMAGE_MIGRATION: &str = include_str!("migrations/005_link_preview_image.sql");
+const LATEST_SCHEMA_VERSION: i64 = 5;
 const SCHEMA_IDENTITY: &str = "clipboard-store";
 const SCHEMA_REVISION: i64 = 6;
 
@@ -66,6 +67,10 @@ impl Migrations {
             // the shape of what was already there, which this does not touch.
             transaction.execute_batch(LINK_PREVIEW_MIGRATION)?;
             transaction.pragma_update(None, "user_version", 4_i64)?;
+        }
+        if version < 5 {
+            transaction.execute_batch(LINK_PREVIEW_IMAGE_MIGRATION)?;
+            transaction.pragma_update(None, "user_version", 5_i64)?;
         }
         validate_schema_identity(&transaction)?;
         transaction.commit()?;
@@ -161,7 +166,7 @@ mod tests {
             .query_row("SELECT value FROM migration_sentinel", [], |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         assert_eq!(revision, 6);
         assert_eq!(sentinel, "preserved");
     }

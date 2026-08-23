@@ -96,6 +96,8 @@ export const mockGateway: ClipboardGateway = {
       title: 'Synthetic document title',
       iconMime: null,
       iconBase64: null,
+      imageMime: null,
+      imageBase64: null,
       localOnly: false,
     };
   },

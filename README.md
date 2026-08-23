@@ -260,8 +260,11 @@ Granice, które obowiązują zawsze:
   odpowiedzieć czym innym pomiędzy sprawdzeniem a połączeniem,
 - twarde limity czasu, rozmiaru odpowiedzi i liczby przekierowań; bez ciasteczek
   i bez wykonywania JavaScriptu,
-- czytany jest wyłącznie `<title>` i odnośnik do ikony; nic więcej nie jest
-  parsowane ani przechowywane,
+- czytany jest wyłącznie `<title>`, odnośnik do ikony i `og:image` (obraz, który
+  strona sama sobie przypisuje); nic więcej nie jest parsowane ani przechowywane,
+- obraz strony jest zmniejszany przed zapisaniem, żeby historia linków nie stała
+  się archiwum zdjęć,
+- czytana jest tylko sekcja `<head>` — do `</head>`, nie dalej,
 - ikona trafia do okna jako bajty z lokalnego magazynu — **interfejs nigdy nie
   pobiera niczego sam**, dlatego bramka „zero zdalnych adresów w pakiecie" nadal
   obowiązuje i nadal przechodzi.
