@@ -101,6 +101,85 @@ fn candidate_primary_text(candidate: &crate::ImportCandidate) -> Option<&str> {
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
 }
 
+fn uri_list_reference(candidate: &crate::ImportCandidate) -> Option<&str> {
+    candidate
+        .capture
+        .representations
+        .iter()
+        .find(|representation| representation.format_id == "text/uri-list")
+        .and_then(|representation| representation.bytes.as_deref())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+}
+
+#[test]
+fn raycast_file_record_keeps_its_source_path_as_a_uri_list_reference() {
+    let records = parse_raycast(fixture("raycast/clipboard.json")).unwrap();
+    let file = records
+        .iter()
+        .find(|record| record.capture.kind == ContentKind::File)
+        .expect("the fixture must contain a file record");
+
+    assert_eq!(
+        uri_list_reference(file),
+        Some("file:///fixtures/synthetic%20dir/report%20card.pdf")
+    );
+    assert!(file.missing_payload);
+    assert!(
+        file.capture
+            .content_flags
+            .contains(ContentFlags::MISSING_PAYLOAD)
+    );
+}
+
+#[test]
+fn raycast_record_without_a_source_path_gains_no_uri_list_reference() {
+    let records = parse_raycast(fixture("raycast/clipboard.json")).unwrap();
+    let image = records
+        .iter()
+        .find(|record| record.capture.kind == ContentKind::Image)
+        .expect("the fixture must contain an image record");
+
+    assert_eq!(uri_list_reference(image), None);
+}
+
+#[test]
+fn supercmd_keeps_only_an_absolute_source_url_as_a_uri_list_reference() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("clipboard.json");
+    fs::write(
+        &path,
+        br#"[{"copied_at":"2026-01-02T03:04:05Z","type":"file","file_url":"file:///fixtures/synthetic%20dir/report.pdf","has_image":false},
+             {"copied_at":"2026-01-02T03:05:05Z","type":"file","file_url":"nested/report.pdf","has_image":false}]"#,
+    )
+    .unwrap();
+
+    let records = parse_supercmd(root.path(), &path).unwrap();
+
+    assert_eq!(
+        uri_list_reference(&records[0]),
+        Some("file:///fixtures/synthetic%20dir/report.pdf")
+    );
+    // A relative reference points inside the export, not at a location the
+    // user could open later, so it is not a source reference.
+    assert_eq!(uri_list_reference(&records[1]), None);
+}
+
+#[test]
+fn a_source_reference_never_exceeds_the_writer_representation_limit() {
+    let raycast = parse_raycast(fixture("raycast/clipboard.json")).unwrap();
+    let supercmd = parse_supercmd(fixture("supercmd"), fixture("supercmd/clipboard.json")).unwrap();
+
+    for record in raycast.iter().chain(supercmd.iter()) {
+        assert!(
+            record.capture.representations.len()
+                <= clipboard_store::MAX_IMPORT_REPRESENTATIONS,
+            "{:?} produced {} representations",
+            record.capture.kind,
+            record.capture.representations.len()
+        );
+    }
+}
+
 #[test]
 fn maps_raycast_copy_count_and_missing_image() {
     let records = parse_raycast(fixture("raycast/clipboard.json")).unwrap();

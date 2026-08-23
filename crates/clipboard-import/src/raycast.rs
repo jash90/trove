@@ -20,7 +20,11 @@ thread_local! {
     static MAP_RECORD_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
-const MAX_RAYCAST_MAPPING_FIXED_BYTES: usize = 4 * 1024;
+// Per-record struct overhead for the mapped candidate. The source reference is
+// a percent-encoded transform of bytes already inside the record, so it stays
+// inside the threefold record allowance; only its own representation entry and
+// format identifier are new fixed cost.
+const MAX_RAYCAST_MAPPING_FIXED_BYTES: usize = 8 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -148,11 +152,26 @@ fn map_record(
     )
     .map_err(|_| record_failure(ImportSource::Raycast, index, "canonicalization_too_complex"))?;
     let representations = if missing_payload {
-        vec![RepresentationInput {
+        let mut representations = vec![RepresentationInput {
             format_id: primary_mime(kind).to_owned(),
             bytes: None,
             missing_ref: Some(format!("raycast-missing:{stable_reference}")),
-        }]
+        }];
+        // Keep where the item came from. Raycast records an absolute path that
+        // this importer will not read, but the interface can still name it and
+        // offer to reveal it.
+        if let Some(reference) = record
+            .file_path
+            .as_deref()
+            .and_then(crate::source_reference_uri)
+        {
+            representations.push(RepresentationInput {
+                format_id: "text/uri-list".to_owned(),
+                bytes: Some(reference.into_bytes()),
+                missing_ref: None,
+            });
+        }
+        representations
     } else {
         let text = record
             .text_content

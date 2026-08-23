@@ -16,5 +16,15 @@
     "applicationPath": "/Applications/Synthetic.app",
     "text": "",
     "imageHash": "synthetic-image-hash"
+  },
+  {
+    "createdAt": "2026-01-02T03:06:05Z",
+    "modifiedAt": "2026-01-02T03:06:05Z",
+    "category": "file",
+    "copyCount": 1,
+    "applicationPath": "/Applications/Synthetic.app",
+    "text": "report card.pdf",
+    "textContent": "",
+    "filePath": "/fixtures/synthetic dir/report card.pdf"
   }
 ]

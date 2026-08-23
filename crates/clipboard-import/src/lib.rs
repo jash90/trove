@@ -760,6 +760,50 @@ impl FramedHasher {
     }
 }
 
+/// Builds the `text/uri-list` reference kept alongside a file or image entry.
+///
+/// The importer never reads bytes from outside the selected export root, so a
+/// source path is metadata rather than a payload: it lets the interface show
+/// where the item came from and offer to reveal it. A value that already
+/// carries a scheme is kept verbatim; an absolute filesystem path becomes a
+/// `file:` URI. Anything relative points inside the export, not at a location
+/// the user could open later, so it yields no reference at all.
+pub(crate) fn source_reference_uri(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if has_uri_scheme(trimmed) {
+        return Some(trimmed.to_owned());
+    }
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let mut uri = String::with_capacity("file://".len() + trimmed.len());
+    uri.push_str("file://");
+    for byte in trimmed.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                uri.push(char::from(*byte));
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    Some(uri)
+}
+
+fn has_uri_scheme(value: &str) -> bool {
+    let Some(position) = value.find(':') else {
+        return false;
+    };
+    let scheme = &value[..position];
+    !scheme.is_empty()
+        && scheme.starts_with(|character: char| character.is_ascii_alphabetic())
+        && scheme.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+        })
+}
+
 pub(crate) fn source_metadata(application_path: Option<&str>) -> (Option<String>, Option<String>) {
     let Some(application_path) = application_path else {
         return (None, None);

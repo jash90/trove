@@ -671,11 +671,25 @@ fn map_record(
         })?
     };
     let representations = if matches!(kind, ContentKind::Image | ContentKind::File) {
-        vec![RepresentationInput {
+        let mut representations = vec![RepresentationInput {
             format_id: primary_mime(kind).to_owned(),
             bytes: image_bytes,
             missing_ref: missing_payload.then(|| format!("supercmd-missing:{stable_reference}")),
-        }]
+        }];
+        // SuperCmd already stores a URL here. Only an absolute one names a
+        // place outside the export that the user could open later.
+        if let Some(reference) = record
+            .file_url
+            .as_deref()
+            .and_then(crate::source_reference_uri)
+        {
+            representations.push(RepresentationInput {
+                format_id: "text/uri-list".to_owned(),
+                bytes: Some(reference.into_bytes()),
+                missing_ref: None,
+            });
+        }
+        representations
     } else {
         vec![RepresentationInput {
             format_id: primary_mime(kind).to_owned(),
