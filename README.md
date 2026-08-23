@@ -171,6 +171,42 @@ Skanowanie tylko obserwuje; o tym, czy blob naprawdę jest nieużywany, decyduje
 writer tuż przed usunięciem, bo między skanem a usunięciem import mógł zacząć go
 używać.
 
+## Wydajność przy dużej historii
+
+Historia jest nieograniczona, więc „czy to jeszcze działa przy milionie wpisów"
+jest bramką, nie ciekawostką. `tools/clipboard-bench` buduje syntetyczną historię
+z ziarna — nie czyta żadnych prawdziwych danych — i mierzy to, co użytkownik
+odczuwa.
+
+```bash
+cargo run --release -p clipboard-bench -- generate --data-dir data/bench-large --records 1000000 --seed 42
+cargo run --release -p clipboard-bench -- measure  --data-dir data/bench-large --queries 200
+```
+
+Pomiar z 23 sierpnia 2026, macOS na `aarch64-apple-darwin`, milion rekordów,
+baza 772 MB + 307 MB blobów:
+
+| Pomiar | Wynik | Budżet |
+|---|---|---|
+| Wyszukiwanie selektywne, p95 | 3,2 ms | 50 ms |
+| Wyszukiwanie selektywne z otwartym czytnikiem, p95 | 0,9 ms | — |
+| Pierwsza strona listy (od skrótu do wyników) | 2,8 ms | 100 ms |
+| Przewijanie: pierwsza strona → 400. strona | 2,6 ms → 3,4 ms | bez wzrostu |
+| Jeden ograniczony przebieg odzyskiwania blobów | 100–125 ms | ograniczony |
+| RSS aplikacji z bazą miliona rekordów | 131 MB (build debug) | 150 MB |
+| Zapis podczas generowania | ok. 499 rekordów/s | — |
+
+Przewijanie nie zwalnia z głębokością, bo paginacja idzie po kluczu
+`(captured_at_ms, event_id)`, a nie po rosnącym `OFFSET`.
+
+**Znany limit.** Zapytanie o słowo, które zawiera duża część historii, kosztuje
+setki milisekund — 811 ms p95 dla terminu pasującego do 600 tys. rekordów.
+Trafności nie da się ustalić bez policzenia punktacji dla każdego dopasowania.
+W syntetycznym zbiorze każdy rekord powstaje z dwunastowyrazowego słownika, więc
+nawet najrzadsze słowo trafia w 8% bazy; prawdziwa historia ma długi ogon słów i
+tego przypadku praktycznie nie produkuje. Budżet 50 ms jest dotrzymany dla
+zapytań selektywnych i **nie** jest dotrzymany dla terminów masowych.
+
 ## Prywatność
 
 - Treść schowka, zapytania i ścieżki nigdy nie trafiają do logów. Logi zawierają
@@ -192,5 +228,6 @@ crates/clipboard-import  parsery Raycast/SuperCmd, serwis importu
 crates/clipboard-images  miniatury z twardymi limitami
 src-tauri                cykl życia, IPC, uprawnienia
 tools/clipboard-import-cli  prywatny import i weryfikacja
+tools/clipboard-bench       syntetyczna historia i pomiary skali
 docs/superpowers         specyfikacja i plany wdrożenia
 ```
