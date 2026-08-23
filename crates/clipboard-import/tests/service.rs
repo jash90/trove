@@ -108,7 +108,7 @@ fn async_run_to_completion_yields_while_operation_admission_is_busy() {
     let export = tempfile::tempdir().unwrap();
     let database = tempfile::tempdir().unwrap();
     write_raycast_export(&export, &[raycast_record(0)]);
-    let service = ImportService::new(open_store(&database));
+    let service = ImportService::new(open_store(&database)).unwrap();
     let held_permit = clipboard_store::ImportOperationGate::process_wide()
         .acquire_blocking()
         .unwrap();
@@ -151,7 +151,7 @@ async fn reimport_is_idempotent_and_duplicate_source_rows_remain_distinct_events
     let duplicate = raycast_record(0);
     write_raycast_export(&export, &[duplicate.clone(), duplicate, raycast_record(1)]);
     let store = open_store(&database);
-    let service = ImportService::new(store.clone());
+    let service = ImportService::new(store.clone()).unwrap();
 
     let first = service.run_to_completion(export.path()).await.unwrap();
     let second = service.run_to_completion(export.path()).await.unwrap();
@@ -182,7 +182,7 @@ async fn parser_failure_in_the_middle_is_counted_once_and_later_candidates_impor
     invalid["copyCount"] = json!(0);
     write_raycast_export(&export, &[raycast_record(0), invalid, raycast_record(2)]);
     let store = open_store(&database);
-    let service = ImportService::new(store.clone());
+    let service = ImportService::new(store.clone()).unwrap();
 
     let analysis = service.analyze(export.path()).unwrap();
     let summary = service.run_to_completion(export.path()).await.unwrap();
@@ -242,7 +242,7 @@ async fn begin_consumes_the_exact_prepared_snapshot_once_without_reparsing() {
         })],
     );
     let store = open_store(&database);
-    let service = ImportService::new(store.clone());
+    let service = ImportService::new(store.clone()).unwrap();
     let analysis = service.analyze(export.path()).unwrap();
     fs::write(&image_path, b"changed after analysis").unwrap();
     let handle = service.begin(analysis.analysis_id).await.unwrap();
@@ -286,7 +286,8 @@ async fn aborted_begin_caller_cannot_cancel_durable_handoff_or_worker_startup() 
             persistence_started.clone(),
             persistence_gate.clone(),
         ),
-    );
+    )
+    .unwrap();
     let analysis = service.analyze(export.path()).unwrap();
 
     let caller_service = service.clone();
@@ -319,7 +320,8 @@ async fn persistence_failure_restores_the_exact_analysis_for_retry() {
     let service = ImportService::with_worker_policy(
         store.clone(),
         ImportWorkerPolicy::fail_next_persistence(),
-    );
+    )
+    .unwrap();
     let analysis = service.analyze(export.path()).unwrap();
 
     let error = service.begin(analysis.analysis_id).await.unwrap_err();
@@ -348,7 +350,7 @@ async fn durable_handoff_uses_the_writer_lease_without_a_post_commit_status_read
     let database = tempfile::tempdir().unwrap();
     write_raycast_export(&export, &[raycast_record(0)]);
     let store = open_store(&database);
-    let service = ImportService::new(store.clone());
+    let service = ImportService::new(store.clone()).unwrap();
     let analysis = service.analyze(export.path()).unwrap();
 
     store.set_import_status_available_for_test(false);
@@ -369,7 +371,8 @@ async fn invalid_post_commit_offset_restores_the_exact_analysis_for_retry() {
     let service = ImportService::with_worker_policy(
         store.clone(),
         ImportWorkerPolicy::invalid_lease_offset_once(),
-    );
+    )
+    .unwrap();
     let analysis = service.analyze(export.path()).unwrap();
 
     let error = service.begin(analysis.analysis_id).await.unwrap_err();
@@ -397,7 +400,8 @@ async fn terminal_existing_run_returns_its_known_handle_without_starting_a_worke
     let service = ImportService::with_worker_policy(
         store.clone(),
         ImportWorkerPolicy::invalid_lease_offset_once(),
-    );
+    )
+    .unwrap();
     let analysis = service.analyze(export.path()).unwrap();
     service.begin(analysis.analysis_id).await.unwrap_err();
     store
@@ -429,7 +433,8 @@ async fn concurrent_begin_and_lost_response_retries_share_one_persisted_run() {
             persistence_started.clone(),
             persistence_gate.clone(),
         ),
-    );
+    )
+    .unwrap();
     let analysis = service.analyze(export.path()).unwrap();
 
     let first_service = service.clone();
@@ -468,7 +473,7 @@ fn oversized_manifest_is_rejected_before_reading_with_a_path_free_error() {
     file.set_len((MAX_IMPORT_MANIFEST_BYTES as u64) + 1)
         .unwrap();
     let database = tempfile::tempdir().unwrap();
-    let service = ImportService::new(open_store(&database));
+    let service = ImportService::new(open_store(&database)).unwrap();
 
     let error = service.analyze(export.path()).unwrap_err();
 
@@ -506,7 +511,7 @@ async fn oversized_auxiliary_payload_becomes_a_missing_representation_without_ab
     );
     let database = tempfile::tempdir().unwrap();
     let store = open_store(&database);
-    let service = ImportService::new(store.clone());
+    let service = ImportService::new(store.clone()).unwrap();
 
     let analysis = service.analyze(export.path()).unwrap();
     assert_eq!(
@@ -537,7 +542,7 @@ async fn discarded_analysis_cannot_start_and_does_not_disclose_its_token_or_path
     let export = tempfile::tempdir().unwrap();
     let database = tempfile::tempdir().unwrap();
     write_raycast_export(&export, &[raycast_record(0)]);
-    let service = ImportService::new(open_store(&database));
+    let service = ImportService::new(open_store(&database)).unwrap();
     let analysis = service.analyze(export.path()).unwrap();
 
     service.discard_analysis(analysis.analysis_id).unwrap();
@@ -571,7 +576,7 @@ async fn begin_returns_a_handle_and_status_survives_reopening_after_completion()
     let database = tempfile::tempdir().unwrap();
     write_raycast_export(&export, &[raycast_record(0), raycast_record(1)]);
     let store = open_store(&database);
-    let service = ImportService::new(store.clone());
+    let service = ImportService::new(store.clone()).unwrap();
 
     let handle = begin_analyzed(&service, export.path()).await;
     wait_for_terminal(&service, handle.run_id).await;
@@ -622,7 +627,7 @@ async fn begin_returns_a_handle_and_status_survives_reopening_after_completion()
     drop(service);
     drop(store);
 
-    let reopened = ImportService::new(open_store(&database));
+    let reopened = ImportService::new(open_store(&database)).unwrap();
     let persisted = reopened.status(handle.run_id).unwrap();
     assert_eq!(persisted, terminal);
 }
@@ -637,7 +642,8 @@ async fn interrupted_first_batch_resumes_after_reopen_without_duplicate_events()
     let service = ImportService::with_worker_policy(
         store.clone(),
         ImportWorkerPolicy::interrupt_after_batches(1),
-    );
+    )
+    .unwrap();
 
     let handle = begin_analyzed(&service, export.path()).await;
     wait_for_processed(&service, handle.run_id, IMPORT_BATCH_SIZE as u64).await;
@@ -658,7 +664,7 @@ async fn interrupted_first_batch_resumes_after_reopen_without_duplicate_events()
     drop(store);
 
     let reopened_store = open_store(&database);
-    let reopened = ImportService::new(reopened_store.clone());
+    let reopened = ImportService::new(reopened_store.clone()).unwrap();
     reopened.resume(handle.run_id, export.path()).await.unwrap();
     wait_for_terminal(&reopened, handle.run_id).await;
     let completed = reopened.status(handle.run_id).unwrap();
@@ -679,7 +685,8 @@ async fn resume_rejects_a_changed_manifest_without_mutating_the_run_or_persistin
     let service = ImportService::with_worker_policy(
         store.clone(),
         ImportWorkerPolicy::interrupt_after_batches(1),
-    );
+    )
+    .unwrap();
     let handle = begin_analyzed(&service, export.path()).await;
     wait_for_processed(&service, handle.run_id, 250).await;
     let before = service.status(handle.run_id).unwrap();
@@ -731,7 +738,8 @@ async fn resume_rejects_changed_auxiliary_image_bytes_without_mutating_the_run()
     let service = ImportService::with_worker_policy(
         store.clone(),
         ImportWorkerPolicy::interrupt_after_batches(1),
-    );
+    )
+    .unwrap();
     let handle = begin_analyzed(&service, export.path()).await;
     wait_for_processed(&service, handle.run_id, IMPORT_BATCH_SIZE as u64).await;
     let before = service.status(handle.run_id).unwrap();
@@ -741,7 +749,7 @@ async fn resume_rejects_changed_auxiliary_image_bytes_without_mutating_the_run()
 
     fs::write(&image_path, b"image bytes changed after checkpoint").unwrap();
     let reopened_store = open_store(&database);
-    let reopened = ImportService::new(reopened_store.clone());
+    let reopened = ImportService::new(reopened_store.clone()).unwrap();
     let error = reopened
         .resume(handle.run_id, export.path())
         .await
@@ -770,7 +778,8 @@ async fn resume_rejects_an_auxiliary_image_becoming_available_after_checkpoint()
     let service = ImportService::with_worker_policy(
         store.clone(),
         ImportWorkerPolicy::interrupt_after_batches(1),
-    );
+    )
+    .unwrap();
     let handle = begin_analyzed(&service, export.path()).await;
     wait_for_processed(&service, handle.run_id, IMPORT_BATCH_SIZE as u64).await;
     let before = service.status(handle.run_id).unwrap();
@@ -784,7 +793,7 @@ async fn resume_rejects_an_auxiliary_image_becoming_available_after_checkpoint()
     )
     .unwrap();
     let reopened_store = open_store(&database);
-    let reopened = ImportService::new(reopened_store.clone());
+    let reopened = ImportService::new(reopened_store.clone()).unwrap();
     let error = reopened
         .resume(handle.run_id, export.path())
         .await
@@ -813,7 +822,8 @@ async fn overlapping_resumes_supersede_the_stale_worker_without_failing_the_run(
     let initial = ImportService::with_worker_policy(
         store.clone(),
         ImportWorkerPolicy::interrupt_after_batches(1),
-    );
+    )
+    .unwrap();
     let handle = begin_analyzed(&initial, export.path()).await;
     wait_for_processed(&initial, handle.run_id, 250).await;
 
@@ -822,13 +832,15 @@ async fn overlapping_resumes_supersede_the_stale_worker_without_failing_the_run(
     let stale = ImportService::with_worker_policy(
         store.clone(),
         ImportWorkerPolicy::wait_before_work(start_gate.clone(), stale_finished.clone()),
-    );
+    )
+    .unwrap();
     stale.resume(handle.run_id, export.path()).await.unwrap();
 
     let advancing = ImportService::with_worker_policy(
         store.clone(),
         ImportWorkerPolicy::interrupt_after_batches(1),
-    );
+    )
+    .unwrap();
     advancing
         .resume(handle.run_id, export.path())
         .await
@@ -842,7 +854,7 @@ async fn overlapping_resumes_supersede_the_stale_worker_without_failing_the_run(
     assert_eq!(after_stale_worker.processed, 500);
     assert_eq!(after_stale_worker.error_code, None);
 
-    let finisher = ImportService::new(store.clone());
+    let finisher = ImportService::new(store.clone()).unwrap();
     finisher.resume(handle.run_id, export.path()).await.unwrap();
     wait_for_terminal(&finisher, handle.run_id).await;
     let completed = finisher.status(handle.run_id).unwrap();
@@ -883,7 +895,7 @@ async fn missing_raycast_and_supercmd_payloads_are_preserved_as_missing_content(
         })],
     );
     let store = open_store(&database);
-    let service = ImportService::new(store.clone());
+    let service = ImportService::new(store.clone()).unwrap();
 
     let raycast_summary = service.run_to_completion(raycast.path()).await.unwrap();
     let supercmd_summary = service.run_to_completion(supercmd.path()).await.unwrap();
@@ -951,7 +963,7 @@ async fn ocr_is_search_only_and_combines_with_primary_text_without_replacing_pay
         ],
     );
     let store = open_store(&database);
-    let service = ImportService::new(store.clone());
+    let service = ImportService::new(store.clone()).unwrap();
 
     service.run_to_completion(export.path()).await.unwrap();
 
@@ -1017,7 +1029,7 @@ async fn equal_primary_payloads_accumulate_distinct_ocr_derivations() {
         ],
     );
     let store = open_store(&database);
-    let service = ImportService::new(store.clone());
+    let service = ImportService::new(store.clone()).unwrap();
 
     service.run_to_completion(export.path()).await.unwrap();
 
@@ -1066,7 +1078,7 @@ async fn matching_live_ingest_preserves_imported_ocr_without_duplicate_growth() 
         })],
     );
     let store = open_store(&database);
-    let service = ImportService::new(store.clone());
+    let service = ImportService::new(store.clone()).unwrap();
     service.run_to_completion(export.path()).await.unwrap();
 
     let live = CaptureInput {
@@ -1120,7 +1132,7 @@ async fn import_preserves_original_application_path_but_live_ingest_writes_null(
     let database = tempfile::tempdir().unwrap();
     write_raycast_export(&export, &[raycast_record(0)]);
     let store = open_store(&database);
-    let service = ImportService::new(store.clone());
+    let service = ImportService::new(store.clone()).unwrap();
     service.run_to_completion(export.path()).await.unwrap();
 
     store
@@ -1176,7 +1188,7 @@ async fn do_not_index_remains_authoritative_over_imported_ocr() {
         })],
     );
     let store = open_store(&database);
-    let service = ImportService::new(store.clone());
+    let service = ImportService::new(store.clone()).unwrap();
 
     let summary = service.run_to_completion(export.path()).await.unwrap();
 

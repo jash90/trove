@@ -153,7 +153,7 @@ pub struct StoreStats {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub enum StoredPayload {
+pub(crate) enum StoredPayload {
     Inline(Vec<u8>),
     InlineZstd(Vec<u8>),
     Cas {
@@ -1905,7 +1905,7 @@ fn stored_representations<'a>(
                 format_id: representation.format_id.as_str(),
                 raw_digest: *blake3::hash(bytes).as_bytes(),
                 original_byte_size: bytes.len() as u64,
-                payload: PreparedPayload::Stored(classify_payload_with_compressor(
+                payload: PreparedPayload::Stored(classify_payload(
                     input.kind,
                     bytes,
                     cas,
@@ -1936,27 +1936,7 @@ fn stored_representations<'a>(
     Ok(stored)
 }
 
-pub fn classify_payload(
-    kind: ContentKind,
-    bytes: &[u8],
-    cas: &CasStore,
-) -> Result<StoredPayload, StoreError> {
-    if !matches!(kind, ContentKind::Image | ContentKind::File)
-        && (MAX_INLINE_PAYLOAD_BYTES..=MAX_INLINE_ZSTD_PAYLOAD_BYTES).contains(&bytes.len())
-    {
-        let mut compressor = bounded_zstd_compressor()?;
-        let payload = classify_payload_with_compressor(kind, bytes, cas, Some(&mut compressor))?;
-        if compressor.context_mut().sizeof() > MAX_IMPORT_ZSTD_CODEC_BYTES {
-            return Err(payload_compression_error(
-                "zstd context exceeded its approved bound",
-            ));
-        }
-        return Ok(payload);
-    }
-    classify_payload_with_compressor(kind, bytes, cas, None)
-}
-
-fn classify_payload_with_compressor(
+pub(crate) fn classify_payload(
     kind: ContentKind,
     bytes: &[u8],
     cas: &CasStore,
@@ -2317,12 +2297,12 @@ mod tests {
     #[cfg(unix)]
     use rusqlite::Connection;
 
-    use super::normalized_text;
     #[cfg(unix)]
     use super::{
-        BeginImportRun, CasError, CasStore, ImportSourceKind, StoreError, StoreImportCandidate,
-        WriteCommand, begin_import, import_batch, read_import_status,
+        BeginImportRun, CasError, ImportSourceKind, StoreError, StoreImportCandidate, WriteCommand,
+        begin_import, import_batch, read_import_status,
     };
+    use super::{CasStore, StoredPayload, classify_payload, normalized_text};
 
     #[test]
     fn ocr_only_search_uses_the_raw_utf8_prefix_before_normalization() {
@@ -2350,6 +2330,33 @@ mod tests {
         let normalized = normalized_text(&capture, None, Some(&ocr));
 
         assert_eq!(normalized.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn payload_classifier_preserves_the_three_storage_tiers() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = CasStore::new(directory.path().join("synthetic-blobs"));
+        let moderately_large = (0..8_192).map(|value| value as u8).collect::<Vec<_>>();
+        let mut compressor = super::bounded_zstd_compressor().unwrap();
+
+        assert!(matches!(
+            classify_payload(ContentKind::Text, b"small", &cas, None).unwrap(),
+            StoredPayload::Inline(_)
+        ));
+        assert!(matches!(
+            classify_payload(
+                ContentKind::Text,
+                &moderately_large,
+                &cas,
+                Some(&mut compressor)
+            )
+            .unwrap(),
+            StoredPayload::InlineZstd(_)
+        ));
+        assert!(matches!(
+            classify_payload(ContentKind::Image, b"image", &cas, None).unwrap(),
+            StoredPayload::Cas { .. }
+        ));
     }
 
     #[test]

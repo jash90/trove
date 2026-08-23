@@ -1,4 +1,7 @@
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::{
+    mem::{align_of, size_of},
+    sync::{Arc, Condvar, Mutex, OnceLock},
+};
 
 use thiserror::Error;
 
@@ -27,6 +30,13 @@ struct ImportOperationGateInner {
     active_bytes: Mutex<usize>,
     released: Condvar,
 }
+
+/// Conservative allocation bound for the single process-wide operation-gate `Arc` payload,
+/// including the strong/weak counters and worst-case payload alignment padding.
+#[doc(hidden)]
+pub const IMPORT_OPERATION_GATE_CONTROL_BYTES: usize = 2 * size_of::<usize>()
+    + (align_of::<ImportOperationGateInner>() - 1)
+    + size_of::<ImportOperationGateInner>();
 
 impl ImportOperationGate {
     pub fn process_wide() -> Self {

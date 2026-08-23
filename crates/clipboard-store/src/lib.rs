@@ -1,5 +1,15 @@
 #![forbid(unsafe_code)]
 
+//! Low-level payload classification is deliberately not a public admission bypass.
+//!
+//! ```compile_fail
+//! use clipboard_store::classify_payload;
+//! ```
+//!
+//! ```compile_fail
+//! use clipboard_store::StoredPayload;
+//! ```
+
 mod boundary;
 mod cas;
 mod config;
@@ -15,7 +25,8 @@ pub use cas::{
 };
 pub use config::StoreConfig;
 pub use import_operation::{
-    ImportOperationError, ImportOperationGate, ImportOperationPermit, MAX_IMPORT_OPERATION_BYTES,
+    IMPORT_OPERATION_GATE_CONTROL_BYTES, ImportOperationError, ImportOperationGate,
+    ImportOperationPermit, MAX_IMPORT_OPERATION_BYTES,
 };
 pub use migrations::migrations;
 pub use reader::ReadOnlyStore;
@@ -25,5 +36,5 @@ pub use writer::{
     MAX_IMPORT_WRITER_SCRATCH_BYTES, MAX_PREVIEW_BYTES, MAX_SEARCH_DERIVATION_BYTES,
     MAX_SEARCH_DERIVATIONS_PER_CONTENT, MAX_SEARCH_DOCUMENT_BYTES, MAX_STORE_READERS,
     ResumeImportRun, StoreError, StoreHandle, StoreImportCandidate, StoreImportRunState,
-    StoreImportRunStatus, StoreStats, StoredPayload, WRITER_QUEUE_CAPACITY, classify_payload,
+    StoreImportRunStatus, StoreStats, WRITER_QUEUE_CAPACITY,
 };

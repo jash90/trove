@@ -193,7 +193,7 @@ async fn import(
     let paths = prepare_import_paths(source, data_dir)?;
     let store = StoreHandle::open(paths.store_config()).map_err(store_failure)?;
     path_policy::verify_created_storage(&paths)?;
-    let service = ImportService::new(store);
+    let service = ImportService::new(store).map_err(import_failure)?;
     let summary = service
         .run_to_completion(&paths.source)
         .await

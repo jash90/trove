@@ -4,10 +4,9 @@ use std::{
     thread,
 };
 
-use clipboard_core::ContentKind;
 use clipboard_store::{
     CasBlob, CasError, CasStore, GcStepBudget, ReadOnlyStore, StorageBoundaryLease, StoreConfig,
-    StoreError, StoreHandle, classify_payload,
+    StoreError, StoreHandle,
 };
 
 fn test_cas() -> (tempfile::TempDir, CasStore) {
@@ -202,25 +201,6 @@ fn gc_session_preserves_uncertain_corrupt_blobs() {
         .complete
     {}
     assert!(cas.root().join(blob.relpath).exists());
-}
-
-#[test]
-fn payload_classifier_uses_the_three_storage_tiers() {
-    let (_directory, cas) = test_cas();
-    let moderately_large = (0..8_192).map(|value| value as u8).collect::<Vec<_>>();
-
-    assert!(matches!(
-        classify_payload(ContentKind::Text, b"small", &cas).unwrap(),
-        clipboard_store::StoredPayload::Inline(_)
-    ));
-    assert!(matches!(
-        classify_payload(ContentKind::Text, &moderately_large, &cas).unwrap(),
-        clipboard_store::StoredPayload::InlineZstd(_)
-    ));
-    assert!(matches!(
-        classify_payload(ContentKind::Image, b"image", &cas).unwrap(),
-        clipboard_store::StoredPayload::Cas { .. }
-    ));
 }
 
 #[cfg(unix)]
