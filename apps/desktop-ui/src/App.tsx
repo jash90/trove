@@ -9,7 +9,6 @@ import {
 import { ActionBar } from './components/ActionBar';
 import { ImportWizard } from './components/ImportWizard';
 import { SettingsPanel } from './components/SettingsPanel';
-import { FilterRail } from './components/FilterRail';
 import { PaletteHeader } from './components/PaletteHeader';
 import { PaletteWorkspace } from './components/PaletteWorkspace';
 import { useHistoryActions } from './hooks/useHistoryActions';
@@ -58,8 +57,6 @@ const ClipboardPalette = (): React.JSX.Element => {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
   const [workspace, setWorkspace] = useState<'none' | 'import' | 'settings'>('none');
-  const importButtonRef = useRef<HTMLButtonElement>(null);
-  const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const focusSearch = (): void => searchInputRef.current?.focus();
   useEffect(() => {
     searchInputRef.current?.focus();
@@ -92,12 +89,12 @@ const ClipboardPalette = (): React.JSX.Element => {
 
   const modalOpen = actions.deleteTargetId !== null || workspace !== 'none';
 
-  // Only one workspace at a time, and the invoker gets focus back so keyboard
-  // users are not dropped at the top of the document when a dialog closes.
+  // Only one workspace at a time. Focus returns to the search field rather
+  // than to whatever opened the dialog: the palette has one place a keyboard
+  // user works from, and a shortcut has no button to go back to.
   const closeWorkspace = (): void => {
-    const invoker = workspace === 'import' ? importButtonRef : settingsButtonRef;
     setWorkspace('none');
-    queueMicrotask(() => invoker.current?.focus());
+    queueMicrotask(focusSearch);
   };
 
   const handleSelect = (eventId: number): void => {
@@ -128,14 +125,22 @@ const ClipboardPalette = (): React.JSX.Element => {
     if (navigation.selectedId !== null) actions.requestDelete(navigation.selectedId);
   };
   const handlePaletteKeyDown: KeyboardEventHandler<HTMLElement> = (event) => {
-    if (
-      shortcutIsBlocked(event, modalOpen) ||
-      navigation.selectedId === null
-    ) {
-      return;
-    }
+    if (shortcutIsBlocked(event, modalOpen)) return;
     const key = event.key.toLocaleLowerCase('en-US');
     const primaryModifier = event.metaKey || event.ctrlKey;
+    // These two open a dialog rather than act on a row, so they work with an
+    // empty history — which is exactly when someone reaches for the importer.
+    if (primaryModifier && !event.shiftKey && key === 'i') {
+      event.preventDefault();
+      setWorkspace('import');
+      return;
+    }
+    if (primaryModifier && !event.shiftKey && key === ',') {
+      event.preventDefault();
+      setWorkspace('settings');
+      return;
+    }
+    if (navigation.selectedId === null) return;
     if (primaryModifier && !event.shiftKey && key === 'c') {
       event.preventDefault();
       handleCopy();
@@ -189,14 +194,9 @@ const ClipboardPalette = (): React.JSX.Element => {
           resultCount={actions.visibleItems.length}
           resultsTruncated={actions.visibleItems.length >= HISTORY_PAGE_SIZE}
           searchInputRef={searchInputRef}
-          importButtonRef={importButtonRef}
-          settingsButtonRef={settingsButtonRef}
           onQueryChange={handleQueryChange}
           onKeyDown={handleSearchKeyDown}
-          onOpenImport={() => setWorkspace('import')}
-          onOpenSettings={() => setWorkspace('settings')}
         />
-        <FilterRail query={query} onQueryChange={handleQueryChange} />
         <PaletteWorkspace
           status={status}
           items={actions.visibleItems}
@@ -227,7 +227,26 @@ const ClipboardPalette = (): React.JSX.Element => {
         ) : null}
         <footer className="palette-footer">
           <span>↵ wklej · ⌘C kopiuj · ⌘⇧V zwykły tekst · ⌘⇧Space przywołaj</span>
-          <span className="palette-footer__privacy">Tylko na tym urządzeniu</span>
+          {/* Out of the way but still visible: a shortcut nobody was told about
+              is the same as no way in. */}
+          <span className="palette-footer__entries">
+            <button
+              type="button"
+              className="footer-action"
+              aria-label="Importuj archiwum"
+              onClick={() => setWorkspace('import')}
+            >
+              Import <kbd>⌘I</kbd>
+            </button>
+            <button
+              type="button"
+              className="footer-action"
+              aria-label="Otwórz ustawienia"
+              onClick={() => setWorkspace('settings')}
+            >
+              Ustawienia <kbd>⌘,</kbd>
+            </button>
+          </span>
         </footer>
       </section>
       {workspace === 'import' ? (

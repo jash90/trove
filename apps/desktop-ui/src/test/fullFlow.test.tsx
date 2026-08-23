@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import axe from 'axe-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -8,6 +8,15 @@ import { App } from '../App';
 import { SYNTHETIC_HISTORY_ITEMS } from '../lib/fixtures';
 import { mockGateway } from '../lib/mockGateway';
 
+/// The history rows, and only those.
+///
+/// The type filter beside the search field is a combobox, and its choices are
+/// options too. An unscoped option query matches both, so a test can pass
+/// while the list it meant to inspect has not loaded at all.
+const historyList = () =>
+  within(screen.getByRole('listbox', { name: 'Wyniki historii schowka' }));
+
+
 /**
  * These run the real components against the same synthetic gateway the browser
  * preview uses. Nothing here touches a database, a native command, or any real
@@ -15,7 +24,7 @@ import { mockGateway } from '../lib/mockGateway';
  */
 
 const settle = async (): Promise<void> => {
-  await waitFor(() => expect(screen.getAllByRole('option').length).toBeGreaterThan(0), {
+  await waitFor(() => expect(historyList().getAllByRole('option').length).toBeGreaterThan(0), {
     timeout: 2_000,
   });
 };
@@ -37,10 +46,10 @@ describe('the palette end to end', () => {
     await settle();
 
     await user.type(screen.getByRole('searchbox'), 'project note');
-    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(1));
+    await waitFor(() => expect(historyList().getAllByRole('option')).toHaveLength(1));
 
     await user.keyboard('{ArrowDown}');
-    const selected = screen.getByRole('option', { selected: true });
+    const selected = historyList().getByRole('option', { selected: true });
     expect(selected).toHaveAttribute('data-event-id', String(SYNTHETIC_HISTORY_ITEMS[0].eventId));
 
     await user.keyboard('{Meta>}p{/Meta}');
@@ -58,7 +67,7 @@ describe('the palette end to end', () => {
     await settle();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('option', { name: /raport-syntetyczny\.pdf/ }));
+    await user.click(historyList().getByRole('option', { name: /raport-syntetyczny\.pdf/ }));
 
     expect(await screen.findByText('Lokalizacja źródłowa')).toBeVisible();
     expect(

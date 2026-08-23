@@ -1,7 +1,8 @@
-import { Clipboard, Import, Search, Settings } from 'lucide-react';
+import { Search } from 'lucide-react';
 import type { ChangeEventHandler, KeyboardEventHandler, Ref } from 'react';
 
 import { formatCount } from '../lib/format';
+import { TypeFilter } from './TypeFilter';
 
 interface PaletteHeaderProps {
   query: string;
@@ -10,26 +11,24 @@ interface PaletteHeaderProps {
   /** True when the list is full, so more entries match than are shown. */
   resultsTruncated: boolean;
   searchInputRef?: Ref<HTMLInputElement>;
-  importButtonRef?: Ref<HTMLButtonElement>;
-  settingsButtonRef?: Ref<HTMLButtonElement>;
   onQueryChange: (query: string) => void;
   onKeyDown: KeyboardEventHandler<HTMLInputElement>;
-  onOpenImport: () => void;
-  onOpenSettings: () => void;
 }
 
+/// The whole top of the palette: one row.
+///
+/// It used to carry a title, a logo, a static "listening" badge and two
+/// buttons above the search field. None of it was ever read twice, and all of
+/// it pushed the results down. What a person summons a clipboard palette for
+/// is the field and the list, so that is what the top is now.
 export const PaletteHeader = ({
   query,
   selectedId,
   resultCount,
   resultsTruncated,
   searchInputRef,
-  importButtonRef,
-  settingsButtonRef,
   onQueryChange,
   onKeyDown,
-  onOpenImport,
-  onOpenSettings,
 }: PaletteHeaderProps): React.JSX.Element => {
   const handleChange: ChangeEventHandler<HTMLInputElement> = (event) => {
     onQueryChange(event.currentTarget.value);
@@ -37,41 +36,6 @@ export const PaletteHeader = ({
 
   return (
     <header className="palette-header">
-      <div className="palette-header__masthead">
-        <h1 className="palette-header__title">
-          <span className="palette-header__mark" aria-hidden="true">
-            <Clipboard size={15} strokeWidth={1.8} />
-          </span>
-          Historia schowka
-        </h1>
-        <div className="palette-header__tools">
-          <div className="capture-status" aria-label="Monitoring schowka aktywny">
-            <span className="capture-status__dot" aria-hidden="true" />
-            Nasłuch
-          </div>
-          <button
-            ref={importButtonRef}
-            type="button"
-            className="header-action"
-            aria-label="Importuj archiwum"
-            onClick={onOpenImport}
-          >
-            <Import size={15} aria-hidden="true" />
-            <span>Import</span>
-          </button>
-          <button
-            ref={settingsButtonRef}
-            type="button"
-            className="header-action"
-            aria-label="Otwórz ustawienia"
-            onClick={onOpenSettings}
-          >
-            <Settings size={15} aria-hidden="true" />
-            <span>Ustawienia</span>
-          </button>
-        </div>
-      </div>
-
       <label className="search-field" htmlFor="history-search">
         <Search className="search-field__icon" size={19} strokeWidth={1.8} aria-hidden="true" />
         <span className="sr-only">Przeszukaj historię</span>
@@ -99,8 +63,7 @@ export const PaletteHeader = ({
           {resultsTruncated ? '+' : ''}
         </span>
       </label>
-
-
+      <TypeFilter query={query} onQueryChange={onQueryChange} />
     </header>
   );
 };

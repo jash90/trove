@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -19,6 +19,15 @@ import {
 import { thumbnailDataUrl } from '../lib/format';
 import type { ClipboardGateway } from '../lib/gateway';
 import { PreviewPane } from './PreviewPane';
+
+/// The history rows, and only those.
+///
+/// The type filter beside the search field is a combobox, and its choices are
+/// options too. An unscoped option query matches both, so a test can pass
+/// while the list it meant to inspect has not loaded at all.
+const historyList = () =>
+  within(screen.getByRole('listbox', { name: 'Wyniki historii schowka' }));
+
 
 const makeItem = (eventId: number, overrides: Partial<HistoryItem> = {}): HistoryItem => ({
   eventId,
@@ -136,7 +145,7 @@ const settleInitialSearch = async (): Promise<void> => {
 /// selection it is trying to replace, and passes or fails by machine load.
 const settleFirstSelection = async (): Promise<void> => {
   await waitFor(() => {
-    expect(screen.getByRole('option', { name: /Synthetic item 1/ })).toHaveAttribute(
+    expect(historyList().getByRole('option', { name: /Synthetic item 1/ })).toHaveAttribute(
       'aria-selected',
       'true',
     );
@@ -233,7 +242,7 @@ describe('selected preview sequencing', () => {
     await settleFirstSelection();
 
     await act(async () => {
-      screen.getByRole('option', { name: /Synthetic item 2/ }).click();
+      historyList().getByRole('option', { name: /Synthetic item 2/ }).click();
     });
     await act(async () => {
       second.resolve(makePreview(2, { text: 'Newest selected preview' }));
@@ -265,7 +274,7 @@ describe('selected preview sequencing', () => {
     await settleFirstSelection();
 
     await act(async () => {
-      screen.getByRole('option', { name: /Synthetic item 2/ }).click();
+      historyList().getByRole('option', { name: /Synthetic item 2/ }).click();
       second.resolve({ mimeType: 'image/png', base64: 'bmV3' });
     });
     expect(await screen.findByRole('img', { name: 'Podgląd obrazu ze schowka' })).toHaveAttribute(
@@ -475,9 +484,9 @@ describe('history actions', () => {
     await user.click(screen.getByRole('button', { name: 'Usuń wpis bezpowrotnie' }));
 
     await waitFor(() => {
-      expect(screen.queryByRole('option', { name: /Synthetic item 1/ })).not.toBeInTheDocument();
+      expect(historyList().queryByRole('option', { name: /Synthetic item 1/ })).not.toBeInTheDocument();
     });
-    expect(screen.getByRole('option', { selected: true })).toHaveAttribute('data-event-id', '2');
+    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute('data-event-id', '2');
 
     await user.keyboard('{Enter}');
     expect(copyEvent).toHaveBeenLastCalledWith(2, false, true);
@@ -550,7 +559,7 @@ describe('history actions', () => {
     // A row must be selected: the palette only proposes a deletion when there
     // is something to delete, which is exactly the state the user is in while
     // typing a query over a populated list.
-    await user.click(screen.getByRole('option', { name: /Synthetic item 1/ }));
+    await user.click(historyList().getByRole('option', { name: /Synthetic item 1/ }));
     const search = screen.getByRole('searchbox');
     await user.click(search);
     await user.type(search, 'abc');
@@ -566,7 +575,7 @@ describe('history actions', () => {
     render(<App gateway={makeGateway([makeItem(1), makeItem(2)])} />);
     await settleInitialSearch();
 
-    await user.click(screen.getByRole('option', { name: /Synthetic item 1/ }));
+    await user.click(historyList().getByRole('option', { name: /Synthetic item 1/ }));
     await user.click(screen.getByRole('button', { name: 'Usuń wpis' }));
 
     expect(screen.getByRole('dialog', { name: 'Usunąć wpis z historii?' })).toBeVisible();

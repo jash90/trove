@@ -21,3 +21,6 @@ target/
 .env
 .env.*
 !.env.example
+
+# Local browser-automation output (screenshots, snapshots, console logs)
+.playwright-mcp/

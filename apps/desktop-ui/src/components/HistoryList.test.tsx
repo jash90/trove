@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState, type KeyboardEventHandler } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -8,8 +8,17 @@ import { App } from '../App';
 import { useKeyboardNavigation } from '../hooks/useKeyboardNavigation';
 import type { HistoryItem, HistoryPage } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
-import { FilterRail } from './FilterRail';
+import { TypeFilter } from './TypeFilter';
 import { HistoryList } from './HistoryList';
+
+/// The history rows, and only those.
+///
+/// The type filter beside the search field is a combobox, and its choices are
+/// options too. An unscoped option query matches both, so a test can pass
+/// while the list it meant to inspect has not loaded at all.
+const historyList = () =>
+  within(screen.getByRole('listbox', { name: 'Wyniki historii schowka' }));
+
 
 const makeItems = (count: number, startAt = 1): HistoryItem[] =>
   Array.from({ length: count }, (_, index) => {
@@ -106,7 +115,7 @@ describe('HistoryList', () => {
       />,
     );
 
-    expect(screen.getAllByRole('option').length).toBeLessThan(80);
+    expect(historyList().getAllByRole('option').length).toBeLessThan(80);
   });
 
   it('exposes listbox options with stable event identity and no nested buttons', () => {
@@ -120,7 +129,7 @@ describe('HistoryList', () => {
     );
 
     const listbox = screen.getByRole('listbox', { name: 'Wyniki historii schowka' });
-    const selectedOption = screen.getByRole('option', { selected: true });
+    const selectedOption = historyList().getByRole('option', { selected: true });
 
     expect(listbox).toContainElement(selectedOption);
     expect(selectedOption).toHaveAttribute('data-event-id', '2');
@@ -138,7 +147,7 @@ describe('HistoryList', () => {
 
     await user.keyboard('{ArrowDown}{Enter}');
 
-    expect(screen.getByRole('option', { selected: true })).toHaveAttribute(
+    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
       'data-event-id',
       '2',
     );
@@ -152,13 +161,13 @@ describe('HistoryList', () => {
 
     const input = screen.getByRole('textbox', { name: 'Przeszukaj historię' });
     await user.keyboard('{End}{ArrowUp}');
-    expect(screen.getByRole('option', { selected: true })).toHaveAttribute(
+    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
       'data-event-id',
       '3',
     );
 
     await user.keyboard('{Home}{Escape}');
-    expect(screen.getByRole('option', { selected: true })).toHaveAttribute(
+    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
       'data-event-id',
       '1',
     );
@@ -174,7 +183,7 @@ describe('HistoryList', () => {
 
     rerender(<KeyboardHarness items={makeItems(2, 20)} onActivate={onActivate} />);
 
-    expect(screen.getByRole('option', { selected: true })).toHaveAttribute(
+    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
       'data-event-id',
       '20',
     );
@@ -188,14 +197,14 @@ describe('HistoryList', () => {
     );
 
     await user.keyboard('{ArrowDown}');
-    expect(screen.getByRole('option', { selected: true })).toHaveAttribute(
+    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
       'data-event-id',
       '2',
     );
 
     rerender(<KeyboardHarness items={makeItems(2, 3)} onActivate={onActivate} />);
     await waitFor(() => {
-      expect(screen.getByRole('option', { selected: true })).toHaveAttribute(
+      expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
         'data-event-id',
         '3',
       );
@@ -207,14 +216,14 @@ describe('HistoryList', () => {
         onActivate={onActivate}
       />,
     );
-    expect(screen.getByRole('option', { selected: true })).toHaveAttribute(
+    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
       'data-event-id',
       '3',
     );
   });
 });
 
-describe('FilterRail', () => {
+describe('TypeFilter', () => {
   it.each([
     ['Tekst', 'roadmap app:Editor type:text'],
     ['Linki', 'roadmap app:Editor type:link'],
@@ -226,13 +235,13 @@ describe('FilterRail', () => {
     const user = userEvent.setup();
     const handleQueryChange = vi.fn();
     render(
-      <FilterRail
+      <TypeFilter
         query="roadmap type:image app:Editor is:pinned"
         onQueryChange={handleQueryChange}
       />,
     );
 
-    await user.click(screen.getByRole('button', { name: label }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Filtr typu' }), label);
 
     expect(handleQueryChange).toHaveBeenCalledWith(expectedQuery);
   });
@@ -241,10 +250,10 @@ describe('FilterRail', () => {
     const user = userEvent.setup();
     const handleQueryChange = vi.fn();
     render(
-      <FilterRail query="type:color app:Editor" onQueryChange={handleQueryChange} />,
+      <TypeFilter query="type:color app:Editor" onQueryChange={handleQueryChange} />,
     );
 
-    await user.click(screen.getByRole('button', { name: 'Wszystkie' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Filtr typu' }), 'Wszystkie');
 
     expect(handleQueryChange).toHaveBeenCalledWith('app:Editor');
   });
@@ -272,7 +281,9 @@ describe('clipboard palette states', () => {
       await vi.advanceTimersByTimeAsync(150);
     });
     await act(async () => {
-      screen.getByRole('button', { name: 'Obrazy' }).click();
+      const filter = screen.getByRole('combobox', { name: 'Filtr typu' }) as HTMLSelectElement;
+      filter.value = 'image';
+      filter.dispatchEvent(new Event('change', { bubbles: true }));
       await vi.advanceTimersByTimeAsync(150);
     });
 
@@ -293,7 +304,8 @@ describe('clipboard palette states', () => {
       rankedTruncated: false,
     };
     render(<App gateway={makeGateway(async () => page)} />);
-    const selectedRow = await screen.findByRole('option', {
+    await screen.findByRole('listbox', { name: 'Wyniki historii schowka' });
+    const selectedRow = historyList().getByRole('option', {
       name: /Synthetic clipboard item 2/,
     });
     const search = screen.getByRole('searchbox', { name: 'Przeszukaj historię' });
@@ -301,7 +313,7 @@ describe('clipboard palette states', () => {
     await user.click(selectedRow);
 
     expect(search).toHaveFocus();
-    expect(screen.getByRole('option', { selected: true })).toHaveAttribute(
+    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
       'data-event-id',
       '2',
     );
@@ -318,7 +330,7 @@ describe('clipboard palette states', () => {
     await screen.findByRole('listbox', { name: 'Wyniki historii schowka' });
     const search = screen.getByRole('searchbox', { name: 'Przeszukaj historię' });
 
-    await user.click(screen.getByRole('button', { name: 'Obrazy' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Filtr typu' }), 'Obrazy');
 
     expect(search).toHaveFocus();
   });

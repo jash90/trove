@@ -8,25 +8,38 @@ it('renders the private clipboard palette landmark', () => {
   expect(screen.getByRole('application', { name: 'Historia schowka' })).toBeVisible();
 });
 
-it('opens one real header workspace at a time and restores its invoker focus', async () => {
+it('opens one workspace at a time and returns focus to the search field', async () => {
   const user = userEvent.setup();
   render(<App />);
-  const importButton = screen.getByRole('button', { name: 'Importuj archiwum' });
-  const settingsButton = screen.getByRole('button', { name: 'Otwórz ustawienia' });
+  const search = screen.getByRole('searchbox', { name: 'Przeszukaj historię' });
 
-  await user.click(importButton);
+  await user.click(screen.getByRole('button', { name: 'Importuj archiwum' }));
   expect(screen.getByRole('dialog', { name: 'Importuj historię' })).toBeVisible();
   expect(screen.queryByRole('dialog', { name: 'Ustawienia' })).not.toBeInTheDocument();
   expect(screen.getByLabelText('Paleta historii schowka')).toHaveAttribute('inert');
 
   await user.click(screen.getByRole('button', { name: 'Zamknij import' }));
-  await waitFor(() => expect(importButton).toHaveFocus());
+  // The palette has one place a keyboard user works from, and a shortcut has
+  // no button to hand focus back to.
+  await waitFor(() => expect(search).toHaveFocus());
   expect(screen.getByLabelText('Paleta historii schowka')).not.toHaveAttribute('inert');
 
-  await user.click(settingsButton);
+  await user.click(screen.getByRole('button', { name: 'Otwórz ustawienia' }));
   expect(await screen.findByRole('dialog', { name: 'Ustawienia' })).toBeVisible();
   expect(screen.queryByRole('dialog', { name: 'Importuj historię' })).not.toBeInTheDocument();
 
   await user.click(screen.getByRole('button', { name: 'Zamknij ustawienia' }));
-  await waitFor(() => expect(settingsButton).toHaveFocus());
+  await waitFor(() => expect(search).toHaveFocus());
+});
+
+it('opens both workspaces from the keyboard, with no history selected', async () => {
+  const user = userEvent.setup();
+  render(<App />);
+
+  await user.keyboard('{Meta>}i{/Meta}');
+  expect(await screen.findByRole('dialog', { name: 'Importuj historię' })).toBeVisible();
+  await user.click(screen.getByRole('button', { name: 'Zamknij import' }));
+
+  await user.keyboard('{Meta>},{/Meta}');
+  expect(await screen.findByRole('dialog', { name: 'Ustawienia' })).toBeVisible();
 });
