@@ -37,20 +37,33 @@ export const SYNTHETIC_HISTORY_ITEMS: HistoryItem[] = [
     missingPayload: false,
     hasThumbnail: true,
   },
+  {
+    eventId: 104,
+    globalId: '0198f000-0000-7000-8000-000000000104',
+    kind: 'file',
+    capturedAtMs: 1_774_999_820_000,
+    sourceAppName: 'Synthetic Finder',
+    pinned: false,
+    preview: 'raport-syntetyczny.pdf',
+    byteSize: 0,
+    missingPayload: true,
+    hasThumbnail: false,
+  },
 ];
 
 export const SYNTHETIC_SETTINGS: AppSettings = {
   schemaVersion: 1,
   hotkey: 'CommandOrControl+Shift+V',
   autostart: false,
-  retentionDays: 30,
-  denylistedApps: [],
+  // History is unbounded unless the user deliberately enables retention.
+  retentionDays: null,
+  denylistedApps: ['com.apple.Passwords', 'com.apple.keychainaccess'],
 };
 
 export const SYNTHETIC_STORAGE_STATS: StorageStats = {
-  contentCount: 3,
-  eventCount: 3,
-  missingPayloadCount: 0,
+  contentCount: 4,
+  eventCount: 4,
+  missingPayloadCount: 1,
   databaseBytes: 49_152,
   blobBytes: 24_576,
 };
