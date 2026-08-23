@@ -1,0 +1,19 @@
+:root {
+  color-scheme: light;
+  --paper: #f4f2ec;
+  --paper-raised: #fffefa;
+  --ink: #171d26;
+  --muted: #69717d;
+  --line: #dedbd1;
+  --line-strong: #c9c5b9;
+  --accent: #234e9d;
+  --accent-soft: #e7edf8;
+  --pin: #b45309;
+  --pin-soft: #fdf3e4;
+  --danger: #b3261e;
+  --success: #166e4b;
+  --shadow-stack: 0 1px 0 #d8d4c9, 7px 9px 0 -4px #ebe8df;
+  --font-ui: 'Space Grotesk Variable', sans-serif;
+  --font-body: 'Source Serif 4 Variable', serif;
+  --font-mono: 'JetBrains Mono Variable', monospace;
+}
