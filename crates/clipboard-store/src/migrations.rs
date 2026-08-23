@@ -3,7 +3,8 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::StoreError;
 
 const INITIAL_MIGRATION: &str = include_str!("migrations/001_initial.sql");
-const LATEST_SCHEMA_VERSION: i64 = 1;
+const SETTINGS_MIGRATION: &str = include_str!("migrations/002_settings.sql");
+const LATEST_SCHEMA_VERSION: i64 = 2;
 const SCHEMA_IDENTITY: &str = "clipboard-store";
 const SCHEMA_REVISION: i64 = 6;
 
@@ -29,10 +30,21 @@ impl Migrations {
             return validate_schema_identity(connection);
         }
 
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute_batch(INITIAL_MIGRATION)?;
-        transaction.pragma_update(None, "user_version", LATEST_SCHEMA_VERSION)?;
-        transaction.commit()?;
+        if version < 1 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(INITIAL_MIGRATION)?;
+            transaction.pragma_update(None, "user_version", 1_i64)?;
+            transaction.commit()?;
+        }
+        if version < 2 {
+            validate_schema_identity(connection)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(SETTINGS_MIGRATION)?;
+            transaction.pragma_update(None, "user_version", 2_i64)?;
+            transaction.commit()?;
+        }
         validate_schema_identity(connection)
     }
 }

@@ -548,11 +548,13 @@ dependencies = [
 name = "clipboard-history-app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64 0.23.1",
  "clipboard-core",
  "clipboard-import",
  "clipboard-search",
  "clipboard-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",
@@ -560,7 +562,10 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
+ "tempfile",
  "tokio",
+ "uuid",
+ "zstd",
 ]
 
 [[package]]

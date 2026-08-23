@@ -16,7 +16,7 @@ use clipboard_core::{
     CaptureInput, ContentFlags, ContentHash, ContentKind, MAX_CANONICAL_NORMALIZATION_HEAP_BYTES,
     SourceConfidence, canonical_byte_len, content_hash, normalize_search_text_bounded,
 };
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -38,6 +38,8 @@ pub const MAX_SEARCH_DERIVATIONS_PER_CONTENT: usize = 16;
 pub const MAX_SEARCH_DERIVATION_BYTES: usize = 64 * 1024;
 pub const MAX_SEARCH_DOCUMENT_BYTES: usize = 512 * 1024;
 pub const MAX_PREVIEW_BYTES: usize = 512;
+pub const MAX_APP_SETTING_KEY_BYTES: usize = 128;
+pub const MAX_APP_SETTING_JSON_BYTES: usize = 64 * 1024;
 const MAX_INLINE_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_INLINE_ZSTD_PAYLOAD_BYTES: usize = 256 * 1024;
 const MAX_PRIMARY_MIME_BYTES: usize = 1024;
@@ -114,6 +116,8 @@ pub enum StoreError {
     InvalidImportInput,
     #[error("invalid_content_flags")]
     InvalidContentFlags,
+    #[error("invalid_app_setting")]
+    InvalidAppSetting,
     #[error("import run not found")]
     ImportRunNotFound,
     #[error("import source does not match the persisted run")]
@@ -703,6 +707,11 @@ enum WriteCommand {
         event_id: i64,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    SaveSetting {
+        key: String,
+        value_json: String,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     BeginImport {
         input: BeginImportRun,
         reply: oneshot::Sender<Result<ImportWorkerLease, StoreError>>,
@@ -763,6 +772,14 @@ impl StoreHandle {
         &self.config
     }
 
+    pub fn cas_store(&self) -> Result<CasStore, StoreError> {
+        let boundary = Arc::clone(required_boundary(&self.config)?);
+        Ok(CasStore::with_storage_boundary(
+            self.config.blob_root().to_path_buf(),
+            boundary,
+        ))
+    }
+
     #[doc(hidden)]
     pub fn shares_runtime_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.runtime.runtime, &other.runtime.runtime)
@@ -804,6 +821,37 @@ impl StoreHandle {
             .runtime
             .writer_sender()?
             .send(WriteCommand::DeleteEvent { event_id, reply })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError> {
+        validate_setting_pair(key, "")?;
+        self.with_reader(|connection| {
+            connection
+                .query_row(
+                    "SELECT value_json FROM app_setting WHERE key = ?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .optional()
+        })
+    }
+
+    pub async fn save_setting(&self, key: &str, value_json: &str) -> Result<(), StoreError> {
+        validate_setting_pair(key, value_json)?;
+        let (reply, response) = oneshot::channel();
+        self.runtime
+            .runtime
+            .writer_sender()?
+            .send(WriteCommand::SaveSetting {
+                key: key.to_owned(),
+                value_json: value_json.to_owned(),
+                reply,
+            })
             .await
             .map_err(|_| StoreError::WriterClosed)?;
         response
@@ -1083,6 +1131,15 @@ fn handle_command(
                 delete_event(connection, event_id)
             }));
         }
+        WriteCommand::SaveSetting {
+            key,
+            value_json,
+            reply,
+        } => {
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                save_setting(connection, &key, &value_json)
+            }));
+        }
         WriteCommand::BeginImport { input, reply } => {
             let _ = reply.send(with_storage_boundary(boundary, || {
                 begin_import(connection, &input)
@@ -1151,6 +1208,38 @@ fn ingest(
     let outcome = write_ingest(&transaction, input, &prepared, None, None)?;
     transaction.commit()?;
     Ok(outcome)
+}
+
+fn save_setting(
+    connection: &mut Connection,
+    key: &str,
+    value_json: &str,
+) -> Result<(), StoreError> {
+    validate_setting_pair(key, value_json)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "INSERT INTO app_setting(key, value_json, updated_at_ms)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO UPDATE SET
+           value_json = excluded.value_json,
+           updated_at_ms = excluded.updated_at_ms",
+        params![key, value_json, now_ms()],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn validate_setting_pair(key: &str, value_json: &str) -> Result<(), StoreError> {
+    if key.is_empty()
+        || key.len() > MAX_APP_SETTING_KEY_BYTES
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_' || byte.is_ascii_digit())
+        || value_json.len() > MAX_APP_SETTING_JSON_BYTES
+    {
+        return Err(StoreError::InvalidAppSetting);
+    }
+    Ok(())
 }
 
 fn begin_import(
