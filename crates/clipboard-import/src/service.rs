@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     FramedHasher, ImportCandidate, ImportError, ImportParseLimits, ImportParseReport, ImportSource,
+    RayconfigSecret,
     detect::{bounded_path_copy, detect_export_with_permit},
     parse_detected_export_report_with_permit,
 };
@@ -28,6 +29,14 @@ pub const MAX_IMPORT_RECORD_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_IMPORT_HEADER_BYTES: usize = 64 * 1024;
 pub const MAX_IMPORT_BATCH_BYTES: usize = clipboard_store::MAX_IMPORT_BATCH_BYTES;
 pub const MAX_IMPORT_AUXILIARY_BYTES: usize = 32 * 1024 * 1024;
+/// Largest `.rayconfig` this will read off disk.
+///
+/// The whole ciphertext is held at once — CBC decrypts against the previous
+/// block and PKCS7 is only readable at the end — so this competes directly with
+/// the record buffer inside one 64 MiB operation permit. Twenty-four leaves
+/// room for both with margin; the measured three-month export is 2.2 MiB, so
+/// this is roughly ten times a realistic history rather than a tight fit.
+pub const MAX_RAYCONFIG_CIPHERTEXT_BYTES: usize = 24 * 1024 * 1024;
 pub const MAX_PREPARED_SOURCE_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_PREPARED_CACHE_BYTES: usize = 192 * 1024 * 1024;
 pub const MAX_IMPORT_OPERATION_BYTES: usize = clipboard_store::MAX_IMPORT_OPERATION_BYTES;
@@ -545,7 +554,20 @@ impl ImportService {
     }
 
     pub fn analyze(&self, path: impl AsRef<Path>) -> Result<ImportAnalysis, ImportError> {
-        let source = self.prepare(path.as_ref())?;
+        self.analyze_with_password(path, None)
+    }
+
+    /// Analyses an export, decrypting it first when it is a `.rayconfig`.
+    ///
+    /// The secret does not outlive this call. A prepared session keeps parsed
+    /// records rather than a way back to the file, so starting the import it
+    /// describes never needs the password again.
+    pub fn analyze_with_password(
+        &self,
+        path: impl AsRef<Path>,
+        secret: Option<&RayconfigSecret>,
+    ) -> Result<ImportAnalysis, ImportError> {
+        let source = self.prepare(path.as_ref(), secret)?;
         let total = source.source.total_records;
         let candidate_records = source.source.candidate_records();
         let failed = source.source.initial_failed_records();
@@ -614,7 +636,11 @@ impl ImportService {
         run_id: Uuid,
         path: impl AsRef<Path>,
     ) -> Result<ImportRunHandle, ImportError> {
-        let source = self.prepare_async(path.as_ref()).await?;
+        // A resumed rayconfig would need its password again, and the password
+        // was deliberately not kept. Nothing ships a resume today; when
+        // something does, the secret has to be threaded in here rather than
+        // re-derived, because there is nothing to derive it from.
+        let source = self.prepare_async(path.as_ref(), None).await?;
         let lease = self
             .store
             .resume_import(ResumeImportRun {
@@ -644,7 +670,15 @@ impl ImportService {
         &self,
         path: impl AsRef<Path>,
     ) -> Result<ImportSummary, ImportError> {
-        let source = self.prepare_async(path.as_ref()).await?;
+        self.run_to_completion_with_password(path, None).await
+    }
+
+    pub async fn run_to_completion_with_password(
+        &self,
+        path: impl AsRef<Path>,
+        secret: Option<RayconfigSecret>,
+    ) -> Result<ImportSummary, ImportError> {
+        let source = self.prepare_async(path.as_ref(), secret).await?;
         let status = self.persist_run(Uuid::now_v7(), &source.source).await?;
         match self
             .run_worker(status.run_id, status.generation, source, 0)
@@ -678,13 +712,21 @@ impl ImportService {
             .map_err(map_store_error)
     }
 
-    fn prepare(&self, path: &Path) -> Result<PreparedSourceEnvelope, ImportError> {
+    fn prepare(
+        &self,
+        path: &Path,
+        secret: Option<&RayconfigSecret>,
+    ) -> Result<PreparedSourceEnvelope, ImportError> {
         let operation_permit = self.runtime.acquire_operation_blocking()?;
         let reservation = self.runtime.reserve_preparation()?;
-        self.prepare_with_admission(path, operation_permit, reservation)
+        self.prepare_with_admission(path, secret, operation_permit, reservation)
     }
 
-    async fn prepare_async(&self, path: &Path) -> Result<PreparedSourceEnvelope, ImportError> {
+    async fn prepare_async(
+        &self,
+        path: &Path,
+        secret: Option<RayconfigSecret>,
+    ) -> Result<PreparedSourceEnvelope, ImportError> {
         let runtime = self.runtime.clone();
         let (operation_permit, reservation) = tokio::task::spawn_blocking(move || {
             let operation_permit = runtime.acquire_operation_blocking()?;
@@ -697,7 +739,7 @@ impl ImportService {
         let path = bounded_path_copy(path, limits)?;
         let preparer = self.clone();
         tokio::task::spawn_blocking(move || {
-            preparer.prepare_with_admission(&path, operation_permit, reservation)
+            preparer.prepare_with_admission(&path, secret.as_ref(), operation_permit, reservation)
         })
         .await
         .map_err(|_| ImportError::service("analysis_unavailable"))?
@@ -706,11 +748,12 @@ impl ImportService {
     fn prepare_with_admission(
         &self,
         path: &Path,
+        secret: Option<&RayconfigSecret>,
         operation_permit: clipboard_store::ImportOperationPermit,
         mut reservation: AdmissionReservation,
     ) -> Result<PreparedSourceEnvelope, ImportError> {
         let limits = self.runtime.parse_limits();
-        let source = prepare_source_with_permit(path, &operation_permit, limits)?;
+        let source = prepare_source_with_permit(path, secret, &operation_permit, limits)?;
         reservation.resize(source.retained_bytes())?;
         Ok(PreparedSourceEnvelope {
             source,
@@ -1739,21 +1782,23 @@ fn option_string_capacity(value: &Option<String>) -> usize {
 
 fn prepare_source_with_permit(
     path: &Path,
+    secret: Option<&RayconfigSecret>,
     permit: &clipboard_store::ImportOperationPermit,
     limits: ImportParseLimits,
 ) -> Result<PreparedSource, ImportError> {
-    prepare_source_with_hook(path, permit, limits, || {})
+    prepare_source_with_hook(path, secret, permit, limits, || {})
 }
 
 fn prepare_source_with_hook(
     path: &Path,
+    secret: Option<&RayconfigSecret>,
     permit: &clipboard_store::ImportOperationPermit,
     limits: ImportParseLimits,
     after_initial_detection: impl FnOnce(),
 ) -> Result<PreparedSource, ImportError> {
     let detected = detect_export_with_permit(path, permit, limits)?;
     after_initial_detection();
-    let report = parse_detected_export_report_with_permit(&detected, permit, limits);
+    let report = parse_detected_export_report_with_permit(&detected, secret, permit, limits);
     let verified = detect_export_with_permit(path, permit, limits);
     let source_is_unchanged = verified.as_ref().is_ok_and(|verified| {
         verified.source == detected.source
@@ -2581,7 +2626,7 @@ mod tests {
         assert_private_service_error(persistence_error);
         restore_blob_storage(&data_dir);
 
-        let resumable = service.prepare(export.path()).unwrap();
+        let resumable = service.prepare(export.path(), None).unwrap();
         let run = service
             .persist_run(Uuid::now_v7(), &resumable.source)
             .await
@@ -2789,8 +2834,12 @@ mod tests {
 
         let gate = ImportOperationGate::with_capacity(MAX_IMPORT_OPERATION_BYTES).unwrap();
         let permit = gate.acquire_blocking().unwrap();
-        let result =
-            prepare_source_with_hook(export.path(), &permit, ImportParseLimits::default(), || {
+        let result = prepare_source_with_hook(
+            export.path(),
+            None,
+            &permit,
+            ImportParseLimits::default(),
+            || {
                 fs::write(
                     &manifest,
                     serde_json::to_vec(&[json!({
@@ -2803,7 +2852,8 @@ mod tests {
                     .unwrap(),
                 )
                 .unwrap();
-            });
+            },
+        );
 
         assert!(matches!(
             result,

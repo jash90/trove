@@ -115,13 +115,34 @@ zatrzymuje się na `--no-bundle`.
 ## Import archiwum
 
 Import odbywa się w całości lokalnie. Obsługiwane są eksporty Raycast i
-SuperCmd, w formacie JSON (źródło prawdy) oraz CSV (format awaryjny).
+SuperCmd: zaszyfrowany `.rayconfig` — czyli plik, który Raycast faktycznie
+zapisuje — oraz JSON (źródło prawdy) i CSV (format awaryjny).
 
 ```bash
 cargo run -p clipboard-import-cli -- analyze --source <katalog-lub-plik>
 cargo run -p clipboard-import-cli -- import  --source <katalog-lub-plik> --data-dir data/dev
 cargo run -p clipboard-import-cli -- verify  --data-dir data/dev --expect-records <n>
 ```
+
+### Eksport zaszyfrowany
+
+`.rayconfig` to `IV ‖ AES-256-CBC-PKCS7(gzip(JSON))` z kluczem `SHA-256(hasło)`.
+CLI pyta o hasło na terminalu, nie wyświetlając go; w skrypcie podaje się je
+przez `--password-stdin`:
+
+```bash
+echo "$RAYCAST_PASSWORD" | cargo run -p clipboard-import-cli -- import \
+  --source "Raycast 2026-08-22 14.39.05.rayconfig" --data-dir data/dev --password-stdin
+```
+
+**Nie ma flagi przyjmującej hasło jako argument** — argumenty procesu widzi każdy
+przez `ps` i zapisuje je historia powłoki. Hasło nie jest nigdzie zapisywane ani
+logowane, a odszyfrowana treść nigdy nie trafia na dysk: jest strumieniowana
+prosto do parsera. Potrzebne jest dokładnie raz, przy analizie, bo dalej
+pracujemy już na sparsowanych rekordach.
+
+Gdy katalog zawiera i zwykły manifest, i `.rayconfig`, wygrywa zwykły — żeby nie
+pytać o hasło, kiedy nie jest potrzebne.
 
 `import` zapisuje wyłącznie do jawnie wskazanego katalogu danych, `verify`
 otwiera bazę tylko do odczytu. Oba wypisują wyłącznie liczniki i kody stanu —
@@ -146,6 +167,10 @@ stabilny odcisk, a ponowny przebieg zwraca go jako `alreadyPresent`.
   zawsze równa się liczbie rekordów źródłowych.
 - **Nie odrzuca rekordów na podstawie heurystyki sekretów.** Archiwum może
   zawierać dane wrażliwe; kreator importu ostrzega o tym przed startem.
+- **Nie potrafi orzec, że hasło było poprawne.** AES-CBC nie ma znacznika
+  uwierzytelniającego, więc importer odrzuca tylko to, co jawnie błędne:
+  dopełnienie PKCS7 i sygnaturę gzip. Obie kontrole razem stanowią całe
+  wykrywanie złego hasła.
 
 ## Przechwytywanie i wklejanie
 

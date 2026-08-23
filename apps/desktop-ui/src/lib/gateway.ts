@@ -33,7 +33,7 @@ export interface ClipboardGateway {
   copyEvent(eventId: number, plainText: boolean, paste: boolean): Promise<CopyResult>;
   chooseImportFile(): Promise<string | null>;
   chooseImportDirectory(): Promise<string | null>;
-  analyzeImport(path: string): Promise<ImportAnalysis>;
+  analyzeImport(path: string, password?: string): Promise<ImportAnalysis>;
   startImport(analysisId: string): Promise<ImportRunHandle>;
   discardImportAnalysis(analysisId: string): Promise<void>;
   getImportStatus(runId: string): Promise<ImportProgress>;
@@ -90,7 +90,7 @@ export const tauriGateway: ClipboardGateway = {
     open({
       title: 'Wybierz eksport historii schowka',
       multiple: false,
-      filters: [{ name: 'Eksport JSON', extensions: ['json'] }],
+      filters: [{ name: 'Eksport schowka', extensions: ['json', 'rayconfig'] }],
     }),
   chooseImportDirectory: () =>
     open({
@@ -99,8 +99,10 @@ export const tauriGateway: ClipboardGateway = {
       recursive: true,
       multiple: false,
     }),
-  analyzeImport: (path) =>
-    invoke<ImportAnalysis>('analyze_import', { path }).then(validateImportAnalysis),
+  analyzeImport: (path, password) =>
+    invoke<ImportAnalysis>('analyze_import', { path, password: password ?? null }).then(
+      validateImportAnalysis,
+    ),
   startImport: (analysisId) => invoke<ImportRunHandle>('start_import', { analysisId }),
   discardImportAnalysis: (analysisId) =>
     invoke<void>('discard_import_analysis', { analysisId }),

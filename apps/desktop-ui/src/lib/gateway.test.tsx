@@ -100,7 +100,9 @@ describe('tauriGateway', () => {
       ['set_pinned', { eventId: 7, pinned: true }],
       ['delete_event', { eventId: 7 }],
       ['copy_event', { eventId: 7, plainText: true, paste: false }],
-      ['analyze_import', { path: '/synthetic/import.json' }],
+      // A plain export sends an explicit null rather than omitting the field,
+      // so the Rust side always sees the argument it declares.
+      ['analyze_import', { path: '/synthetic/import.json', password: null }],
       ['start_import', { analysisId: 'analysis-id' }],
       ['discard_import_analysis', { analysisId: 'analysis-id' }],
       ['get_import_status', { runId: progress.runId }],
@@ -114,7 +116,9 @@ describe('tauriGateway', () => {
         {
           title: 'Wybierz eksport historii schowka',
           multiple: false,
-          filters: [{ name: 'Eksport JSON', extensions: ['json'] }],
+          // The file Raycast actually writes is offered alongside the plain
+          // JSON somebody decrypted by hand.
+          filters: [{ name: 'Eksport schowka', extensions: ['json', 'rayconfig'] }],
         },
       ],
       [

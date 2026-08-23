@@ -1,4 +1,4 @@
-import { FileJson, FolderOpen, ShieldAlert, X } from 'lucide-react';
+import { FileJson, FolderOpen, KeyRound, ShieldAlert, X } from 'lucide-react';
 import { useEffect, useRef, useState, type KeyboardEventHandler } from 'react';
 
 import { useModalFocus } from '../hooks/useModalFocus';
@@ -19,6 +19,7 @@ interface ImportWizardProps {
 type WizardPhase =
   | { tag: 'idle' }
   | { tag: 'analyzing' }
+  | { tag: 'password' }
   | { tag: 'confirm'; analysis: ImportAnalysisContract }
   | { tag: 'cancelling'; analysis: ImportAnalysisContract }
   | { tag: 'running'; runId: string; recovering: boolean }
@@ -29,6 +30,17 @@ type WizardPhase =
 // payload fragment, so their text never reaches the DOM.
 const ANALYSIS_ERROR = 'Nie udało się przeanalizować archiwum. Sprawdź, czy wskazany plik lub katalog jest eksportem Raycast albo SuperCmd.';
 const DISCARD_ERROR = 'Nie udało się anulować przygotowanego importu. Spróbuj ponownie.';
+const PASSWORD_ERROR = 'Hasło nie pasuje do tego pliku. Spróbuj ponownie.';
+
+/// The backend answers with a stable code, never a message.
+const PASSWORD_REQUIRED = 'rayconfig_password_required';
+const PASSWORD_INVALID = 'rayconfig_password_invalid';
+
+/// Reads the code out of a rejected gateway call.
+///
+/// Only the code is ever compared; the text itself never reaches the DOM,
+/// because a gateway error may carry a path or a fragment of a payload.
+const errorCode = (cause: unknown): string => (typeof cause === 'string' ? cause : '');
 
 export const ImportWizard = ({
   gateway,
@@ -39,7 +51,21 @@ export const ImportWizard = ({
   const [progress, setProgress] = useState<ImportProgressContract | null>(null);
   const [error, setError] = useState<string | null>(null);
   const primaryRef = useRef<HTMLButtonElement>(null);
+  const passwordInputRef = useRef<HTMLInputElement>(null);
+  // Resolves the password prompt from inside the analyze closure, so the
+  // password is a local value rather than component state and cannot be
+  // rendered, retained, or sent twice.
+  const passwordAnswer = useRef<((password: string | null) => void) | null>(null);
   const modalFocus = useModalFocus({ active: true, initialFocusRef: primaryRef });
+
+  useEffect(
+    () => () => {
+      // Unmounting mid-prompt must not leave the closure waiting forever.
+      passwordAnswer.current?.(null);
+      passwordAnswer.current = null;
+    },
+    [],
+  );
 
   const runId = phase.tag === 'running' ? phase.runId : null;
 
@@ -80,19 +106,52 @@ export const ImportWizard = ({
     };
   }, [gateway, pollIntervalMs, runId]);
 
+  const askForPassword = (): Promise<string | null> =>
+    new Promise((resolve) => {
+      passwordAnswer.current = resolve;
+      setPhase({ tag: 'password' });
+    });
+
+  const submitPassword = (password: string | null): void => {
+    const answer = passwordAnswer.current;
+    passwordAnswer.current = null;
+    // Clear the field before anything else can read it again.
+    if (passwordInputRef.current) passwordInputRef.current.value = '';
+    answer?.(password);
+  };
+
   const analyze = async (choose: () => Promise<string | null>): Promise<void> => {
     setError(null);
     // The path lives only inside this call. It is never stored in state, so it
-    // cannot reach the DOM or a later gateway call.
+    // cannot reach the DOM or a later gateway call. The password is asked for
+    // in the same closure for the same reason, and for one more: retrying a
+    // wrong password must not mean picking the file again.
     const path = await choose().catch(() => null);
     if (path === null) return;
     setPhase({ tag: 'analyzing' });
-    try {
-      const analysis = await gateway.analyzeImport(path);
-      setPhase({ tag: 'confirm', analysis });
-    } catch {
-      setPhase({ tag: 'idle' });
-      setError(ANALYSIS_ERROR);
+    let password: string | undefined;
+    for (;;) {
+      try {
+        const analysis = await gateway.analyzeImport(path, password);
+        setPhase({ tag: 'confirm', analysis });
+        return;
+      } catch (cause) {
+        const code = errorCode(cause);
+        if (code !== PASSWORD_REQUIRED && code !== PASSWORD_INVALID) {
+          setPhase({ tag: 'idle' });
+          setError(ANALYSIS_ERROR);
+          return;
+        }
+        setError(code === PASSWORD_INVALID ? PASSWORD_ERROR : null);
+        const answer = await askForPassword();
+        if (answer === null) {
+          setPhase({ tag: 'idle' });
+          setError(null);
+          return;
+        }
+        password = answer;
+        setPhase({ tag: 'analyzing' });
+      }
     }
   };
 
@@ -135,6 +194,11 @@ export const ImportWizard = ({
   const requestClose = (): void => {
     if (phase.tag === 'confirm') {
       void cancel(phase.analysis);
+      return;
+    }
+    if (phase.tag === 'password') {
+      submitPassword(null);
+      onClose?.();
       return;
     }
     if (phase.tag === 'cancelling' || phase.tag === 'analyzing') return;
@@ -207,7 +271,7 @@ export const ImportWizard = ({
               onClick={() => void analyze(() => gateway.chooseImportFile())}
             >
               <FileJson size={16} aria-hidden="true" />
-              Wybierz plik JSON
+              Wybierz plik eksportu
             </button>
             <button
               type="button"
@@ -223,6 +287,43 @@ export const ImportWizard = ({
           <p className="workflow-pending" role="status">
             Analizowanie archiwum…
           </p>
+        ) : null}
+
+        {phase.tag === 'password' ? (
+          <form
+            className="workflow-password"
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitPassword(passwordInputRef.current?.value ?? '');
+            }}
+          >
+            <p className="workflow-note">
+              Ten eksport jest zaszyfrowany. Hasło służy tylko do jego
+              odczytania — nie jest nigdzie zapisywane.
+            </p>
+            <label className="workflow-field" htmlFor="rayconfig-password">
+              <KeyRound size={15} aria-hidden="true" />
+              <span className="sr-only">Hasło eksportu</span>
+              <input
+                ref={passwordInputRef}
+                id="rayconfig-password"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="Hasło eksportu"
+                aria-label="Hasło eksportu"
+                autoFocus
+              />
+            </label>
+            <div className="workflow-actions">
+              <button type="submit" className="workflow-primary">
+                Odszyfruj i przeanalizuj
+              </button>
+              <button type="button" onClick={() => submitPassword(null)}>
+                Anuluj
+              </button>
+            </div>
+          </form>
         ) : null}
 
         {phase.tag === 'confirm' || phase.tag === 'cancelling' ? (

@@ -2,6 +2,7 @@
 
 mod detect;
 mod raycast;
+mod rayconfig;
 mod service;
 mod supercmd;
 
@@ -27,6 +28,9 @@ use clipboard_core::{
 };
 use clipboard_store::ImportOperationPermit;
 use thiserror::Error;
+use zeroize::Zeroize;
+
+pub use rayconfig::RayconfigSecret;
 
 const JSON_READER_BUFFER_BYTES: usize = 8 * 1024;
 const MAX_JSON_DELIMITER_DEPTH: usize = 128;
@@ -48,6 +52,28 @@ impl ImportParseLimits {
         let required = self
             .record_bytes
             .checked_add(JSON_READER_BUFFER_BYTES)
+            .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+        if required > permit.reserved_bytes() {
+            return Err(ImportError::service("analysis_too_large"));
+        }
+        Ok(())
+    }
+
+    /// Proves a rayconfig parse fits the operation budget before anything is
+    /// read.
+    ///
+    /// The ciphertext is held whole because CBC needs the previous block and
+    /// PKCS7 needs the last one; everything downstream of it streams. Note the
+    /// two caps interact: the ciphertext cap bounds what comes off disk and
+    /// `manifest_bytes` bounds what comes out of the decompressor, so a bomb is
+    /// stopped by the second even though the first let the file in. Moving one
+    /// without the other leaves a gap.
+    fn ensure_rayconfig_operation(self, permit: &ImportOperationPermit) -> Result<(), ImportError> {
+        let required = crate::service::MAX_RAYCONFIG_CIPHERTEXT_BYTES
+            .checked_add(self.record_bytes)
+            .and_then(|bytes| bytes.checked_add(JSON_READER_BUFFER_BYTES))
+            .and_then(|bytes| bytes.checked_add(rayconfig::SCAN_BUFFER_BYTES))
+            .and_then(|bytes| bytes.checked_add(rayconfig::INFLATE_STATE_BYTES))
             .ok_or_else(|| ImportError::service("analysis_too_large"))?;
         if required > permit.reserved_bytes() {
             return Err(ImportError::service("analysis_too_large"));
@@ -419,12 +445,23 @@ pub struct ImportExportAnalysis {
 /// use clipboard_import::parse_export_report;
 /// ```
 pub fn analyze_export(path: impl AsRef<Path>) -> Result<ImportExportAnalysis, ImportError> {
+    analyze_export_with_password(path, None)
+}
+
+/// Analyses an export, decrypting it first when it is a `.rayconfig`.
+///
+/// The secret is used here and nowhere else: the analysis keeps parsed records,
+/// not a way back to the file, so nothing later needs the password again.
+pub fn analyze_export_with_password(
+    path: impl AsRef<Path>,
+    secret: Option<&RayconfigSecret>,
+) -> Result<ImportExportAnalysis, ImportError> {
     let runtime = service::ImportRuntime::process_wide();
     let permit = runtime.acquire_operation_blocking()?;
     let _reservation = runtime.reserve_preparation()?;
     let limits = ImportParseLimits::default();
     let detected = detect::detect_export_with_permit(path.as_ref(), &permit, limits)?;
-    let report = parse_detected_export_report_with_permit(&detected, &permit, limits)?;
+    let report = parse_detected_export_report_with_permit(&detected, secret, &permit, limits)?;
 
     let total =
         u64::try_from(report.total).map_err(|_| ImportError::service("source_too_large"))?;
@@ -503,10 +540,27 @@ fn aggregate_kind_counts_with_hook(
 
 pub(crate) fn parse_detected_export_report_with_permit(
     detected: &detect::DetectedExport,
+    secret: Option<&RayconfigSecret>,
     permit: &ImportOperationPermit,
     limits: ImportParseLimits,
 ) -> Result<ImportParseReport, ImportError> {
     match detected.source {
+        ImportSource::Raycast if detected.encrypted => {
+            let Some(secret) = secret else {
+                return Err(ImportError::export(
+                    ImportSource::Raycast.as_str(),
+                    "rayconfig_password_required",
+                ));
+            };
+            let mut container = read_bounded_container(&detected.export_path)?;
+            let report =
+                raycast::parse_rayconfig_report_with_permit(&mut container, secret, permit, limits);
+            // The plaintext was decrypted in place, so the buffer still holds
+            // the user's clipboard history. Clear it rather than handing it
+            // back to the allocator intact.
+            container.zeroize();
+            report
+        }
         ImportSource::Raycast => {
             raycast::parse_raycast_report_with_permit(&detected.export_path, permit, limits)
         }
@@ -530,6 +584,26 @@ pub(crate) fn parse_detected_export_report_with_permit(
             supercmd::parse_supercmd_report_with_permit(root, &detected.export_path, permit, limits)
         }
     }
+}
+
+/// Reads a whole `.rayconfig` under its own cap.
+///
+/// The size is checked before the read and again against what was actually
+/// read: a file can grow between the two, and the second check is what makes
+/// the budget a fact rather than a hope.
+fn read_bounded_container(path: &Path) -> Result<Vec<u8>, ImportError> {
+    let source_kind = ImportSource::Raycast.as_str();
+    let metadata =
+        fs::metadata(path).map_err(|_| ImportError::export(source_kind, "unreadable_export"))?;
+    rayconfig::validate_container_length(metadata.len())?;
+    let file =
+        fs::File::open(path).map_err(|_| ImportError::export(source_kind, "unreadable_export"))?;
+    let mut container = Vec::new();
+    file.take(service::MAX_RAYCONFIG_CIPHERTEXT_BYTES as u64 + 1)
+        .read_to_end(&mut container)
+        .map_err(|_| ImportError::export(source_kind, "unreadable_export"))?;
+    rayconfig::validate_container_length(container.len() as u64)?;
+    Ok(container)
 }
 
 pub(crate) fn record_failure(
@@ -572,11 +646,40 @@ pub(crate) enum JsonRecord<'a> {
     TooLarge,
 }
 
+/// Whether anything may follow the record array.
+///
+/// A plain manifest is the whole document, so bytes after the closing bracket
+/// mean it is not the document we were promised. A rayconfig's array sits in
+/// the middle of a larger object, and its siblings follow it legitimately.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum Trailing {
+    Forbidden,
+    Ignored,
+}
+
 pub(crate) fn stream_json_records_from_reader_with_limits<R: Read>(
     reader: R,
     source_kind: &'static str,
     manifest_limit: usize,
     record_limit: usize,
+    record: impl FnMut(usize, JsonRecord<'_>) -> Result<bool, ImportError>,
+) -> Result<usize, ImportError> {
+    stream_json_records_from_reader_with_trailing(
+        reader,
+        source_kind,
+        manifest_limit,
+        record_limit,
+        Trailing::Forbidden,
+        record,
+    )
+}
+
+pub(crate) fn stream_json_records_from_reader_with_trailing<R: Read>(
+    reader: R,
+    source_kind: &'static str,
+    manifest_limit: usize,
+    record_limit: usize,
+    trailing: Trailing,
     mut record: impl FnMut(usize, JsonRecord<'_>) -> Result<bool, ImportError>,
 ) -> Result<usize, ImportError> {
     if manifest_limit == 0 || record_limit == 0 {
@@ -598,7 +701,9 @@ pub(crate) fn stream_json_records_from_reader_with_limits<R: Read>(
         return Err(ImportError::export(source_kind, "invalid_document"));
     };
     if first == b']' {
-        reader.require_end()?;
+        if trailing == Trailing::Forbidden {
+            reader.require_end()?;
+        }
         return Ok(0);
     }
 
@@ -668,7 +773,9 @@ pub(crate) fn stream_json_records_from_reader_with_limits<R: Read>(
         }
         match reader.next_non_whitespace()? {
             Some(b']') => {
-                reader.require_end()?;
+                if trailing == Trailing::Forbidden {
+                    reader.require_end()?;
+                }
                 return Ok(total);
             }
             Some(b',') => {

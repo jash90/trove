@@ -453,9 +453,14 @@ fn prepare_copy_text_blocking(
 pub async fn analyze_import_service(
     state: &AppState,
     path: PathBuf,
+    password: Option<String>,
 ) -> Result<ImportAnalysis, String> {
     let importer = state.importer.clone();
-    tokio::task::spawn_blocking(move || importer.analyze(path))
+    // The password is turned into a secret here and dropped with this task.
+    // An analysis keeps parsed records rather than a way back to the file, so
+    // starting the import it describes never needs the password again.
+    let secret = password.map(clipboard_import::RayconfigSecret::new);
+    tokio::task::spawn_blocking(move || importer.analyze_with_password(path, secret.as_ref()))
         .await
         .map_err(|_| "import_analysis_failed".to_owned())?
         .map_err(|error| import_error_code(&error, "import_analysis_failed"))
@@ -502,8 +507,9 @@ pub async fn get_import_status_service(
 pub async fn analyze_import(
     state: tauri::State<'_, AppState>,
     path: PathBuf,
+    password: Option<String>,
 ) -> Result<ImportAnalysis, String> {
-    analyze_import_service(state.inner(), path).await
+    analyze_import_service(state.inner(), path, password).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -54,15 +54,25 @@ export const mockGateway: ClipboardGateway = {
     historyItems = remaining;
   },
   copyEvent: async (_eventId, plainText) => ({ mode: 'copied', plainText }),
-  chooseImportFile: async () => 'synthetic://clipboard-export.json',
+  // The browser preview offers the encrypted shape, so the password step is
+  // reachable without a real export.
+  chooseImportFile: async () => 'synthetic://clipboard-export.rayconfig',
   chooseImportDirectory: async () => 'synthetic://clipboard-export',
-  analyzeImport: async (_path) => ({
-    analysisId: SYNTHETIC_IMPORT_PROGRESS.runId,
-    total: 3,
-    candidateRecords: 3,
-    skipped: 0,
-    failed: 0,
-  }),
+  // A path ending in .rayconfig demands a password, so the browser preview
+  // walks the same steps the encrypted flow does on a real export.
+  analyzeImport: async (path, password) => {
+    if (path.toLowerCase().endsWith('.rayconfig')) {
+      if (password === undefined) throw 'rayconfig_password_required';
+      if (password !== 'synthetic') throw 'rayconfig_password_invalid';
+    }
+    return {
+      analysisId: SYNTHETIC_IMPORT_PROGRESS.runId,
+      total: 3,
+      candidateRecords: 3,
+      skipped: 0,
+      failed: 0,
+    };
+  },
   startImport: async (_analysisId) => ({ runId: SYNTHETIC_IMPORT_PROGRESS.runId }),
   discardImportAnalysis: async (_analysisId) => undefined,
   getImportStatus: async (_runId) => ({

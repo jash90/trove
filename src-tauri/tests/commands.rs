@@ -700,7 +700,7 @@ async fn importer_commands_keep_analysis_owner_scoped_and_start_only_by_analysis
     let directory = tempfile::tempdir().unwrap();
     let state = AppState::open_data_dir(directory.path()).unwrap();
 
-    let analysis = commands::analyze_import_service(&state, export.path().to_path_buf())
+    let analysis = commands::analyze_import_service(&state, export.path().to_path_buf(), None)
         .await
         .unwrap();
     assert_eq!(analysis.total, 1);
@@ -725,9 +725,10 @@ async fn importer_commands_keep_analysis_owner_scoped_and_start_only_by_analysis
     assert_eq!(progress.processed, 1);
     assert_eq!(progress.imported, 1);
 
-    let second_analysis = commands::analyze_import_service(&state, export.path().to_path_buf())
-        .await
-        .unwrap();
+    let second_analysis =
+        commands::analyze_import_service(&state, export.path().to_path_buf(), None)
+            .await
+            .unwrap();
     commands::discard_import_analysis_service(&state, &second_analysis.analysis_id.to_string())
         .await
         .unwrap();

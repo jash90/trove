@@ -1,12 +1,13 @@
 #![forbid(unsafe_code)]
 
 mod path_policy;
+mod secret;
 mod verify;
 
 use std::{io, io::Write, path::PathBuf};
 
 use clap::{Parser, Subcommand, error::ErrorKind};
-use clipboard_import::{ImportError, ImportService, analyze_export};
+use clipboard_import::{ImportError, ImportService, analyze_export_with_password};
 use clipboard_store::{CasError, StorageBoundaryError, StoreError, StoreHandle};
 use serde::Serialize;
 
@@ -26,12 +27,21 @@ enum Commands {
     Analyze {
         #[arg(long)]
         source: PathBuf,
+        /// Read the .rayconfig password from standard input instead of asking.
+        ///
+        /// There is deliberately no flag that takes the password itself: a
+        /// process's arguments are readable by anyone on the machine.
+        #[arg(long)]
+        password_stdin: bool,
     },
     Import {
         #[arg(long)]
         source: PathBuf,
         #[arg(long)]
         data_dir: PathBuf,
+        /// Read the .rayconfig password from standard input instead of asking.
+        #[arg(long)]
+        password_stdin: bool,
     },
     Verify {
         #[arg(long)]
@@ -101,6 +111,11 @@ impl CliFailure {
     pub(crate) const fn new(code: &'static str) -> Self {
         Self { code }
     }
+
+    #[cfg(test)]
+    pub(crate) const fn code(&self) -> &'static str {
+        self.code
+    }
 }
 
 #[tokio::main]
@@ -141,12 +156,19 @@ async fn main() {
 
 async fn execute(command: Commands) -> Result<CommandExecution, CliFailure> {
     match command {
-        Commands::Analyze { source } => Ok(CommandExecution {
-            output: CommandOutput::Analyze(analyze(&source)?),
+        Commands::Analyze {
+            source,
+            password_stdin,
+        } => Ok(CommandExecution {
+            output: CommandOutput::Analyze(analyze(&source, password_stdin)?),
             success: true,
         }),
-        Commands::Import { source, data_dir } => Ok(CommandExecution {
-            output: CommandOutput::Import(import(&source, &data_dir).await?),
+        Commands::Import {
+            source,
+            data_dir,
+            password_stdin,
+        } => Ok(CommandExecution {
+            output: CommandOutput::Import(import(&source, &data_dir, password_stdin).await?),
             success: true,
         }),
         Commands::Verify {
@@ -163,9 +185,16 @@ async fn execute(command: Commands) -> Result<CommandExecution, CliFailure> {
     }
 }
 
-fn analyze(source: &std::path::Path) -> Result<AnalyzeOutput, CliFailure> {
+fn analyze(source: &std::path::Path, password_stdin: bool) -> Result<AnalyzeOutput, CliFailure> {
     let source = path_policy::canonical_source(source)?;
-    let analysis = analyze_export(&source).map_err(import_failure)?;
+    // Asked for only once the export says it needs one, so a plain JSON import
+    // never prompts.
+    let secret = match analyze_export_with_password(&source, None) {
+        Err(error) if needs_password(&error) => Some(secret::read_password(password_stdin)?),
+        _ => None,
+    };
+    let analysis =
+        analyze_export_with_password(&source, secret.as_ref()).map_err(import_failure)?;
     Ok(AnalyzeOutput {
         status: "ok",
         source_kind: analysis.source.as_str(),
@@ -189,13 +218,20 @@ fn analyze(source: &std::path::Path) -> Result<AnalyzeOutput, CliFailure> {
 async fn import(
     source: &std::path::Path,
     data_dir: &std::path::Path,
+    password_stdin: bool,
 ) -> Result<ImportOutput, CliFailure> {
     let paths = prepare_import_paths(source, data_dir)?;
+    // The password is read before the store is touched, so a mistyped one
+    // leaves no database behind.
+    let secret = match analyze_export_with_password(&paths.source, None) {
+        Err(error) if needs_password(&error) => Some(secret::read_password(password_stdin)?),
+        _ => None,
+    };
     let store = StoreHandle::open(paths.store_config()).map_err(store_failure)?;
     path_policy::verify_created_storage(&paths)?;
     let service = ImportService::new(store).map_err(import_failure)?;
     let summary = service
-        .run_to_completion(&paths.source)
+        .run_to_completion_with_password(&paths.source, secret)
         .await
         .map_err(import_failure)?;
     Ok(ImportOutput {
@@ -206,6 +242,17 @@ async fn import(
         skipped: summary.skipped,
         failed: summary.failed,
     })
+}
+
+/// Whether a failed analysis was only missing a password.
+fn needs_password(error: &ImportError) -> bool {
+    matches!(
+        error,
+        ImportError::Export {
+            reason: "rayconfig_password_required",
+            ..
+        }
+    )
 }
 
 fn import_failure(error: ImportError) -> CliFailure {

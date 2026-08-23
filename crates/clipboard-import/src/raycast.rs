@@ -63,33 +63,62 @@ pub(crate) fn parse_raycast_report_with_permit(
         ImportSource::Raycast.as_str(),
         limits.manifest_bytes,
         limits.record_bytes,
-        |record, framed| {
-            report.total = record;
-            let result = match framed {
-                JsonRecord::TooLarge => Err(record_failure(
-                    ImportSource::Raycast,
-                    record,
-                    "record_too_large",
-                )),
-                JsonRecord::Complete(bytes) => {
-                    let mapping_bytes = bytes
-                        .len()
-                        .checked_mul(3)
-                        .and_then(|bytes| bytes.checked_add(MAX_RAYCAST_MAPPING_FIXED_BYTES))
-                        .ok_or_else(|| ImportError::service("analysis_too_large"))?;
-                    report.ensure_transient_capacity(mapping_bytes)?;
-                    serde_json::from_slice(bytes)
-                        .map_err(|_| {
-                            record_failure(ImportSource::Raycast, record, "invalid_record")
-                        })
-                        .and_then(|record_value| map_record(record_value, record))
-                }
-            };
-            report.push(result)?;
-            Ok(true)
-        },
+        |record, framed| accumulate(&mut report, record, framed),
     )?;
     Ok(report)
+}
+
+/// Reads the records out of an encrypted export.
+///
+/// Same records, same mapping, different container: the array inside a
+/// `.rayconfig` is byte for byte the array a plain `clipboard.json` holds, so
+/// the two paths differ only in how the bytes are obtained.
+pub(crate) fn parse_rayconfig_report_with_permit(
+    container: &mut [u8],
+    secret: &crate::rayconfig::RayconfigSecret,
+    permit: &clipboard_store::ImportOperationPermit,
+    limits: ImportParseLimits,
+) -> Result<ImportParseReport, ImportError> {
+    limits.ensure_rayconfig_operation(permit)?;
+    let plain = crate::rayconfig::decrypt_container(container, secret)?;
+    let mut report = ImportParseReport::with_source_limit(0, limits.source_bytes);
+    crate::rayconfig::stream_rayconfig_records(
+        plain,
+        limits.manifest_bytes,
+        limits.record_bytes,
+        |record, framed| accumulate(&mut report, record, framed),
+    )?;
+    Ok(report)
+}
+
+/// Maps one framed record into the report. Shared so an encrypted export and a
+/// plain one cannot drift apart in how their records are read.
+fn accumulate(
+    report: &mut ImportParseReport,
+    record: usize,
+    framed: JsonRecord<'_>,
+) -> Result<bool, ImportError> {
+    report.total = record;
+    let result = match framed {
+        JsonRecord::TooLarge => Err(record_failure(
+            ImportSource::Raycast,
+            record,
+            "record_too_large",
+        )),
+        JsonRecord::Complete(bytes) => {
+            let mapping_bytes = bytes
+                .len()
+                .checked_mul(3)
+                .and_then(|bytes| bytes.checked_add(MAX_RAYCAST_MAPPING_FIXED_BYTES))
+                .ok_or_else(|| ImportError::service("analysis_too_large"))?;
+            report.ensure_transient_capacity(mapping_bytes)?;
+            serde_json::from_slice(bytes)
+                .map_err(|_| record_failure(ImportSource::Raycast, record, "invalid_record"))
+                .and_then(|record_value| map_record(record_value, record))
+        }
+    };
+    report.push(result)?;
+    Ok(true)
 }
 
 fn map_record(

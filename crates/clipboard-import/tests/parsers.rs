@@ -36,6 +36,7 @@ fn parse_export_report(path: impl AsRef<Path>) -> Result<ImportParseReport, crat
             detect_export_with_permit(path.as_ref(), permit, ImportParseLimits::default())?;
         crate::parse_detected_export_report_with_permit(
             &detected,
+            None,
             permit,
             ImportParseLimits::default(),
         )
@@ -822,6 +823,182 @@ fn write_export(root: &Path, contents: &str) -> PathBuf {
     let path = root.join("clipboard.json");
     fs::write(&path, contents).unwrap();
     path
+}
+
+/// A password that exists only in these tests. The real export's password is
+/// never written down anywhere in this repository.
+const SYNTHETIC_RAYCONFIG_PASSWORD: &str = "synthetic-parser-password";
+
+/// Builds a `.rayconfig` around a records array, the way Raycast does.
+fn write_rayconfig_export(root: &Path, records: &str) -> PathBuf {
+    use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+    use flate2::{Compression, write::GzEncoder};
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    let document = format!(
+        concat!(
+            r#"{{"raycast_version":"1.104.25","builtin_package_clipboardHistory":"#,
+            r#"{{"clipboardHistoryLengthKey":"threeMonths","clipboardHistoryRecords":{},"#,
+            r#""clipboardHistoryDisabledApplications":["com.example.one"],"#,
+            r#""provider_schemaVersion":1}}}}"#
+        ),
+        records
+    );
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(document.as_bytes()).unwrap();
+    let compressed = encoder.finish().unwrap();
+
+    let mut key = [0_u8; 32];
+    key.copy_from_slice(&Sha256::digest(SYNTHETIC_RAYCONFIG_PASSWORD.as_bytes()));
+    let iv = [11_u8; 16];
+    let mut buffer = vec![0_u8; compressed.len() + 16];
+    let written = cbc::Encryptor::<aes::Aes256>::new(&key.into(), &iv.into())
+        .encrypt_padded_b2b_mut::<Pkcs7>(&compressed, &mut buffer)
+        .unwrap()
+        .len();
+    buffer.truncate(written);
+
+    let path = root.join("Raycast 2026-08-22 14.39.05.rayconfig");
+    let mut container = iv.to_vec();
+    container.extend_from_slice(&buffer);
+    fs::write(&path, container).unwrap();
+    path
+}
+
+fn parse_rayconfig_export(
+    path: impl AsRef<Path>,
+    password: Option<&str>,
+) -> Result<ImportParseReport, crate::ImportError> {
+    with_parser_permit(|permit| {
+        let detected =
+            detect_export_with_permit(path.as_ref(), permit, ImportParseLimits::default())?;
+        let secret = password.map(crate::RayconfigSecret::new);
+        crate::parse_detected_export_report_with_permit(
+            &detected,
+            secret.as_ref(),
+            permit,
+            ImportParseLimits::default(),
+        )
+    })
+}
+
+const EQUIVALENCE_RECORDS: &str = r#"[
+    {"createdAt":"2026-08-22T12:00:00Z","modifiedAt":"2026-08-22T12:00:00Z",
+     "category":"text","copyCount":3,"applicationPath":"/Applications/Synthetic.app",
+     "text":"synthetic entry one"},
+    {"createdAt":"2026-08-22T12:01:00Z","modifiedAt":"2026-08-22T12:01:00Z",
+     "category":"link","copyCount":1,"text":"https://example.invalid/synthetic"}
+]"#;
+
+#[test]
+fn an_encrypted_export_yields_exactly_what_the_plain_one_does() {
+    // The records array inside a .rayconfig is the same array clipboard.json
+    // holds, which is why the Raycast mapper needed no changes at all. This is
+    // that claim as a test rather than a note.
+    let plain_root = TempDir::new().unwrap();
+    let encrypted_root = TempDir::new().unwrap();
+    let plain_path = write_export(plain_root.path(), EQUIVALENCE_RECORDS);
+    let encrypted_path = write_rayconfig_export(encrypted_root.path(), EQUIVALENCE_RECORDS);
+
+    let plain = parse_export_report(&plain_path).unwrap();
+    let encrypted =
+        parse_rayconfig_export(&encrypted_path, Some(SYNTHETIC_RAYCONFIG_PASSWORD)).unwrap();
+
+    assert_eq!(plain.total, encrypted.total);
+    assert_eq!(plain.candidates.len(), encrypted.candidates.len());
+    for (plain, encrypted) in plain.candidates.iter().zip(encrypted.candidates.iter()) {
+        assert_eq!(plain.record_fingerprint, encrypted.record_fingerprint);
+        assert_eq!(plain.capture.kind, encrypted.capture.kind);
+        assert_eq!(plain.capture.captured_at_ms, encrypted.capture.captured_at_ms);
+        assert_eq!(plain.capture.source_app_name, encrypted.capture.source_app_name);
+    }
+}
+
+#[test]
+fn an_encrypted_export_without_a_password_says_which_one_is_missing() {
+    let root = TempDir::new().unwrap();
+    let path = write_rayconfig_export(root.path(), EQUIVALENCE_RECORDS);
+
+    let Err(error) = parse_rayconfig_export(&path, None) else {
+        panic!("an encrypted export must not parse without a password");
+    };
+
+    assert_eq!(
+        error.to_string(),
+        crate::ImportError::export(ImportSource::Raycast.as_str(), "rayconfig_password_required")
+            .to_string()
+    );
+}
+
+#[test]
+fn an_encrypted_export_with_the_wrong_password_imports_nothing() {
+    let root = TempDir::new().unwrap();
+    let path = write_rayconfig_export(root.path(), EQUIVALENCE_RECORDS);
+
+    let Err(error) = parse_rayconfig_export(&path, Some("not-the-password")) else {
+        panic!("a wrong password must never parse");
+    };
+
+    assert_eq!(
+        error.to_string(),
+        crate::ImportError::export(ImportSource::Raycast.as_str(), "rayconfig_password_invalid")
+            .to_string()
+    );
+}
+
+#[test]
+fn a_directory_prefers_a_plain_manifest_over_an_encrypted_one() {
+    // Both present means the password is not needed, so it is not asked for.
+    let root = TempDir::new().unwrap();
+    write_export(root.path(), EQUIVALENCE_RECORDS);
+    write_rayconfig_export(root.path(), EQUIVALENCE_RECORDS);
+
+    let detected = detect_export(root.path()).unwrap();
+
+    assert_eq!(detected.source, ImportSource::Raycast);
+    assert!(!detected.encrypted);
+}
+
+#[test]
+fn a_directory_holding_only_an_encrypted_export_selects_it() {
+    let root = TempDir::new().unwrap();
+    write_rayconfig_export(root.path(), EQUIVALENCE_RECORDS);
+
+    let detected = detect_export(root.path()).unwrap();
+
+    assert_eq!(detected.source, ImportSource::Raycast);
+    assert!(detected.encrypted);
+}
+
+#[test]
+fn an_unnamed_json_manifest_still_beats_an_encrypted_export() {
+    // Precedence is by class, not by which file the directory listed first.
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("exported.json"), EQUIVALENCE_RECORDS).unwrap();
+    write_rayconfig_export(root.path(), EQUIVALENCE_RECORDS);
+
+    let detected = detect_export(root.path()).unwrap();
+
+    assert!(!detected.encrypted);
+}
+
+#[test]
+fn two_encrypted_exports_in_one_directory_are_refused_rather_than_guessed() {
+    let root = TempDir::new().unwrap();
+    write_rayconfig_export(root.path(), EQUIVALENCE_RECORDS);
+    fs::copy(
+        root.path().join("Raycast 2026-08-22 14.39.05.rayconfig"),
+        root.path().join("Raycast 2026-08-23 09.00.00.rayconfig"),
+    )
+    .unwrap();
+
+    let error = detect_export(root.path()).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        crate::ImportError::export("detection", "ambiguous_manifest").to_string()
+    );
 }
 };
 }

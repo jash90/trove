@@ -14,6 +14,7 @@ clipboard-import = { path = "../../crates/clipboard-import" }
 clipboard-store = { path = "../../crates/clipboard-store" }
 directories.workspace = true
 rusqlite = { workspace = true, features = ["limits"] }
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

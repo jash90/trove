@@ -21,6 +21,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+aes = "=0.8.4"
 anyhow = "1.0"
 allocation-counter = "=0.8.1"
 base64 = "0.23.1"
@@ -28,21 +29,29 @@ bitflags = { version = "2.13.1", features = ["serde"] }
 blake3 = "1.8.7"
 cap-fs-ext = "=4.0.2"
 cap-std = "=4.0.2"
+# Pinned exactly: block-cipher and padding behaviour is contractual here, the
+# same reason cap-std, csv-core and zstd are pinned. cbc 0.2 exists only as a
+# release candidate, so the stable 0.1 line is what ships.
+cbc = { version = "=0.1.2", features = ["block-padding"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.6", features = ["derive"] }
 csv = "1.4.0"
 csv-core = "=0.1.13"
 directories = "6.0.0"
+# rust_backend keeps this pure Rust (miniz_oxide); no libz-sys, no C toolchain.
+flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 rusqlite = { version = "0.40.2", features = ["backup", "bundled", "cache"] }
 rusqlite_migration = "2.6.0"
-rustix = { version = "1.1.4", features = ["fs", "process"] }
+rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "=0.10.9"
 tempfile = "3.27.0"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 unicode-normalization = "0.1.25"
 uuid = { version = "1.24.1", features = ["v7", "serde"] }
+zeroize = "=1.9.0"
 zstd = "=0.13.3"
 zstd-sys = { version = "=2.0.16", default-features = false }

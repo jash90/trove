@@ -22,6 +22,9 @@ pub struct DetectedExport {
     pub source: ImportSource,
     pub export_path: PathBuf,
     pub source_fingerprint: [u8; 32],
+    /// True when the bytes are encrypted and a password is needed to read
+    /// them. Detection itself never needs one.
+    pub encrypted: bool,
 }
 
 impl fmt::Debug for DetectedExport {
@@ -77,22 +80,32 @@ fn detect_directory_with_limit(
         return detect_file(&csv, permit, limits);
     }
 
-    let manifest = select_unnamed_manifest_in_directory(directory, max_examined_entries, limits)?;
-    match manifest {
+    let discovered = select_unnamed_manifest_in_directory(directory, max_examined_entries, limits)?;
+    // A plain manifest wins whenever there is one, so a directory holding both
+    // never asks for a password it does not need. The encrypted file is a
+    // fallback rather than a rival, which is why one of each is not ambiguous.
+    match discovered.plain.or(discovered.encrypted) {
         Some(manifest) => detect_file(&manifest, permit, limits),
         None => Err(ImportError::export("detection", "manifest_not_found")),
     }
+}
+
+/// The manifests a directory offered, one slot per class.
+#[derive(Default)]
+struct DiscoveredManifests {
+    plain: Option<PathBuf>,
+    encrypted: Option<PathBuf>,
 }
 
 fn select_unnamed_manifest_in_directory(
     directory: &Path,
     max_examined_entries: usize,
     limits: ImportParseLimits,
-) -> Result<Option<PathBuf>, ImportError> {
+) -> Result<DiscoveredManifests, ImportError> {
     let entries = fs::read_dir(directory)
         .map_err(|_| ImportError::export("detection", "unreadable_export"))?;
     let mut examined_entries = 0_usize;
-    let mut manifest = None;
+    let mut discovered = DiscoveredManifests::default();
     for entry in entries {
         examined_entries = examined_entries
             .checked_add(1)
@@ -107,20 +120,22 @@ fn select_unnamed_manifest_in_directory(
             continue;
         }
         let file_name = entry.file_name();
-        if !matches!(
-            Path::new(&file_name)
-                .extension()
-                .and_then(|extension| extension.to_str()),
-            Some("json" | "csv")
-        ) {
-            continue;
-        }
-        if manifest.is_some() {
+        let slot = match Path::new(&file_name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some("json" | "csv") => &mut discovered.plain,
+            Some("rayconfig") => &mut discovered.encrypted,
+            _ => continue,
+        };
+        // Ambiguity is judged within a class: two manifests of the same kind
+        // give no way to choose, while one of each is answered by precedence.
+        if slot.is_some() {
             return Err(ImportError::export("detection", "ambiguous_manifest"));
         }
-        manifest = Some(bounded_path_join(directory, &file_name, limits)?);
+        *slot = Some(bounded_path_join(directory, &file_name, limits)?);
     }
-    Ok(manifest)
+    Ok(discovered)
 }
 
 #[cfg(test)]
@@ -159,8 +174,19 @@ fn detect_file(
     permit: &clipboard_store::ImportOperationPermit,
     limits: ImportParseLimits,
 ) -> Result<DetectedExport, ImportError> {
+    let mut encrypted = false;
     let source = match path.extension().and_then(|extension| extension.to_str()) {
         Some("csv") => detect_csv_source(path, permit, limits)?,
+        Some("rayconfig") => {
+            // Named rather than sniffed: the schema is behind the encryption,
+            // so the file's shape is all detection can check without a
+            // password. The real schema check happens when it is parsed.
+            let metadata = fs::metadata(path)
+                .map_err(|_| ImportError::export("detection", "unreadable_export"))?;
+            crate::rayconfig::validate_container_length(metadata.len())?;
+            encrypted = true;
+            ImportSource::Raycast
+        }
         Some("json") => {
             limits.ensure_json_operation(permit)?;
             let mut detected = None;
@@ -184,8 +210,22 @@ fn detect_file(
     Ok(DetectedExport {
         source,
         export_path: bounded_path_copy(path, limits)?,
-        source_fingerprint: source_fingerprint(source, path, limits.manifest_bytes)?,
+        source_fingerprint: source_fingerprint(source, path, fingerprint_limit(encrypted, limits))?,
+        encrypted,
     })
+}
+
+/// How many bytes the fingerprint may read.
+///
+/// A rayconfig is bounded by its own, smaller cap. Using the manifest limit
+/// would let detection accept a file the parser then refuses, which reads as
+/// two unrelated failures for one cause.
+fn fingerprint_limit(encrypted: bool, limits: ImportParseLimits) -> usize {
+    if encrypted {
+        crate::service::MAX_RAYCONFIG_CIPHERTEXT_BYTES
+    } else {
+        limits.manifest_bytes
+    }
 }
 
 pub(crate) fn bounded_path_copy(
@@ -651,6 +691,7 @@ mod tests {
             source: ImportSource::SuperCmd,
             export_path: PathBuf::from("/sentinel/private/export-name.json"),
             source_fingerprint: fingerprint,
+            encrypted: false,
         };
 
         let rendered = format!("{detected:?}");

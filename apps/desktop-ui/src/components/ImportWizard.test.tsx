@@ -87,6 +87,106 @@ const stats: StorageStats = {
   blobBytes: 0,
 };
 
+describe('ImportWizard encrypted exports', () => {
+  const ENCRYPTED_PATH = '/Users/private/fixture secret payload/Raycast export.rayconfig';
+  const SENTINEL_PASSWORD = 'sentinel-secret-passphrase';
+
+  it('asks for a password only when the export says it needs one', async () => {
+    const analyzeImport = vi.fn(async (_path: string, password?: string) => {
+      if (password === undefined) throw 'rayconfig_password_required';
+      return analysis;
+    });
+    const chooseImportFile = vi.fn(async () => ENCRYPTED_PATH);
+    const gateway = makeGateway({ analyzeImport, chooseImportFile });
+    const user = userEvent.setup();
+    const { container } = render(<ImportWizard gateway={gateway} />);
+
+    await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
+
+    const field = await screen.findByLabelText('Hasło eksportu');
+    await user.type(field, SENTINEL_PASSWORD);
+    await user.click(screen.getByRole('button', { name: 'Odszyfruj i przeanalizuj' }));
+
+    expect(
+      await screen.findByRole('heading', { name: 'Archiwum gotowe do importu' }),
+    ).toBeVisible();
+    expect(analyzeImport).toHaveBeenLastCalledWith(ENCRYPTED_PATH, SENTINEL_PASSWORD);
+    // Neither the password nor the path may survive into the rendered tree.
+    expect(container.textContent).not.toContain(SENTINEL_PASSWORD);
+    expect(container.textContent).not.toContain('fixture secret payload');
+  });
+
+  it('retries a wrong password without asking for the file again', async () => {
+    const analyzeImport = vi.fn(async (_path: string, password?: string) => {
+      if (password === undefined) throw 'rayconfig_password_required';
+      if (password !== 'right') throw 'rayconfig_password_invalid';
+      return analysis;
+    });
+    const chooseImportFile = vi.fn(async () => ENCRYPTED_PATH);
+    const gateway = makeGateway({ analyzeImport, chooseImportFile });
+    const user = userEvent.setup();
+    const { container } = render(<ImportWizard gateway={gateway} />);
+
+    await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
+    await user.type(await screen.findByLabelText('Hasło eksportu'), SENTINEL_PASSWORD);
+    await user.click(screen.getByRole('button', { name: 'Odszyfruj i przeanalizuj' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Hasło nie pasuje do tego pliku.',
+    );
+    // The field is emptied, so a mistyped password is not resubmitted by
+    // accident and does not sit in the DOM waiting to be read.
+    const retry = await screen.findByLabelText('Hasło eksportu');
+    expect(retry).toHaveValue('');
+
+    await user.type(retry, 'right');
+    await user.click(screen.getByRole('button', { name: 'Odszyfruj i przeanalizuj' }));
+
+    expect(
+      await screen.findByRole('heading', { name: 'Archiwum gotowe do importu' }),
+    ).toBeVisible();
+    // One pick, three analyses: the file was chosen once and only the password
+    // changed between attempts.
+    expect(chooseImportFile).toHaveBeenCalledOnce();
+    expect(analyzeImport).toHaveBeenCalledTimes(3);
+    expect(container.textContent).not.toContain(SENTINEL_PASSWORD);
+  });
+
+  it('abandons the import when the password prompt is cancelled', async () => {
+    const analyzeImport = vi.fn(async (_path: string, password?: string) => {
+      if (password === undefined) throw 'rayconfig_password_required';
+      return analysis;
+    });
+    const gateway = makeGateway({
+      analyzeImport,
+      chooseImportFile: vi.fn(async () => ENCRYPTED_PATH),
+    });
+    const user = userEvent.setup();
+    render(<ImportWizard gateway={gateway} />);
+
+    await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
+    await screen.findByLabelText('Hasło eksportu');
+    await user.click(screen.getByRole('button', { name: 'Anuluj' }));
+
+    expect(await screen.findByRole('button', { name: 'Wybierz plik eksportu' })).toBeVisible();
+    expect(analyzeImport).toHaveBeenCalledOnce();
+  });
+
+  it('reports an unrelated failure without asking for a password', async () => {
+    const analyzeImport = vi.fn(async () => {
+      throw 'unreadable_export';
+    });
+    const gateway = makeGateway({ analyzeImport });
+    const user = userEvent.setup();
+    render(<ImportWizard gateway={gateway} />);
+
+    await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Nie udało się przeanalizować');
+    expect(screen.queryByLabelText('Hasło eksportu')).not.toBeInTheDocument();
+  });
+});
+
 const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGateway =>
   ({
     search: vi.fn(async () => ({ items: [], nextCursor: null, rankedTruncated: false })),
@@ -114,7 +214,7 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
   }) as ClipboardGateway;
 
 const chooseFile = async (user: ReturnType<typeof userEvent.setup>): Promise<void> => {
-  await user.click(screen.getByRole('button', { name: 'Wybierz plik JSON' }));
+  await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
   await screen.findByRole('button', { name: 'Rozpocznij import' });
 };
 
@@ -133,11 +233,11 @@ describe('ImportWizard privacy and confirmation', () => {
     const user = userEvent.setup();
     render(<ImportWizard gateway={gateway} />);
 
-    expect(screen.getByRole('button', { name: 'Wybierz plik JSON' })).toHaveFocus();
-    await user.click(screen.getByRole('button', { name: 'Wybierz plik JSON' }));
+    expect(screen.getByRole('button', { name: 'Wybierz plik eksportu' })).toHaveFocus();
+    await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
 
     expect(analyzeImport).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Wybierz plik JSON' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Wybierz plik eksportu' })).toBeVisible();
   });
 
   it('passes the selected path once and never renders or sends it after analysis', async () => {
@@ -162,7 +262,9 @@ describe('ImportWizard privacy and confirmation', () => {
     await user.click(screen.getByRole('button', { name: 'Rozpocznij import' }));
     expect(await screen.findByRole('heading', { name: 'Import zakończony' })).toBeVisible();
     expect(analyzeImport).toHaveBeenCalledOnce();
-    expect(analyzeImport).toHaveBeenCalledWith(privatePath);
+    // A plain export carries no password, and the wizard says so explicitly
+    // rather than leaving the argument to chance.
+    expect(analyzeImport).toHaveBeenCalledWith(privatePath, undefined);
     expect(startImport).toHaveBeenCalledWith(RUN_ID);
     expect(getImportStatus).toHaveBeenCalledWith(RUN_ID);
     expect(JSON.stringify(startImport.mock.calls)).not.toContain(privatePath);
@@ -304,7 +406,7 @@ describe('ImportWizard start recovery and polling', () => {
     const gateway = makeGateway({ getImportStatus });
     const { unmount } = render(<ImportWizard gateway={gateway} pollIntervalMs={50} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Wybierz plik JSON' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
     await act(async () => Promise.resolve());
     fireEvent.click(screen.getByRole('button', { name: 'Rozpocznij import' }));
     await act(async () => Promise.resolve());
@@ -330,7 +432,7 @@ describe('ImportWizard start recovery and polling', () => {
     const gateway = makeGateway({ getImportStatus });
     const { unmount } = render(<ImportWizard gateway={gateway} pollIntervalMs={5} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Wybierz plik JSON' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
     await screen.findByRole('button', { name: 'Rozpocznij import' });
     fireEvent.click(screen.getByRole('button', { name: 'Rozpocznij import' }));
     await waitFor(() => expect(getImportStatus).toHaveBeenCalledOnce());
@@ -366,7 +468,7 @@ describe('Import dialog accessibility', () => {
     const dialog = screen.getByRole('dialog', { name: 'Importuj historię' });
     expect(dialog).toHaveAttribute('aria-modal', 'true');
     expect(dialog).toHaveAccessibleDescription(/archiwum może zawierać dane wrażliwe/i);
-    const primary = screen.getByRole('button', { name: 'Wybierz plik JSON' });
+    const primary = screen.getByRole('button', { name: 'Wybierz plik eksportu' });
     const close = screen.getByRole('button', { name: 'Zamknij import' });
     expect(primary).toHaveFocus();
 
