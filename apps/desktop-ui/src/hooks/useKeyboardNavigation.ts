@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from 'react';
+import { useEffect, useState, type KeyboardEvent } from 'react';
 
 import type { HistoryItem } from '../lib/contracts';
 
@@ -25,6 +25,12 @@ export const useKeyboardNavigation = ({
   const selectedId = items.some((item) => item.eventId === storedSelectedId)
     ? storedSelectedId
     : (items[0]?.eventId ?? null);
+
+  useEffect(() => {
+    if (storedSelectedId !== selectedId) {
+      setStoredSelectedId(selectedId);
+    }
+  }, [selectedId, storedSelectedId]);
 
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>): void => {
     const currentIndex = items.findIndex((item) => item.eventId === selectedId);

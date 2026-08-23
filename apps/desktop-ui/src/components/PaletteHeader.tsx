@@ -1,10 +1,11 @@
 import { Clipboard, Search } from 'lucide-react';
-import type { ChangeEventHandler, KeyboardEventHandler } from 'react';
+import type { ChangeEventHandler, KeyboardEventHandler, Ref } from 'react';
 
 interface PaletteHeaderProps {
   query: string;
   selectedId: number | null;
   resultCount: number;
+  searchInputRef?: Ref<HTMLInputElement>;
   onQueryChange: (query: string) => void;
   onKeyDown: KeyboardEventHandler<HTMLInputElement>;
 }
@@ -13,6 +14,7 @@ export const PaletteHeader = ({
   query,
   selectedId,
   resultCount,
+  searchInputRef,
   onQueryChange,
   onKeyDown,
 }: PaletteHeaderProps): React.JSX.Element => {
@@ -42,9 +44,9 @@ export const PaletteHeader = ({
         <Search className="search-field__icon" size={19} strokeWidth={1.8} aria-hidden="true" />
         <span className="sr-only">Przeszukaj historię</span>
         <input
+          ref={searchInputRef}
           id="history-search"
           type="search"
-          autoFocus
           autoComplete="off"
           spellCheck={false}
           value={query}

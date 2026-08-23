@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState, type KeyboardEventHandler } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -75,6 +75,16 @@ const KeyboardHarness = ({ items, onActivate }: KeyboardHarnessProps): React.JSX
 const makeGateway = (search: ClipboardGateway['search']): ClipboardGateway =>
   ({
     search,
+    preview: vi.fn(async (eventId: number) => ({
+      eventId,
+      kind: 'text',
+      mimeType: 'text/plain',
+      text: `Synthetic clipboard item ${eventId}`,
+      byteSize: 32,
+      sourceAppName: 'Synthetic Editor',
+      missingPayload: false,
+    })),
+    getThumbnail: vi.fn(async () => null),
     copyEvent: vi.fn(async () => ({ mode: 'copied', plainText: false })),
   }) as unknown as ClipboardGateway;
 
@@ -171,6 +181,39 @@ describe('HistoryList', () => {
       '20',
     );
   });
+
+  it('commits reconciled selection so a removed event cannot reactivate when reintroduced', async () => {
+    const user = userEvent.setup();
+    const onActivate = vi.fn();
+    const { rerender } = render(
+      <KeyboardHarness items={makeItems(2)} onActivate={onActivate} />,
+    );
+
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getByRole('option', { selected: true })).toHaveAttribute(
+      'data-event-id',
+      '2',
+    );
+
+    rerender(<KeyboardHarness items={makeItems(2, 3)} onActivate={onActivate} />);
+    await waitFor(() => {
+      expect(screen.getByRole('option', { selected: true })).toHaveAttribute(
+        'data-event-id',
+        '3',
+      );
+    });
+
+    rerender(
+      <KeyboardHarness
+        items={[makeItems(1, 2)[0]!, ...makeItems(2, 3)]}
+        onActivate={onActivate}
+      />,
+    );
+    expect(screen.getByRole('option', { selected: true })).toHaveAttribute(
+      'data-event-id',
+      '3',
+    );
+  });
 });
 
 describe('FilterRail', () => {
@@ -212,6 +255,7 @@ describe('FilterRail', () => {
 describe('clipboard palette states', () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it('focuses the query first and sends a filter token through the gateway', async () => {
@@ -239,6 +283,46 @@ describe('clipboard palette states', () => {
       limit: 80,
       cursor: null,
     });
+  });
+
+  it('returns focus to search after pointer-selecting a history row', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(420);
+    const page: HistoryPage = {
+      items: makeItems(2),
+      nextCursor: null,
+      rankedTruncated: false,
+    };
+    render(<App gateway={makeGateway(async () => page)} />);
+    const selectedRow = await screen.findByRole('option', {
+      name: /Synthetic clipboard item 2/,
+    });
+    const search = screen.getByRole('searchbox', { name: 'Przeszukaj historię' });
+
+    await user.click(selectedRow);
+
+    expect(search).toHaveFocus();
+    expect(screen.getByRole('option', { selected: true })).toHaveAttribute(
+      'data-event-id',
+      '2',
+    );
+  });
+
+  it('returns focus to search after activating a filter with a pointer', async () => {
+    const user = userEvent.setup();
+    const page: HistoryPage = {
+      items: makeItems(2),
+      nextCursor: null,
+      rankedTruncated: false,
+    };
+    render(<App gateway={makeGateway(async () => page)} />);
+    await screen.findByRole('listbox', { name: 'Wyniki historii schowka' });
+    const search = screen.getByRole('searchbox', { name: 'Przeszukaj historię' });
+
+    await user.click(screen.getByRole('button', { name: 'Obrazy' }));
+
+    expect(search).toHaveFocus();
   });
 
   it('announces loading, empty, and generic error states without leaking details', async () => {
