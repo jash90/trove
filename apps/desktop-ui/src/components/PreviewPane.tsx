@@ -71,7 +71,6 @@ export const PreviewPane = ({
           <>
             {preview.kind === 'image' ? (
               <ImagePreview
-                missingPayload={preview.missingPayload}
                 thumbnailUrl={thumbnailUrl}
                 thumbnailStatus={thumbnailStatus}
               />

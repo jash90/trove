@@ -336,8 +336,12 @@ fn imported_store_with_a_file_source_reference() -> (tempfile::TempDir, PathBuf)
     let raycast = sandbox.path().join("synthetic-raycast-reference");
     let supercmd = sandbox.path().join("synthetic-supercmd-reference");
     let data_dir = sandbox.path().join("synthetic-data-reference");
+    // The importer keeps only entries whose source is still reachable, so the
+    // referenced file has to exist for this fixture to survive the import.
+    let present = sandbox.path().join("synthetic.pdf");
     fs::create_dir(&raycast).unwrap();
     fs::create_dir(&supercmd).unwrap();
+    fs::write(&present, b"synthetic").unwrap();
     fs::write(
         raycast.join("clipboard.json"),
         serde_json::to_vec(&json!([{
@@ -347,7 +351,7 @@ fn imported_store_with_a_file_source_reference() -> (tempfile::TempDir, PathBuf)
             "copyCount": 1,
             "text": "synthetic.pdf",
             "textContent": "",
-            "filePath": "/synthetic/outside/synthetic.pdf"
+            "filePath": present.to_str().unwrap()
         }]))
         .unwrap(),
     )
@@ -1495,10 +1499,16 @@ fn two_source_import_repeat_and_verify_report_only_sanitized_accounting() {
             &["shared sanitized payload", "available.png", "missing.png"],
         );
     }
-    assert_eq!(json_output(&first_raycast)["imported"], 2);
-    assert_eq!(json_output(&first_supercmd)["imported"], 3);
-    assert_eq!(json_output(&second_raycast)["alreadyPresent"], 2);
-    assert_eq!(json_output(&second_supercmd)["alreadyPresent"], 3);
+    // Each source carries one image that is not in the export. Those records
+    // are accounted for and left out instead of becoming unusable rows.
+    assert_eq!(json_output(&first_raycast)["imported"], 1);
+    assert_eq!(json_output(&first_raycast)["skipped"], 1);
+    assert_eq!(json_output(&first_supercmd)["imported"], 2);
+    assert_eq!(json_output(&first_supercmd)["skipped"], 1);
+    assert_eq!(json_output(&second_raycast)["alreadyPresent"], 1);
+    assert_eq!(json_output(&second_raycast)["skipped"], 1);
+    assert_eq!(json_output(&second_supercmd)["alreadyPresent"], 2);
+    assert_eq!(json_output(&second_supercmd)["skipped"], 1);
 
     let verify = cli(&[
         "verify",
@@ -1511,8 +1521,8 @@ fn two_source_import_repeat_and_verify_report_only_sanitized_accounting() {
     let value = json_output(&verify);
     assert_eq!(value["status"], "ok");
     assert_eq!(value["latestSourceTotal"], 5);
-    assert_eq!(value["eventCount"], 5);
-    assert_eq!(value["physicalContentCount"], 4);
+    assert_eq!(value["eventCount"], 3);
+    assert_eq!(value["physicalContentCount"], 2);
     assert_eq!(value["integrityStatus"], "ok");
     assert_eq!(value["runStatus"], "ok");
     assert_eq!(value["logicalStatus"], "ok");
@@ -1552,11 +1562,15 @@ fn two_source_import_repeat_and_verify_report_only_sanitized_accounting() {
         .find(|summary| summary["sourceKind"] == "supercmd")
         .unwrap();
     assert_eq!(raycast_summary["total"], 2);
-    assert_eq!(raycast_summary["alreadyPresent"], 2);
+    assert_eq!(raycast_summary["alreadyPresent"], 1);
+    assert_eq!(raycast_summary["skipped"], 1);
     assert_eq!(supercmd_summary["total"], 3);
-    assert_eq!(supercmd_summary["alreadyPresent"], 3);
+    assert_eq!(supercmd_summary["alreadyPresent"], 2);
+    assert_eq!(supercmd_summary["skipped"], 1);
     assert_eq!(supercmd_summary["availableImageEvents"], 1);
-    assert_eq!(supercmd_summary["missingImageEvents"], 1);
+    // The unreachable image never became an event, so there is no missing one
+    // left to count.
+    assert_eq!(supercmd_summary["missingImageEvents"], 0);
     assert_eq!(
         supercmd_summary
             .as_object()

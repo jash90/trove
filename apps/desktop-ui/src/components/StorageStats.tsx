@@ -51,7 +51,7 @@ export const StorageStats = ({ stats, status }: StorageStatsProps): React.JSX.El
             To rozmiar głównego pliku bazy i wskazanych blobów; nie jest to całkowite użycie dysku aplikacji.
           </p>
           <p className="storage-counts">
-            {formatCount(validated.eventCount)} zdarzeń · {formatCount(validated.contentCount)} treści · {formatCount(validated.missingPayloadCount)} bez pliku źródłowego
+            {formatCount(validated.eventCount)} zdarzeń · {formatCount(validated.contentCount)} treści
           </p>
         </>
       ) : null}

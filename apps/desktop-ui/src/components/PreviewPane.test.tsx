@@ -29,7 +29,6 @@ const makeItem = (eventId: number, overrides: Partial<HistoryItem> = {}): Histor
   pinned: false,
   preview: `Synthetic item ${eventId}`,
   byteSize: 32,
-  missingPayload: false,
   hasThumbnail: false,
   ...overrides,
 });
@@ -41,7 +40,6 @@ const makePreview = (eventId: number, overrides: Partial<Preview> = {}): Preview
   text: `Synthetic preview ${eventId}`,
   byteSize: 32,
   sourceAppName: 'Synthetic Editor',
-  missingPayload: false,
   sourcePath: null,
   sourceExists: false,
   ...overrides,
@@ -104,6 +102,7 @@ const makeGateway = (
       analysisId: '0198f000-0000-7000-8000-000000000501',
       total: 1,
       candidateRecords: 1,
+      skipped: 0,
       failed: 0,
     })),
     startImport: vi.fn(async (): Promise<ImportRunHandle> => ({
@@ -120,7 +119,6 @@ const makeGateway = (
     getStorageStats: vi.fn(async (): Promise<StorageStats> => ({
       contentCount: 1,
       eventCount: 1,
-      missingPayloadCount: 0,
       databaseBytes: 1,
       blobBytes: 0,
     })),
@@ -170,21 +168,22 @@ describe('safe preview rendering', () => {
     expect(document.querySelector('img')).toBeNull();
   });
 
-  it('shows an explicit missing source state for an unavailable image', () => {
+  it('offers a copy path when a thumbnail cannot be rendered', () => {
     render(
       <PreviewPane
         preview={makePreview(1, {
           kind: 'image',
           mimeType: 'image/png',
           text: null,
-          missingPayload: true,
         })}
         thumbnailUrl={null}
         thumbnailStatus="idle"
       />,
     );
 
-    expect(screen.getByText('Brak pliku źródłowego')).toBeVisible();
+    // The importer no longer keeps entries whose source is gone, so the only
+    // remaining case is a thumbnail that could not be produced.
+    expect(screen.getByText('Miniatura jest niedostępna')).toBeVisible();
   });
 
   it('accepts only bounded PNG thumbnail payloads', () => {
@@ -325,12 +324,11 @@ describe('source location', () => {
     const user = userEvent.setup();
     render(
       <App
-        gateway={makeGateway([makeItem(1, { kind: 'file', missingPayload: true })], {
+        gateway={makeGateway([makeItem(1, { kind: 'file' })], {
           revealSource,
           preview: vi.fn(async (eventId) =>
             makePreview(eventId, {
               kind: 'file',
-              missingPayload: true,
               sourcePath: '/Users/synthetic/Pobrane/raport syntetyczny.pdf',
               sourceExists: true,
             }),
@@ -349,14 +347,13 @@ describe('source location', () => {
     expect(revealSource).toHaveBeenCalledWith(1);
   });
 
-  it('states plainly that a moved file is gone instead of offering to reveal it', async () => {
+  it('drops the reveal action for a file that has been moved since the import', async () => {
     render(
       <App
-        gateway={makeGateway([makeItem(1, { kind: 'file', missingPayload: true })], {
+        gateway={makeGateway([makeItem(1, { kind: 'file' })], {
           preview: vi.fn(async (eventId) =>
             makePreview(eventId, {
               kind: 'file',
-              missingPayload: true,
               sourcePath: '/Users/synthetic/Pobrane/usuniety.pdf',
               sourceExists: false,
             }),
@@ -366,7 +363,7 @@ describe('source location', () => {
     );
     await settleInitialSearch();
 
-    expect(await screen.findByText('Plik nie istnieje')).toBeVisible();
+    expect(await screen.findByText('/Users/synthetic/Pobrane/usuniety.pdf')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Pokaż w Finderze' })).toBeNull();
   });
 

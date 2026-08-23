@@ -204,6 +204,12 @@ pub struct BeginImportRun {
     pub total_records: u64,
     pub candidate_records: u64,
     pub initial_failures: Vec<ImportFailureCount>,
+    /// Records the parser deliberately left out, by reason.
+    ///
+    /// Separate from failures: nothing went wrong, the record simply had
+    /// nothing worth keeping. Counting them as failures would report a healthy
+    /// import as broken.
+    pub initial_skips: Vec<ImportFailureCount>,
 }
 
 pub struct ResumeImportRun {
@@ -1254,7 +1260,13 @@ fn begin_import(
         .iter()
         .try_fold(0_u64, |sum, failure| sum.checked_add(failure.count))
         .ok_or(StoreError::InvalidImportInput)?;
-    let initial_failure_fingerprint = initial_failure_fingerprint(&input.initial_failures)?;
+    let initial_skipped = input
+        .initial_skips
+        .iter()
+        .try_fold(0_u64, |sum, skip| sum.checked_add(skip.count))
+        .ok_or(StoreError::InvalidImportInput)?;
+    let initial_failure_fingerprint =
+        initial_failure_fingerprint(&input.initial_failures, &input.initial_skips)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let persisted = transaction.query_row(
         "SELECT source_kind, source_fingerprint, total_records, candidate_records,
@@ -1299,7 +1311,7 @@ fn begin_import(
            (external_id, source_kind, source_fingerprint, initial_failure_fingerprint, status,
             worker_generation, total_records, candidate_records, next_candidate_offset, imported_records,
             already_present_records, skipped_records, failed_records, started_at_ms)
-         VALUES (?1, ?2, ?3, ?4, 'running', 1, ?5, ?6, 0, 0, 0, 0, ?7, ?8)",
+         VALUES (?1, ?2, ?3, ?4, 'running', 1, ?5, ?6, 0, 0, 0, ?7, ?8, ?9)",
         params![
             input.run_id.as_bytes().as_slice(),
             input.source_kind.as_str(),
@@ -1307,12 +1319,13 @@ fn begin_import(
             initial_failure_fingerprint.as_slice(),
             sql_count(input.total_records)?,
             sql_count(input.candidate_records)?,
+            sql_count(initial_skipped)?,
             sql_count(initial_failed)?,
             now_ms(),
         ],
     )?;
     let import_run_id = transaction.last_insert_rowid();
-    for failure in &input.initial_failures {
+    for failure in input.initial_failures.iter().chain(&input.initial_skips) {
         transaction.execute(
             "INSERT INTO import_failure_reason(import_run_id, reason_code, count)
              VALUES (?1, ?2, ?3)
@@ -1334,9 +1347,12 @@ fn begin_import(
     })
 }
 
-fn initial_failure_fingerprint(failures: &[ImportFailureCount]) -> Result<[u8; 32], StoreError> {
+fn initial_failure_fingerprint(
+    failures: &[ImportFailureCount],
+    skips: &[ImportFailureCount],
+) -> Result<[u8; 32], StoreError> {
     let mut canonical = BTreeMap::<&str, u64>::new();
-    for failure in failures {
+    for failure in failures.iter().chain(skips) {
         let count = canonical.entry(&failure.reason_code).or_default();
         *count = count
             .checked_add(failure.count)
@@ -2373,17 +2389,20 @@ fn validate_begin_import(input: &BeginImportRun) -> Result<(), StoreError> {
     {
         return Err(StoreError::InvalidImportInput);
     }
-    let initial_failed = input
+    // Every source record must land in exactly one bucket before the run
+    // starts: a candidate to import, a parse failure, or a deliberate skip.
+    let accounted = input
         .initial_failures
         .iter()
-        .try_fold(0_u64, |sum, failure| {
-            if failure.count == 0 || !valid_reason_code(&failure.reason_code) {
+        .chain(&input.initial_skips)
+        .try_fold(0_u64, |sum, reason| {
+            if reason.count == 0 || !valid_reason_code(&reason.reason_code) {
                 return None;
             }
-            sum.checked_add(failure.count)
+            sum.checked_add(reason.count)
         })
         .ok_or(StoreError::InvalidImportInput)?;
-    if input.candidate_records.checked_add(initial_failed) != Some(input.total_records) {
+    if input.candidate_records.checked_add(accounted) != Some(input.total_records) {
         return Err(StoreError::InvalidImportInput);
     }
     sql_count(input.total_records)?;
@@ -2676,6 +2695,7 @@ mod tests {
                 total_records: 1,
                 candidate_records: 1,
                 initial_failures: Vec::new(),
+                initial_skips: Vec::new(),
             },
         )
         .unwrap();

@@ -377,8 +377,10 @@ async fn preview_pin_delete_and_storage_commands_expose_only_selected_bounded_da
     assert_eq!(preview.event_id, text.event_id);
     assert_eq!(preview.text.as_deref(), Some("wybrany podgląd"));
     assert_eq!(preview.mime_type, "text/plain");
-    assert!(!preview.missing_payload);
     let preview_json = serde_json::to_value(&preview).unwrap();
+    // The wire contract no longer carries a missing-payload flag: the importer
+    // leaves such records out, so nothing downstream has to represent them.
+    assert!(preview_json.get("missingPayload").is_none());
     assert!(preview_json.get("blobRelpath").is_none());
     assert!(preview_json.get("filesystemPath").is_none());
 
@@ -394,7 +396,6 @@ async fn preview_pin_delete_and_storage_commands_expose_only_selected_bounded_da
     let stats = commands::get_storage_stats_service(&state).await.unwrap();
     assert_eq!(stats.content_count, 2);
     assert_eq!(stats.event_count, 2);
-    assert_eq!(stats.missing_payload_count, 1);
     assert!(stats.database_bytes > 0);
 
     commands::delete_event_service(&state, text.event_id)

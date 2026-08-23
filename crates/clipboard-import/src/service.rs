@@ -291,6 +291,9 @@ pub struct ImportAnalysis {
     pub analysis_id: Uuid,
     pub total: u64,
     pub candidate_records: u64,
+    /// Records deliberately left out: nothing was wrong with them, they simply
+    /// pointed at a file that is no longer there.
+    pub skipped: u64,
     pub failed: u64,
 }
 
@@ -546,6 +549,7 @@ impl ImportService {
         let total = source.source.total_records;
         let candidate_records = source.source.candidate_records();
         let failed = source.source.initial_failed_records();
+        let skipped = source.source.initial_skipped_records();
         let analysis_id = Uuid::now_v7();
         let analysis_id = self
             .runtime
@@ -558,6 +562,7 @@ impl ImportService {
             analysis_id,
             total,
             candidate_records,
+            skipped,
             failed,
         })
     }
@@ -667,6 +672,7 @@ impl ImportService {
                 total_records: source.total_records,
                 candidate_records: source.candidate_records(),
                 initial_failures: source.failure_counts.clone(),
+                initial_skips: source.skip_counts.clone(),
             })
             .await
             .map_err(map_store_error)
@@ -1662,6 +1668,7 @@ struct PreparedSource {
     total_records: u64,
     candidates: Vec<ImportCandidate>,
     failure_counts: Vec<ImportFailureCount>,
+    skip_counts: Vec<ImportFailureCount>,
 }
 
 impl PreparedSource {
@@ -1676,6 +1683,10 @@ impl PreparedSource {
             .sum()
     }
 
+    fn initial_skipped_records(&self) -> u64 {
+        self.skip_counts.iter().map(|skip| skip.count).sum()
+    }
+
     fn retained_bytes(&self) -> usize {
         let mut bytes = PREPARED_SESSION_OVERHEAD_BYTES
             .saturating_add(size_of::<Self>())
@@ -1686,6 +1697,11 @@ impl PreparedSource {
             )
             .saturating_add(
                 self.failure_counts
+                    .capacity()
+                    .saturating_mul(size_of::<ImportFailureCount>()),
+            )
+            .saturating_add(
+                self.skip_counts
                     .capacity()
                     .saturating_mul(size_of::<ImportFailureCount>()),
             );
@@ -1710,7 +1726,7 @@ impl PreparedSource {
                     .saturating_add(option_string_capacity(&representation.missing_ref));
             }
         }
-        for failure in &self.failure_counts {
+        for failure in self.failure_counts.iter().chain(&self.skip_counts) {
             bytes = bytes.saturating_add(failure.reason_code.capacity());
         }
         bytes
@@ -1746,7 +1762,8 @@ fn prepare_source_with_hook(
     if !source_is_unchanged {
         return Err(ImportError::service("source_changed"));
     }
-    let report = report?;
+    let mut report = report?;
+    drop_unreachable_candidates(&mut report)?;
     let total_records =
         u64::try_from(report.total).map_err(|_| ImportError::service("source_too_large"))?;
     let source_fingerprint = prepared_snapshot_fingerprint(
@@ -1755,14 +1772,36 @@ fn prepare_source_with_hook(
         total_records,
         &report,
     )?;
-    let failure_counts = aggregate_failures(&report, limits.source_control_bytes)?;
+    let failure_counts = aggregate_reasons(&report, &report.failures, limits.source_control_bytes)?;
+    let skip_counts = aggregate_reasons(&report, &report.skips, limits.source_control_bytes)?;
     Ok(PreparedSource {
         source_kind: store_source(detected.source),
         source_fingerprint,
         total_records,
         candidates: report.candidates,
         failure_counts,
+        skip_counts,
     })
+}
+
+/// Moves candidates that lead nowhere from the import into the skip bucket.
+///
+/// Policy, not parsing: the parsers still map every source record faithfully so
+/// their own guarantees stay testable, and the decision to leave a record out
+/// is taken once, here, where the whole report is in hand.
+fn drop_unreachable_candidates(report: &mut ImportParseReport) -> Result<(), ImportError> {
+    let mut retained = Vec::with_capacity(report.candidates.len());
+    for candidate in std::mem::take(&mut report.candidates) {
+        if crate::candidate_leads_nowhere(&candidate) {
+            let skip =
+                crate::record_failure(candidate.source, candidate.source_record, "source_missing");
+            report.push_skip(skip)?;
+            continue;
+        }
+        retained.push(candidate);
+    }
+    report.candidates = retained;
+    Ok(())
 }
 
 fn prepared_snapshot_fingerprint(
@@ -1789,24 +1828,42 @@ fn prepared_snapshot_fingerprint(
         hasher.add_optional(Some(&record.to_be_bytes()));
         hasher.add_optional(Some(failure.reason.as_bytes()));
     }
+    // Skips belong in the snapshot too: a resume that reparses the same source
+    // on a machine where a referenced file has since disappeared produces a
+    // different set, and that must be detected rather than silently accepted.
+    hasher.add_optional(Some(&(report.skips.len() as u64).to_be_bytes()));
+    for skip in &report.skips {
+        let record =
+            u64::try_from(skip.record).map_err(|_| ImportError::service("source_too_large"))?;
+        hasher.add_optional(Some(b"skip"));
+        hasher.add_optional(Some(&record.to_be_bytes()));
+        hasher.add_optional(Some(skip.reason.as_bytes()));
+    }
     Ok(hasher.finish())
 }
 
-fn aggregate_failures(
+/// Collapses a bucket of per-record reasons into bounded counts.
+///
+/// Used for both failures and deliberate skips: the shapes are identical and
+/// the same fixed reason-slot budget applies to each.
+fn aggregate_reasons(
     report: &ImportParseReport,
+    entries: &[crate::ImportRecordFailure],
     source_control_bytes: usize,
 ) -> Result<Vec<ImportFailureCount>, ImportError> {
-    aggregate_failures_with_hook(report, source_control_bytes, |_, _| {})
+    aggregate_reasons_with_hook(report, entries, source_control_bytes, |_, _| {})
 }
 
-fn aggregate_failures_with_hook(
+fn aggregate_reasons_with_hook(
     report: &ImportParseReport,
+    entries: &[crate::ImportRecordFailure],
     source_control_bytes: usize,
     before_allocation: impl FnOnce(usize, usize),
 ) -> Result<Vec<ImportFailureCount>, ImportError> {
+    let _ = report;
     let mut counts = [("", 0_u64); MAX_IMPORT_FAILURE_KINDS];
     let mut used = 0_usize;
-    for failure in &report.failures {
+    for failure in entries {
         if let Some((_, count)) = counts[..used]
             .iter_mut()
             .find(|(reason, _)| *reason == failure.reason)
@@ -2208,8 +2265,9 @@ mod tests {
             .unwrap();
         let authorized = std::cell::Cell::new(false);
 
-        let failures = aggregate_failures_with_hook(
+        let failures = aggregate_reasons_with_hook(
             &report,
+            &report.failures,
             MAX_PREPARED_SOURCE_CONTROL_BYTES,
             |required, reserved| {
                 assert!(required > 0);
@@ -2905,6 +2963,7 @@ mod tests {
             total_records: 0,
             candidates: Vec::new(),
             failure_counts: Vec::new(),
+            skip_counts: Vec::new(),
         }
     }
 
@@ -2915,6 +2974,7 @@ mod tests {
             total_records: 1,
             candidates: vec![ImportCandidate {
                 source: ImportSource::SuperCmd,
+                source_record: 1,
                 record_fingerprint: [4; 32],
                 capture: clipboard_core::CaptureInput {
                     captured_at_ms: 1_000,
@@ -2939,6 +2999,7 @@ mod tests {
                 source_application_path: None,
             }],
             failure_counts: Vec::new(),
+            skip_counts: Vec::new(),
         }
     }
 }

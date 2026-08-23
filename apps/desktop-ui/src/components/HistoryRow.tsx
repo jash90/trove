@@ -89,7 +89,6 @@ export const HistoryRow = ({
         <span className="history-row__metadata">
           <span>{KIND_LABELS[item.kind]}</span>
           <span>{item.sourceAppName ?? 'Nieznana aplikacja'}</span>
-          {item.missingPayload ? <span>Brak źródła</span> : null}
         </span>
       </span>
       <span className="history-row__aside">

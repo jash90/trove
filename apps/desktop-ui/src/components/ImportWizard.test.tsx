@@ -35,6 +35,7 @@ const analysis: ImportAnalysisContract = {
   analysisId: RUN_ID,
   total: 6_503,
   candidateRecords: 6_500,
+  skipped: 0,
   failed: 3,
 };
 
@@ -82,7 +83,6 @@ const settings: AppSettings = {
 const stats: StorageStats = {
   contentCount: 1,
   eventCount: 1,
-  missingPayloadCount: 0,
   databaseBytes: 1,
   blobBytes: 0,
 };

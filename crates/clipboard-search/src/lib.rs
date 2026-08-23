@@ -120,7 +120,6 @@ pub struct HistoryItem {
     pub pinned: bool,
     pub preview: String,
     pub byte_size: u64,
-    pub missing_payload: bool,
     pub has_thumbnail: bool,
 }
 
@@ -342,7 +341,6 @@ struct RawHistoryItem {
     pinned: bool,
     preview: String,
     byte_size: i64,
-    flags: i64,
     has_thumbnail: bool,
 }
 
@@ -398,7 +396,6 @@ fn raw_history_item(row: &Row<'_>) -> rusqlite::Result<RawHistoryItem> {
         pinned: row.get(5)?,
         preview: row.get(6)?,
         byte_size: row.get(7)?,
-        flags: row.get(8)?,
         has_thumbnail: row.get(9)?,
     })
 }
@@ -426,7 +423,6 @@ fn convert_item(raw: RawHistoryItem) -> Result<HistoryItem, SearchError> {
         pinned: raw.pinned,
         preview: raw.preview,
         byte_size: u64::try_from(raw.byte_size).map_err(|_| SearchError::InvalidStoreData)?,
-        missing_payload: raw.flags & i64::from(ContentFlags::MISSING_PAYLOAD.bits()) != 0,
         has_thumbnail: raw.has_thumbnail,
     })
 }

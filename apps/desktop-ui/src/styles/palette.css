@@ -1401,3 +1401,7 @@
   font-size: 12px;
   font-weight: 600;
 }
+
+.count-ledger--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}

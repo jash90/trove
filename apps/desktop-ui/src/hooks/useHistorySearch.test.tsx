@@ -16,7 +16,6 @@ const makePage = (preview: string): HistoryPage => ({
       pinned: false,
       preview,
       byteSize: preview.length,
-      missingPayload: false,
       hasThumbnail: false,
     },
   ],

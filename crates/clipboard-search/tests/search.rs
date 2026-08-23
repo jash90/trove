@@ -582,7 +582,6 @@ async fn serialized_list_item_exposes_only_the_plan_two_fields() {
             "globalId",
             "hasThumbnail",
             "kind",
-            "missingPayload",
             "pinned",
             "preview",
             "sourceAppName",

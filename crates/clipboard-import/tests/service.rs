@@ -17,6 +17,15 @@ use clipboard_store::{StoreConfig, StoreHandle};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
+/// The smallest real PNG, so a record that references an image resolves.
+fn synthetic_png() -> Vec<u8> {
+    std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/supercmd/images/sample.png"),
+    )
+    .unwrap()
+}
+
 fn open_store(directory: &tempfile::TempDir) -> StoreHandle {
     StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap()
 }
@@ -145,6 +154,57 @@ fn async_run_to_completion_yields_while_operation_admission_is_busy() {
 }
 
 #[tokio::test]
+async fn a_record_whose_source_file_is_gone_is_skipped_not_imported() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let export = sandbox.path().join("raycast");
+    let present = sandbox.path().join("obecny.pdf");
+    std::fs::create_dir(&export).unwrap();
+    std::fs::write(&present, b"synthetic").unwrap();
+    std::fs::write(
+        export.join("clipboard.json"),
+        serde_json::to_vec(&serde_json::json!([
+            {
+                "createdAt": "2026-01-02T03:04:05Z", "modifiedAt": "2026-01-02T03:04:05Z",
+                "category": "file", "copyCount": 1, "text": "obecny.pdf",
+                "filePath": present.to_str().unwrap()
+            },
+            {
+                "createdAt": "2026-01-02T03:05:05Z", "modifiedAt": "2026-01-02T03:05:05Z",
+                "category": "file", "copyCount": 1, "text": "znikniety.pdf",
+                "filePath": "/synthetic/nigdy/nie/istnial.pdf"
+            },
+            {
+                "createdAt": "2026-01-02T03:06:05Z", "modifiedAt": "2026-01-02T03:06:05Z",
+                "category": "text", "copyCount": 1, "text": "zwykly tekst"
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let database = tempfile::tempdir().unwrap();
+    let service = ImportService::new(open_store(&database)).unwrap();
+    let analysis = service.analyze(&export).unwrap();
+
+    // Every source record is still accounted for; one of them simply leads
+    // nowhere and is left out instead of adding an unusable row.
+    assert_eq!(analysis.total, 3);
+    assert_eq!(analysis.candidate_records, 2);
+    assert_eq!(analysis.skipped, 1);
+    assert_eq!(analysis.failed, 0);
+
+    let summary = service.run_to_completion(&export).await.unwrap();
+    assert_eq!(summary.total, 3);
+    assert_eq!(summary.imported, 2);
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(
+        summary.imported + summary.already_present + summary.skipped + summary.failed,
+        summary.total
+    );
+}
+
+#[tokio::test]
 async fn reimport_is_idempotent_and_duplicate_source_rows_remain_distinct_events() {
     let export = tempfile::tempdir().unwrap();
     let database = tempfile::tempdir().unwrap();
@@ -216,6 +276,7 @@ async fn parser_failure_in_the_middle_is_counted_once_and_later_candidates_impor
             "analysisId": analysis.analysis_id,
             "total": 3,
             "candidateRecords": 2,
+            "skipped": 0,
             "failed": 1
         })
     );
@@ -489,7 +550,7 @@ fn oversized_manifest_is_rejected_before_reading_with_a_path_free_error() {
 }
 
 #[tokio::test]
-async fn oversized_auxiliary_payload_becomes_a_missing_representation_without_aborting_analysis() {
+async fn an_oversized_auxiliary_payload_is_skipped_without_aborting_the_analysis() {
     let export = tempfile::tempdir().unwrap();
     fs::create_dir(export.path().join("images")).unwrap();
     let auxiliary = fs::File::create(export.path().join("images/large.png")).unwrap();
@@ -514,27 +575,28 @@ async fn oversized_auxiliary_payload_becomes_a_missing_representation_without_ab
     let service = ImportService::new(store.clone()).unwrap();
 
     let analysis = service.analyze(export.path()).unwrap();
+    // The record is still accounted for, but an entry with no payload and
+    // no reachable source would only add a row nobody can read or open.
     assert_eq!(
-        (analysis.total, analysis.candidate_records, analysis.failed),
-        (1, 1, 0)
+        (
+            analysis.total,
+            analysis.candidate_records,
+            analysis.skipped,
+            analysis.failed
+        ),
+        (1, 0, 1, 0)
     );
     let handle = service.begin(analysis.analysis_id).await.unwrap();
     wait_for_terminal(&service, handle.run_id).await;
 
-    let (storage_kind, byte_size) = store
+    let events = store
         .with_reader(|connection| {
-            connection.query_row(
-                "SELECT CASE WHEN er.raw_payload_id IS NULL THEN 'missing' ELSE rp.storage_kind END,
-                        COALESCE(rp.original_byte_size, 0)
-                 FROM event_representation er
-                 LEFT JOIN raw_payload rp ON rp.raw_payload_id = er.raw_payload_id
-                 WHERE er.ordinal = 0",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )
+            connection.query_row("SELECT count(*) FROM history_event", [], |row| {
+                row.get::<_, i64>(0)
+            })
         })
         .unwrap();
-    assert_eq!((storage_kind.as_str(), byte_size), ("missing", 0));
+    assert_eq!(events, 0);
 }
 
 #[tokio::test]
@@ -781,7 +843,9 @@ async fn resume_rejects_an_auxiliary_image_becoming_available_after_checkpoint()
     )
     .unwrap();
     let handle = begin_analyzed(&service, export.path()).await;
-    wait_for_processed(&service, handle.run_id, IMPORT_BATCH_SIZE as u64).await;
+    // The image record leads nowhere, so it is skipped before the run starts:
+    // one skipped plus a full batch of imported records is the checkpoint.
+    wait_for_processed(&service, handle.run_id, IMPORT_BATCH_SIZE as u64 + 1).await;
     let before = service.status(handle.run_id).unwrap();
     drop(service);
     drop(store);
@@ -799,6 +863,9 @@ async fn resume_rejects_an_auxiliary_image_becoming_available_after_checkpoint()
         .await
         .unwrap_err();
 
+    // The image is there now, so a reparse would no longer skip that record.
+    // A resume must notice the source no longer matches rather than quietly
+    // importing a record the first pass had accounted for as skipped.
     assert!(matches!(
         error,
         ImportError::Service {
@@ -864,7 +931,7 @@ async fn overlapping_resumes_supersede_the_stale_worker_without_failing_the_run(
 }
 
 #[tokio::test]
-async fn missing_raycast_and_supercmd_payloads_are_preserved_as_missing_content() {
+async fn raycast_and_supercmd_records_with_no_reachable_source_are_skipped() {
     let raycast = tempfile::tempdir().unwrap();
     let supercmd = tempfile::tempdir().unwrap();
     let database = tempfile::tempdir().unwrap();
@@ -900,26 +967,20 @@ async fn missing_raycast_and_supercmd_payloads_are_preserved_as_missing_content(
     let raycast_summary = service.run_to_completion(raycast.path()).await.unwrap();
     let supercmd_summary = service.run_to_completion(supercmd.path()).await.unwrap();
 
-    assert_eq!(raycast_summary.imported, 1);
-    assert_eq!(supercmd_summary.imported, 1);
-    let (missing_representations, zero_sized, missing_flags) = store
+    // Both records point at images that are not there. They are accounted for
+    // and left out rather than stored as rows the user can neither read nor
+    // open.
+    assert_eq!((raycast_summary.imported, raycast_summary.skipped), (0, 1));
+    assert_eq!(
+        (supercmd_summary.imported, supercmd_summary.skipped),
+        (0, 1)
+    );
+    let (events, missing_flags) = store
         .with_reader(|connection| {
             Ok((
-                connection.query_row(
-                    "SELECT count(*) FROM event_representation
-                     WHERE raw_payload_id IS NULL AND missing_ref IS NOT NULL",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )?,
-                connection.query_row(
-                    "SELECT count(*) FROM event_representation er
-                     JOIN history_event he ON he.event_id = er.event_id
-                     JOIN content c ON c.content_id = he.content_id
-                     WHERE er.raw_payload_id IS NULL AND er.missing_ref IS NOT NULL
-                       AND er.ordinal = 0 AND c.byte_size = 0",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )?,
+                connection.query_row("SELECT count(*) FROM history_event", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
                 connection.query_row(
                     "SELECT count(*) FROM content WHERE flags & ?1 != 0",
                     [i64::from(ContentFlags::MISSING_PAYLOAD.bits())],
@@ -928,16 +989,17 @@ async fn missing_raycast_and_supercmd_payloads_are_preserved_as_missing_content(
             ))
         })
         .unwrap();
-    assert_eq!(
-        (missing_representations, zero_sized, missing_flags),
-        (2, 2, 2)
-    );
+    assert_eq!((events, missing_flags), (0, 0));
 }
 
 #[tokio::test]
 async fn ocr_is_search_only_and_combines_with_primary_text_without_replacing_payloads() {
     let export = tempfile::tempdir().unwrap();
     let database = tempfile::tempdir().unwrap();
+    // The image must actually be there: a record pointing at nothing is
+    // skipped, and then it would have no search document to assert on.
+    fs::create_dir(export.path().join("images")).unwrap();
+    fs::write(export.path().join("images/present.png"), synthetic_png()).unwrap();
     write_supercmd_export(
         &export,
         &[
@@ -946,7 +1008,7 @@ async fn ocr_is_search_only_and_combines_with_primary_text_without_replacing_pay
                 "type": "image",
                 "source_app": "Synthetic Viewer",
                 "bundle_id": "com.example.synthetic-viewer",
-                "file_url": "absent.png",
+                "file_url": "present.png",
                 "text": "",
                 "ocr_text": "ŁÓDŹ image words",
                 "has_image": true,

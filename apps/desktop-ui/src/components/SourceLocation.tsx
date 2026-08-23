@@ -1,9 +1,11 @@
-import { FolderSearch, Unlink } from 'lucide-react';
+import { FolderSearch } from 'lucide-react';
 
 import { fileBasename } from '../lib/format';
 
 interface SourceLocationProps {
   path: string;
+  /** Whether the file is still there. Imports never keep an entry that is not,
+   *  but a file can be moved after the fact; the action simply goes away. */
   exists: boolean;
   onReveal?: () => void;
 }
@@ -27,11 +29,6 @@ export const SourceLocation = ({
         <FolderSearch size={15} aria-hidden="true" />
         Pokaż w Finderze
       </button>
-    ) : (
-      <p className="source-location__missing">
-        <Unlink size={14} aria-hidden="true" />
-        Plik nie istnieje
-      </p>
-    )}
+    ) : null}
   </section>
 );

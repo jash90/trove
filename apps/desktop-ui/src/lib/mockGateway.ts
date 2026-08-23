@@ -36,7 +36,6 @@ export const mockGateway: ClipboardGateway = {
       text: item.kind === 'image' ? null : item.preview,
       byteSize: item.byteSize,
       sourceAppName: item.sourceAppName,
-      missingPayload: item.missingPayload,
       sourcePath:
         item.kind === 'file' ? '/synthetic/archiwum/notatka-syntetyczna.pdf' : null,
       sourceExists: false,
@@ -61,6 +60,7 @@ export const mockGateway: ClipboardGateway = {
     analysisId: SYNTHETIC_IMPORT_PROGRESS.runId,
     total: 3,
     candidateRecords: 3,
+    skipped: 0,
     failed: 0,
   }),
   startImport: async (_analysisId) => ({ runId: SYNTHETIC_IMPORT_PROGRESS.runId }),

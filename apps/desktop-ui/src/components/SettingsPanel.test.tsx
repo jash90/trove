@@ -37,7 +37,6 @@ const persistedSettings: AppSettings = {
 const storageStats: StorageStats = {
   contentCount: 4,
   eventCount: 5,
-  missingPayloadCount: 1,
   databaseBytes: 2_048,
   blobBytes: 4_096,
 };

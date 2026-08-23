@@ -21,7 +21,6 @@ export interface HistoryItem {
   pinned: boolean;
   preview: string;
   byteSize: number;
-  missingPayload: boolean;
   hasThumbnail: boolean;
 }
 
@@ -38,7 +37,6 @@ export interface Preview {
   text: string | null;
   byteSize: number;
   sourceAppName: string | null;
-  missingPayload: boolean;
   /** Where the entry came from, when its source recorded a location. */
   sourcePath: string | null;
   /** Whether that location still resolves on this machine. */
@@ -73,7 +71,6 @@ export interface AppSettings {
 export interface StorageStats {
   contentCount: number;
   eventCount: number;
-  missingPayloadCount: number;
   databaseBytes: number;
   blobBytes: number;
 }
@@ -86,6 +83,8 @@ export interface ImportAnalysis {
   analysisId: string;
   total: number;
   candidateRecords: number;
+  /** Records left out because their source file is no longer there. */
+  skipped: number;
   failed: number;
 }
 
@@ -135,9 +134,11 @@ export const validateImportAnalysis = (analysis: ImportAnalysis): ImportAnalysis
     typeof analysis?.analysisId !== 'string' ||
     analysis.analysisId.trim() !== analysis.analysisId ||
     analysis.analysisId.length === 0 ||
-    ![analysis.total, analysis.candidateRecords, analysis.failed].every(isSafeCount) ||
+    ![analysis.total, analysis.candidateRecords, analysis.skipped, analysis.failed].every(
+      isSafeCount,
+    ) ||
     safeCounterSum(
-      [analysis.candidateRecords, analysis.failed],
+      [analysis.candidateRecords, analysis.skipped, analysis.failed],
       'invalid_import_analysis',
     ) !== analysis.total
   ) {
@@ -171,13 +172,11 @@ export const validateStorageStats = (stats: StorageStats): StorageStats => {
   const counters = [
     stats?.contentCount,
     stats?.eventCount,
-    stats?.missingPayloadCount,
     stats?.databaseBytes,
     stats?.blobBytes,
   ];
   if (
     !counters.every(isSafeCount) ||
-    stats.missingPayloadCount > stats.contentCount ||
     !Number.isSafeInteger(stats.databaseBytes + stats.blobBytes)
   ) {
     throw new Error('invalid_storage_stats');

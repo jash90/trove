@@ -136,6 +136,7 @@ describe('validateImportAnalysis', () => {
       analysisId: '0198f000-0000-7000-8000-000000000000',
       total: 6_503,
       candidateRecords: 6_500,
+      skipped: 0,
       failed: 3,
     };
 
@@ -143,10 +144,19 @@ describe('validateImportAnalysis', () => {
   });
 
   it.each([
-    ['blank id', { analysisId: ' ', total: 1, candidateRecords: 1, failed: 0 }],
-    ['fraction', { analysisId: 'a', total: 1.5, candidateRecords: 1, failed: 0 }],
-    ['unsafe count', { analysisId: 'a', total: Number.MAX_SAFE_INTEGER + 1, candidateRecords: 1, failed: 0 }],
-    ['missing accounting', { analysisId: 'a', total: 3, candidateRecords: 1, failed: 1 }],
+    ['blank id', { analysisId: ' ', total: 1, candidateRecords: 1, skipped: 0, failed: 0 }],
+    ['fraction', { analysisId: 'a', total: 1.5, candidateRecords: 1, skipped: 0, failed: 0 }],
+    [
+      'unsafe count',
+      {
+        analysisId: 'a',
+        total: Number.MAX_SAFE_INTEGER + 1,
+        candidateRecords: 1,
+        skipped: 0,
+        failed: 0,
+      },
+    ],
+    ['missing accounting', { analysisId: 'a', total: 3, candidateRecords: 1, skipped: 0, failed: 1 }],
   ])('rejects a malformed analysis: %s', (_label, analysis) => {
     expect(() => validateImportAnalysis(analysis)).toThrow('invalid_import_analysis');
   });
@@ -198,7 +208,6 @@ describe('validateStorageStats', () => {
     const stats = {
       contentCount: 4,
       eventCount: 5,
-      missingPayloadCount: 1,
       databaseBytes: 1_024,
       blobBytes: 2_048,
     };
@@ -208,14 +217,12 @@ describe('validateStorageStats', () => {
 
   it.each([
     ['unsafe count', { contentCount: Number.MAX_SAFE_INTEGER + 1 }],
-    ['impossible missing count', { contentCount: 1, missingPayloadCount: 2 }],
     ['unsafe byte sum', { databaseBytes: Number.MAX_SAFE_INTEGER, blobBytes: 1 }],
   ])('rejects unsafe storage stats: %s', (_label, overrides) => {
     expect(() =>
       validateStorageStats({
         contentCount: 4,
         eventCount: 5,
-        missingPayloadCount: 1,
         databaseBytes: 1_024,
         blobBytes: 2_048,
         ...overrides,

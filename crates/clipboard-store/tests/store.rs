@@ -60,6 +60,7 @@ async fn import_operation_permit_is_consumed_by_store_batch() {
             total_records: 0,
             candidate_records: 0,
             initial_failures: Vec::new(),
+            initial_skips: Vec::new(),
         })
         .await
         .unwrap();
@@ -88,6 +89,7 @@ async fn custom_import_operation_permit_is_rejected_before_enqueue() {
             total_records: 0,
             candidate_records: 0,
             initial_failures: Vec::new(),
+            initial_skips: Vec::new(),
         })
         .await
         .unwrap();
@@ -128,6 +130,7 @@ async fn import_operation_permit_rejects_unproven_candidate_shape_before_enqueue
             total_records: 1,
             candidate_records: 1,
             initial_failures: Vec::new(),
+            initial_skips: Vec::new(),
         })
         .await
         .unwrap();
@@ -204,6 +207,7 @@ async fn import_search_derivations(store: &StoreHandle, source_seed: u8, derivat
             total_records: derivations.len() as u64,
             candidate_records: derivations.len() as u64,
             initial_failures: Vec::new(),
+            initial_skips: Vec::new(),
         })
         .await
         .unwrap();
@@ -1513,6 +1517,7 @@ async fn replaying_a_committed_same_run_offset_cannot_advance_or_double_count_it
             total_records: 2,
             candidate_records: 2,
             initial_failures: Vec::new(),
+            initial_skips: Vec::new(),
         })
         .await
         .unwrap();
@@ -1567,6 +1572,7 @@ async fn preallocated_import_run_id_is_exactly_idempotent_and_conflicts_fail_clo
             reason_code: reason_code.to_owned(),
             count: 1,
         }],
+        initial_skips: Vec::new(),
     };
 
     let first = store
@@ -1642,6 +1648,7 @@ async fn import_run_deletion_cannot_erase_global_idempotency_claims() {
             total_records: 1,
             candidate_records: 1,
             initial_failures: Vec::new(),
+            initial_skips: Vec::new(),
         })
         .await
         .unwrap();
@@ -1685,6 +1692,7 @@ async fn import_run_deletion_cannot_erase_global_idempotency_claims() {
             total_records: 1,
             candidate_records: 1,
             initial_failures: Vec::new(),
+            initial_skips: Vec::new(),
         })
         .await
         .unwrap();
@@ -1719,6 +1727,7 @@ async fn import_tables_reject_unknown_sources_and_non_digest_record_fingerprints
             total_records: 1,
             candidate_records: 1,
             initial_failures: Vec::new(),
+            initial_skips: Vec::new(),
         })
         .await
         .unwrap();
@@ -1777,6 +1786,7 @@ async fn sql_rejects_text_digests_and_non_uuidv7_blob_identities() {
             total_records: 0,
             candidate_records: 0,
             initial_failures: Vec::new(),
+            initial_skips: Vec::new(),
         })
         .await
         .unwrap();
@@ -2038,6 +2048,7 @@ async fn import_batch_propagates_private_storage_without_recording_a_candidate_f
             total_records: 1,
             candidate_records: 1,
             initial_failures: Vec::new(),
+            initial_skips: Vec::new(),
         })
         .await
         .unwrap();

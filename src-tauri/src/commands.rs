@@ -64,7 +64,6 @@ pub struct PreviewDto {
     pub text: Option<String>,
     pub byte_size: u64,
     pub source_app_name: Option<String>,
-    pub missing_payload: bool,
     /// Where the entry came from, decoded for display. Present only for entries
     /// whose source recorded a location; the importer never read its bytes.
     pub source_path: Option<String>,
@@ -101,7 +100,6 @@ pub struct ThumbnailDto {
 pub struct StorageStatsDto {
     pub content_count: u64,
     pub event_count: u64,
-    pub missing_payload_count: u64,
     pub database_bytes: u64,
     pub blob_bytes: u64,
 }
@@ -186,7 +184,6 @@ fn get_preview_blocking(store: &StoreHandle, event_id: i64) -> Result<PreviewDto
         text,
         byte_size: metadata.byte_size,
         source_app_name: metadata.source_app_name,
-        missing_payload,
         source_path,
         source_exists,
     })
@@ -478,23 +475,21 @@ pub async fn get_storage_stats_service(state: &AppState) -> Result<StorageStatsD
 }
 
 fn get_storage_stats_blocking(store: &StoreHandle) -> Result<StorageStatsDto, String> {
-    let (content_count, event_count, missing_payload_count, blob_bytes) = store
+    let (content_count, event_count, blob_bytes) = store
         .with_reader(|connection| {
             connection.query_row(
                 "SELECT
                    (SELECT count(*) FROM content),
                    (SELECT count(*) FROM history_event),
-                   (SELECT count(*) FROM content WHERE (flags & ?1) != 0),
                    (SELECT COALESCE(sum(stored_byte_size), 0) FROM raw_payload
                      WHERE storage_kind = 'cas')
                      + (SELECT COALESCE(sum(byte_size), 0) FROM artifact)",
-                [i64::from(ContentFlags::MISSING_PAYLOAD.bits())],
+                [],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, i64>(1)?,
                         row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
                     ))
                 },
             )
@@ -506,7 +501,6 @@ fn get_storage_stats_blocking(store: &StoreHandle) -> Result<StorageStatsDto, St
     Ok(StorageStatsDto {
         content_count: valid_count(content_count)?,
         event_count: valid_count(event_count)?,
-        missing_payload_count: valid_count(missing_payload_count)?,
         database_bytes,
         blob_bytes: valid_count(blob_bytes)?,
     })

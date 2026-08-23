@@ -199,6 +199,7 @@ fn map_record(
     };
     Ok(ImportCandidate {
         source: ImportSource::Raycast,
+        source_record: index,
         record_fingerprint: fingerprint,
         capture: CaptureInput {
             captured_at_ms,

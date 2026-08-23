@@ -712,6 +712,7 @@ fn map_record(
 
     Ok(ImportCandidate {
         source: ImportSource::SuperCmd,
+        source_record: index,
         record_fingerprint: fingerprint,
         capture: CaptureInput {
             captured_at_ms,

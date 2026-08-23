@@ -23,7 +23,6 @@ const makeItems = (count: number, startAt = 1): HistoryItem[] =>
       pinned: eventId === 1,
       preview: `Synthetic clipboard item ${eventId}`,
       byteSize: 32,
-      missingPayload: false,
       hasThumbnail: false,
     };
   });
@@ -82,7 +81,6 @@ const makeGateway = (search: ClipboardGateway['search']): ClipboardGateway =>
       text: `Synthetic clipboard item ${eventId}`,
       byteSize: 32,
       sourceAppName: 'Synthetic Editor',
-      missingPayload: false,
     })),
     getThumbnail: vi.fn(async () => null),
     copyEvent: vi.fn(async () => ({ mode: 'copied', plainText: false })),

@@ -53,7 +53,7 @@ describe('the palette end to end', () => {
     expect(container.innerHTML).not.toContain('blobRelpath');
   });
 
-  it('shows a file entry with its source location and no reveal action when it is gone', async () => {
+  it('shows a file entry with its source location', async () => {
     render(<App gateway={mockGateway} />);
     await settle();
 
@@ -61,8 +61,9 @@ describe('the palette end to end', () => {
     await user.click(screen.getByRole('option', { name: /raport-syntetyczny\.pdf/ }));
 
     expect(await screen.findByText('Lokalizacja źródłowa')).toBeVisible();
-    expect(screen.getByText('Plik nie istnieje')).toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Pokaż w Finderze' })).toBeNull();
+    expect(
+      screen.getByText('/synthetic/archiwum/notatka-syntetyczna.pdf'),
+    ).toBeVisible();
   });
 
   it('opens the import wizard and the settings workspace from the header', async () => {

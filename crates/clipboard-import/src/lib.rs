@@ -116,6 +116,9 @@ impl ImportSource {
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ImportCandidate {
     pub source: ImportSource,
+    /// One-based position in the source file, kept so a record left out later
+    /// can be reported against the record it actually came from.
+    pub source_record: usize,
     pub record_fingerprint: [u8; 32],
     pub capture: CaptureInput,
     pub search_ocr: Option<String>,
@@ -148,6 +151,9 @@ pub(crate) struct ImportParseReport {
     pub total: usize,
     pub candidates: Vec<ImportCandidate>,
     pub failures: Vec<ImportRecordFailure>,
+    /// Records left out on purpose, with the reason. Kept apart from failures
+    /// so a clean import does not report hundreds of errors.
+    pub skips: Vec<ImportRecordFailure>,
     encounter_ordinals: HashMap<[u8; 32], u64>,
     source_limit: usize,
 }
@@ -158,6 +164,7 @@ impl ImportParseReport {
             total,
             candidates: Vec::new(),
             failures: Vec::new(),
+            skips: Vec::new(),
             encounter_ordinals: HashMap::new(),
             source_limit: MAX_PREPARED_SOURCE_BYTES,
         }
@@ -233,6 +240,18 @@ impl ImportParseReport {
         Ok(())
     }
 
+    /// Records a source record the parser deliberately left out.
+    pub(crate) fn push_skip(&mut self, skip: ImportRecordFailure) -> Result<(), ImportError> {
+        let additional = allocation_for_next_vec_growth(
+            self.skips.len(),
+            self.skips.capacity(),
+            size_of::<ImportRecordFailure>(),
+        );
+        self.ensure_transient_capacity(additional)?;
+        self.skips.push(skip);
+        Ok(())
+    }
+
     fn retained_capacity_bytes(&self) -> usize {
         let mut bytes = size_of::<Self>()
             .saturating_add(
@@ -242,6 +261,11 @@ impl ImportParseReport {
             )
             .saturating_add(
                 self.failures
+                    .capacity()
+                    .saturating_mul(size_of::<ImportRecordFailure>()),
+            )
+            .saturating_add(
+                self.skips
                     .capacity()
                     .saturating_mul(size_of::<ImportRecordFailure>()),
             )
@@ -768,7 +792,7 @@ impl FramedHasher {
 /// carries a scheme is kept verbatim; an absolute filesystem path becomes a
 /// `file:` URI. Anything relative points inside the export, not at a location
 /// the user could open later, so it yields no reference at all.
-pub(crate) fn source_reference_uri(value: &str) -> Option<String> {
+pub fn source_reference_uri(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
@@ -790,6 +814,54 @@ pub(crate) fn source_reference_uri(value: &str) -> Option<String> {
         }
     }
     Some(uri)
+}
+
+/// Turns a `file:` URI back into a local path.
+///
+/// Any other scheme names something this application will not open, so it
+/// yields nothing rather than a path a caller would wrongly act on.
+pub fn file_uri_to_path(reference: &str) -> Option<String> {
+    let encoded = reference.strip_prefix("file://")?;
+    if !encoded.starts_with('/') {
+        return None;
+    }
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = bytes.get(index + 1..index + 3)?;
+            let text = std::str::from_utf8(hex).ok()?;
+            decoded.push(u8::from_str_radix(text, 16).ok()?);
+            index += 3;
+            continue;
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    let path = String::from_utf8(decoded).ok()?;
+    // A NUL byte would truncate the path once it reaches the operating system.
+    (!path.contains('\0')).then_some(path)
+}
+
+/// True when a candidate has no payload and no reachable source either.
+///
+/// Such a record adds a row the user can neither read nor open — the evicted
+/// Raycast image cache and deleted attachments are entirely this. Keeping them
+/// buried the entries that still work, so the importer leaves them out.
+pub(crate) fn candidate_leads_nowhere(candidate: &ImportCandidate) -> bool {
+    if !candidate.missing_payload {
+        return false;
+    }
+    candidate
+        .capture
+        .representations
+        .iter()
+        .filter(|representation| representation.format_id == "text/uri-list")
+        .filter_map(|representation| representation.bytes.as_deref())
+        .filter_map(|bytes| std::str::from_utf8(bytes).ok())
+        .filter_map(file_uri_to_path)
+        .all(|path| std::fs::metadata(path).is_err())
 }
 
 fn has_uri_scheme(value: &str) -> bool {
@@ -861,6 +933,7 @@ mod tests {
     fn bounded_import_candidate_owns_primary_text_only_in_its_representation() {
         let candidate = ImportCandidate {
             source: ImportSource::Raycast,
+            source_record: 1,
             record_fingerprint: [7; 32],
             capture: CaptureInput {
                 captured_at_ms: 1_000,

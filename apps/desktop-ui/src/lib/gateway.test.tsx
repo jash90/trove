@@ -72,6 +72,7 @@ describe('tauriGateway', () => {
       analysisId: 'analysis-id',
       total: 1,
       candidateRecords: 1,
+      skipped: 0,
       failed: 0,
     });
     await tauriGateway.analyzeImport('/synthetic/import.json');
@@ -88,7 +89,6 @@ describe('tauriGateway', () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       contentCount: 1,
       eventCount: 1,
-      missingPayloadCount: 0,
       databaseBytes: 1,
       blobBytes: 0,
     });
@@ -158,6 +158,7 @@ describe('tauriGateway', () => {
       analysisId: 'analysis',
       total: 2,
       candidateRecords: 1,
+      skipped: 0,
       failed: 0,
     });
     await expect(tauriGateway.analyzeImport('/private/export.json')).rejects.toThrow(
@@ -167,7 +168,6 @@ describe('tauriGateway', () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       contentCount: 1,
       eventCount: 1,
-      missingPayloadCount: 0,
       databaseBytes: Number.MAX_SAFE_INTEGER,
       blobBytes: 1,
     });

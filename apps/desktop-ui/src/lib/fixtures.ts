@@ -10,7 +10,6 @@ export const SYNTHETIC_HISTORY_ITEMS: HistoryItem[] = [
     pinned: true,
     preview: 'Synthetic project note for browser preview',
     byteSize: 42,
-    missingPayload: false,
     hasThumbnail: false,
   },
   {
@@ -22,7 +21,6 @@ export const SYNTHETIC_HISTORY_ITEMS: HistoryItem[] = [
     pinned: false,
     preview: 'https://example.invalid/synthetic-document',
     byteSize: 42,
-    missingPayload: false,
     hasThumbnail: false,
   },
   {
@@ -34,7 +32,6 @@ export const SYNTHETIC_HISTORY_ITEMS: HistoryItem[] = [
     pinned: false,
     preview: 'Synthetic image · 640 × 480',
     byteSize: 24_576,
-    missingPayload: false,
     hasThumbnail: true,
   },
   {
@@ -46,7 +43,6 @@ export const SYNTHETIC_HISTORY_ITEMS: HistoryItem[] = [
     pinned: false,
     preview: 'raport-syntetyczny.pdf',
     byteSize: 0,
-    missingPayload: true,
     hasThumbnail: false,
   },
 ];
@@ -63,7 +59,6 @@ export const SYNTHETIC_SETTINGS: AppSettings = {
 export const SYNTHETIC_STORAGE_STATS: StorageStats = {
   contentCount: 4,
   eventCount: 4,
-  missingPayloadCount: 1,
   databaseBytes: 49_152,
   blobBytes: 24_576,
 };

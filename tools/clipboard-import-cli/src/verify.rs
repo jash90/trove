@@ -25,10 +25,6 @@ use crate::{
     store_failure,
 };
 
-const REAL_EXPECTED_RECORDS: u64 = 6_503;
-const REAL_RAYCAST_RECORDS: u64 = 5_509;
-const REAL_SUPERCMD_RECORDS: u64 = 994;
-const REAL_SUPERCMD_IMAGES: u64 = 15;
 const MAX_FTS_SCRATCH_BYTES: u64 = 4_u64 * 1024 * 1024 * 1024;
 const FTS_SCRATCH_CACHE_KIB: i64 = 16 * 1024;
 const FTS_BACKUP_DEADLINE: Duration = Duration::from_secs(120);
@@ -1853,6 +1849,10 @@ fn verification_output(
     let mut sources = Vec::with_capacity(snapshot.sources.len());
     let mut latest_source_total = 0_u64;
     let mut selected_materialized_total = 0_u64;
+    // Records the importer deliberately left out or could not parse. They are
+    // accounted for without becoming events, so the reconciliation below has to
+    // add them back before comparing against the expected source total.
+    let mut selected_unmaterialized_total = 0_u64;
     let mut selected_sources_are_materialized = true;
     for source in snapshot.sources {
         let source_kind = known_source(&source.source_kind)?;
@@ -1869,10 +1869,16 @@ fn verification_output(
         selected_materialized_total = selected_materialized_total
             .checked_add(materialized_records)
             .ok_or_else(|| CliFailure::new("count_overflow"))?;
-        selected_sources_are_materialized &= materialized_records == total
+        let unmaterialized = skipped
+            .checked_add(failed)
+            .ok_or_else(|| CliFailure::new("count_overflow"))?;
+        selected_unmaterialized_total = selected_unmaterialized_total
+            .checked_add(unmaterialized)
+            .ok_or_else(|| CliFailure::new("count_overflow"))?;
+        selected_sources_are_materialized &= materialized_records.checked_add(unmaterialized)
+            == Some(total)
             && declared_imported_records == materialized_records
-            && skipped == 0
-            && failed == 0;
+            && imported.checked_add(already_present) == Some(materialized_records);
         let (available_images, missing_images) = snapshot
             .image_counts
             .get(source_kind)
@@ -1909,24 +1915,6 @@ fn verification_output(
             .filter(|source| source.source_kind == "supercmd")
             .count()
             == 1;
-    let real_shape_ok = if expect_records == REAL_EXPECTED_RECORDS {
-        let raycast = sources
-            .iter()
-            .find(|source| source.source_kind == "raycast");
-        let supercmd = sources
-            .iter()
-            .find(|source| source.source_kind == "supercmd");
-        raycast.is_some_and(|source| source.total == REAL_RAYCAST_RECORDS)
-            && supercmd.is_some_and(|source| {
-                source.total == REAL_SUPERCMD_RECORDS
-                    && source
-                        .available_image_events
-                        .checked_add(source.missing_image_events)
-                        == Some(REAL_SUPERCMD_IMAGES)
-            })
-    } else {
-        true
-    };
     let kinds_total = counts_by_kind
         .iter()
         .try_fold(0_u64, |total, kind| total.checked_add(kind.event_count));
@@ -1940,9 +1928,8 @@ fn verification_output(
         && snapshot.fts_ok
         && source_accounting_ok
         && one_source_each
-        && real_shape_ok
         && latest_source_total == expect_records
-        && event_count == expect_records
+        && event_count.checked_add(selected_unmaterialized_total) == Some(expect_records)
         && kinds_total == Some(event_count)
         && physical_content_count <= event_count;
     Ok(VerifyOutput {

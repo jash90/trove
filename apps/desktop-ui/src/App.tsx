@@ -81,7 +81,7 @@ const ClipboardPalette = (): React.JSX.Element => {
   const thumbnail = useThumbnail(
     gateway,
     navigation.selectedId,
-    selectedItem?.kind === 'image' && selectedItem.hasThumbnail && !selectedItem.missingPayload,
+    selectedItem?.kind === 'image' && selectedItem.hasThumbnail,
   );
 
   const modalOpen = actions.deleteTargetId !== null || workspace !== 'none';
