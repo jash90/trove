@@ -2932,6 +2932,7 @@ mod tests {
                     occurrence_count: 1,
                     content_flags: clipboard_core::ContentFlags::empty(),
                     event_flags: clipboard_core::EventFlags::IMPORTED,
+                    display_label: None,
                 },
                 search_ocr: None,
                 missing_payload: false,

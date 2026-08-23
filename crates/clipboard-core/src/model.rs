@@ -113,6 +113,14 @@ pub struct CaptureInput {
     pub occurrence_count: u32,
     pub content_flags: ContentFlags,
     pub event_flags: EventFlags,
+    /// A short label for an entry whose payload cannot speak for itself.
+    ///
+    /// A file or image entry has no readable primary payload, so the list would
+    /// otherwise show hundreds of identical placeholder rows. The source
+    /// application already knows a name for it — a filename, "Image (1290x849)"
+    /// — and that name is what the user recognises. Ignored for textual kinds,
+    /// which derive their preview from the payload itself.
+    pub display_label: Option<String>,
 }
 
 impl fmt::Debug for CaptureInput {
@@ -387,6 +395,7 @@ mod tests {
             occurrence_count: 1,
             content_flags: ContentFlags::empty(),
             event_flags: EventFlags::empty(),
+            display_label: None,
         };
 
         let representation_debug = format!("{:?}", input.representations[0]);

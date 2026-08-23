@@ -112,6 +112,23 @@ fn uri_list_reference(candidate: &crate::ImportCandidate) -> Option<&str> {
 }
 
 #[test]
+fn an_entry_without_a_readable_payload_carries_the_name_its_source_showed() {
+    let raycast = parse_raycast(fixture("raycast/clipboard.json")).unwrap();
+    let file = raycast
+        .iter()
+        .find(|record| record.capture.kind == ContentKind::File)
+        .expect("the fixture must contain a file record");
+    let text = raycast
+        .iter()
+        .find(|record| record.capture.kind == ContentKind::Text)
+        .expect("the fixture must contain a text record");
+
+    assert_eq!(file.capture.display_label.as_deref(), Some("report card.pdf"));
+    // A textual entry speaks for itself, so it needs no separate label.
+    assert_eq!(text.capture.display_label, None);
+}
+
+#[test]
 fn raycast_file_record_keeps_its_source_path_as_a_uri_list_reference() {
     let records = parse_raycast(fixture("raycast/clipboard.json")).unwrap();
     let file = records

@@ -33,6 +33,7 @@ fn capture(primary: &[u8], captured_at_ms: i64) -> CaptureInput {
         occurrence_count: 1,
         content_flags: ContentFlags::empty(),
         event_flags: EventFlags::empty(),
+        display_label: None,
     }
 }
 

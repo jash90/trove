@@ -670,6 +670,12 @@ fn map_record(
             )
         })?
     };
+    // Same idea as Raycast: whatever the source displayed for an entry whose
+    // payload cannot speak for itself.
+    let display_label = (!kind.is_textual())
+        .then(|| record.text.as_deref().unwrap_or_default().trim())
+        .filter(|label| !label.is_empty())
+        .map(str::to_owned);
     let representations = if matches!(kind, ContentKind::Image | ContentKind::File) {
         let mut representations = vec![RepresentationInput {
             format_id: primary_mime(kind).to_owned(),
@@ -719,6 +725,7 @@ fn map_record(
             occurrence_count: 1,
             content_flags,
             event_flags: EventFlags::IMPORTED,
+            display_label,
         },
         search_ocr: record.ocr_text.map(Cow::into_owned),
         missing_payload,

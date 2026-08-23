@@ -1694,7 +1694,7 @@ fn prepare_ingest<'a>(
     Ok(PreparedIngest {
         content_hash,
         byte_size,
-        preview_text: original_preview(input.kind, primary_payload),
+        preview_text: original_preview(input.kind, primary_payload, input.display_label.as_deref()),
         primary_payload,
         content_flags,
         representations: stored_representations(input, cas)?,
@@ -1841,12 +1841,18 @@ fn write_ingest(
     })
 }
 
-fn original_preview(kind: ContentKind, primary_payload: Option<&[u8]>) -> String {
+fn original_preview(
+    kind: ContentKind,
+    primary_payload: Option<&[u8]>,
+    display_label: Option<&str>,
+) -> String {
     if !kind.is_textual() {
-        return String::new();
+        // Nothing readable to show, so fall back to the name the source gave
+        // it. Truncated on a character boundary: the column is bounded.
+        return display_label.map(bounded_preview).unwrap_or_default();
     }
     let Some(payload) = primary_payload else {
-        return String::new();
+        return display_label.map(bounded_preview).unwrap_or_default();
     };
     let boundary = payload.len().min(MAX_PREVIEW_BYTES);
     match std::str::from_utf8(&payload[..boundary]) {
@@ -1855,6 +1861,14 @@ fn original_preview(kind: ContentKind, primary_payload: Option<&[u8]>) -> String
             .unwrap_or_default()
             .to_owned(),
     }
+}
+
+fn bounded_preview(value: &str) -> String {
+    let mut boundary = value.len().min(MAX_PREVIEW_BYTES);
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value[..boundary].to_owned()
 }
 
 fn search_derivation_hash(normalized_text: &str) -> [u8; 32] {
@@ -2464,6 +2478,7 @@ mod tests {
             occurrence_count: 1,
             content_flags: ContentFlags::empty(),
             event_flags: EventFlags::IMPORTED,
+            display_label: None,
         };
 
         let normalized = normalized_text(&capture, None, Some(&ocr));
@@ -2686,6 +2701,7 @@ mod tests {
                 occurrence_count: 1,
                 content_flags: ContentFlags::empty(),
                 event_flags: EventFlags::empty(),
+                display_label: None,
             },
             search_ocr: None,
             source_app_original: None,

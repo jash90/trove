@@ -878,6 +878,7 @@ mod tests {
                 occurrence_count: 1,
                 content_flags: ContentFlags::empty(),
                 event_flags: EventFlags::IMPORTED,
+                display_label: None,
             },
             search_ocr: None,
             missing_payload: false,

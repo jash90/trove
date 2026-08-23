@@ -34,6 +34,7 @@ fn text_capture(
         occurrence_count,
         content_flags: ContentFlags::empty(),
         event_flags: EventFlags::empty(),
+        display_label: None,
     }
 }
 

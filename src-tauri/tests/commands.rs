@@ -80,6 +80,7 @@ fn file_capture(reference_uri: &str, captured_at_ms: i64) -> clipboard_core::Cap
         occurrence_count: 1,
         content_flags: clipboard_core::ContentFlags::MISSING_PAYLOAD,
         event_flags: clipboard_core::EventFlags::IMPORTED,
+        display_label: None,
     }
 }
 
@@ -226,6 +227,7 @@ fn text_capture(value: &str, captured_at_ms: i64) -> clipboard_core::CaptureInpu
         occurrence_count: 1,
         content_flags: clipboard_core::ContentFlags::empty(),
         event_flags: clipboard_core::EventFlags::LOCAL_ONLY,
+        display_label: None,
     }
 }
 
@@ -775,6 +777,7 @@ fn missing_image_capture(captured_at_ms: i64) -> clipboard_core::CaptureInput {
         occurrence_count: 1,
         content_flags: clipboard_core::ContentFlags::MISSING_PAYLOAD,
         event_flags: clipboard_core::EventFlags::IMPORTED,
+        display_label: None,
     }
 }
 
@@ -795,6 +798,7 @@ fn image_capture(bytes: Vec<u8>, captured_at_ms: i64) -> clipboard_core::Capture
         occurrence_count: 1,
         content_flags: clipboard_core::ContentFlags::empty(),
         event_flags: clipboard_core::EventFlags::LOCAL_ONLY,
+        display_label: None,
     }
 }
 

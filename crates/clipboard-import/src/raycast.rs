@@ -151,6 +151,12 @@ fn map_record(
         primary_fingerprint_bytes,
     )
     .map_err(|_| record_failure(ImportSource::Raycast, index, "canonicalization_too_complex"))?;
+    // Raycast keeps the name it showed for an entry with no readable payload:
+    // a filename for a file, "Image (1290x849)" for an image.
+    let display_label = (!kind.is_textual())
+        .then(|| record.text.trim())
+        .filter(|label| !label.is_empty())
+        .map(str::to_owned);
     let representations = if missing_payload {
         let mut representations = vec![RepresentationInput {
             format_id: primary_mime(kind).to_owned(),
@@ -206,6 +212,7 @@ fn map_record(
             occurrence_count: record.copy_count,
             content_flags,
             event_flags: EventFlags::IMPORTED,
+            display_label,
         },
         search_ocr: None,
         missing_payload,

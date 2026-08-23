@@ -1097,6 +1097,7 @@ async fn matching_live_ingest_preserves_imported_ocr_without_duplicate_growth() 
         occurrence_count: 1,
         content_flags: ContentFlags::empty(),
         event_flags: EventFlags::empty(),
+        display_label: None,
     };
     store.ingest(live.clone()).await.unwrap();
     let after_first_live = store
@@ -1152,6 +1153,7 @@ async fn import_preserves_original_application_path_but_live_ingest_writes_null(
             occurrence_count: 1,
             content_flags: ContentFlags::empty(),
             event_flags: EventFlags::empty(),
+            display_label: None,
         })
         .await
         .unwrap();
