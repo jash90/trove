@@ -16,6 +16,10 @@ target/
 .worktrees/
 .superpowers/
 
+# Development notes and reports — kept on disk, never published
+/raport-koncowy-clipboard-manager.html
+/docs/superpowers/
+
 # Local tooling
 .DS_Store
 .env
