@@ -456,13 +456,28 @@ fn semantic_storage_shape_is_coherent(connection: &Connection) -> rusqlite::Resu
              JOIN history_event he ON he.event_id = er.event_id
              JOIN content c ON c.content_id = he.content_id
              JOIN raw_payload rp ON rp.raw_payload_id = er.raw_payload_id
-             WHERE (c.kind IN ('image', 'file') AND rp.storage_kind != 'cas')
-                OR (c.kind NOT IN ('image', 'file') AND (
-                     (rp.original_byte_size < 4096 AND rp.storage_kind != 'inline')
-                  OR (rp.original_byte_size BETWEEN 4096 AND 262144
-                      AND rp.storage_kind != 'inline_zstd')
-                  OR (rp.original_byte_size > 262144 AND rp.storage_kind != 'cas')
-                ))
+             -- Tiering follows the representation, not the entry. A binary
+             -- representation of an image or file entry always lives in the
+             -- blob store; every textual representation, including the
+             -- text/uri-list source reference carried by those entries,
+             -- follows the size tiers. This mirrors classify_payload.
+             WHERE (
+                    c.kind IN ('image', 'file')
+                    AND substr(er.format_id, 1, 5) != 'text/'
+                    AND rp.storage_kind != 'cas'
+                  )
+                OR (
+                    NOT (
+                      c.kind IN ('image', 'file')
+                      AND substr(er.format_id, 1, 5) != 'text/'
+                    )
+                    AND (
+                         (rp.original_byte_size < 4096 AND rp.storage_kind != 'inline')
+                      OR (rp.original_byte_size BETWEEN 4096 AND 262144
+                          AND rp.storage_kind != 'inline_zstd')
+                      OR (rp.original_byte_size > 262144 AND rp.storage_kind != 'cas')
+                    )
+                  )
            )
            AND NOT EXISTS(
              SELECT 1 FROM content

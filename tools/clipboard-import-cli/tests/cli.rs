@@ -331,6 +331,96 @@ fn verify_rejects_zstd_trailing_data_and_declared_size_bombs() {
     assert_failed_verification(&output, "logicalStatus");
 }
 
+fn imported_store_with_a_file_source_reference() -> (tempfile::TempDir, PathBuf) {
+    let sandbox = tempfile::tempdir().unwrap();
+    let raycast = sandbox.path().join("synthetic-raycast-reference");
+    let supercmd = sandbox.path().join("synthetic-supercmd-reference");
+    let data_dir = sandbox.path().join("synthetic-data-reference");
+    fs::create_dir(&raycast).unwrap();
+    fs::create_dir(&supercmd).unwrap();
+    fs::write(
+        raycast.join("clipboard.json"),
+        serde_json::to_vec(&json!([{
+            "createdAt": "2026-08-22T12:00:00Z",
+            "modifiedAt": "2026-08-22T12:00:00Z",
+            "category": "file",
+            "copyCount": 1,
+            "text": "synthetic.pdf",
+            "textContent": "",
+            "filePath": "/synthetic/outside/synthetic.pdf"
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        supercmd.join("clipboard.json"),
+        serde_json::to_vec(&json!([{
+            "copied_at": "2026-08-22T12:00:01Z",
+            "type": "text",
+            "text": "synthetic companion",
+            "has_image": false
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    for source in [&raycast, &supercmd] {
+        let output = cli(&[
+            "import",
+            "--source",
+            source.to_str().unwrap(),
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+        ]);
+        assert!(output.status.success());
+    }
+    (sandbox, data_dir)
+}
+
+#[test]
+fn a_file_entry_keeps_its_inline_source_reference_and_still_verifies() {
+    let (_sandbox, data_dir) = imported_store_with_a_file_source_reference();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    let storage_kind = connection
+        .query_row(
+            "SELECT rp.storage_kind
+             FROM event_representation er
+             JOIN raw_payload rp ON rp.raw_payload_id = er.raw_payload_id
+             WHERE er.format_id = 'text/uri-list'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    drop(connection);
+
+    // A fifty-byte reference belongs inline even though the entry is a file.
+    assert_eq!(storage_kind, "inline");
+
+    let output = run_verify(&data_dir, 2);
+
+    assert!(output.status.success());
+    assert_eq!(json_output(&output)["logicalStatus"], "ok");
+}
+
+#[test]
+fn a_binary_representation_of_a_file_entry_must_still_live_in_the_blob_store() {
+    let (_sandbox, data_dir) = imported_store_with_a_file_source_reference();
+    let connection = Connection::open(data_dir.join("clipboard.db")).unwrap();
+    ignore_schema_checks(&connection);
+    connection
+        .execute(
+            "UPDATE event_representation
+             SET format_id = 'application/octet-stream'
+             WHERE format_id = 'text/uri-list'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = run_verify(&data_dir, 2);
+
+    assert_failed_verification(&output, "logicalStatus");
+}
+
 #[test]
 fn bounded_payload_verification_rejects_oversized_inline_metadata_without_disclosure() {
     let (_sandbox, data_dir) = imported_two_source_store_with_zstd();
