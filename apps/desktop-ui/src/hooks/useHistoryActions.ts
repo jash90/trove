@@ -72,7 +72,7 @@ export const useHistoryActions = ({
     const plainText = intent === 'pastePlain';
     setFeedback(null);
     void gateway
-      .copyEvent(eventId, plainText)
+      .copyEvent(eventId, plainText, intent !== 'copy')
       .then((result) => setFeedback(copyFeedback(result.mode, intent)))
       .catch(() => setFeedback('Nie udało się skopiować wpisu.'));
   };

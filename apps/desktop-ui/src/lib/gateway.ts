@@ -26,7 +26,11 @@ export interface ClipboardGateway {
   preview(eventId: number): Promise<Preview>;
   setPinned(eventId: number, pinned: boolean): Promise<void>;
   deleteEvent(eventId: number): Promise<void>;
-  copyEvent(eventId: number, plainText: boolean): Promise<CopyResult>;
+  /**
+   * Puts an entry back on the clipboard, and when `paste` is set also sends it
+   * to the window the user was in before the palette appeared.
+   */
+  copyEvent(eventId: number, plainText: boolean, paste: boolean): Promise<CopyResult>;
   chooseImportFile(): Promise<string | null>;
   chooseImportDirectory(): Promise<string | null>;
   analyzeImport(path: string): Promise<ImportAnalysis>;
@@ -43,6 +47,8 @@ export interface ClipboardGateway {
    * has nothing to report.
    */
   onHistoryChanged?(listener: () => void): () => void;
+  /** The menu bar asking this window to open its settings. */
+  onOpenSettingsRequested?(listener: () => void): () => void;
   getThumbnail(eventId: number): Promise<Thumbnail | null>;
   getSettings(): Promise<AppSettings>;
   isAutostartEnabled(): Promise<boolean>;
@@ -51,13 +57,35 @@ export interface ClipboardGateway {
   getStorageStats(): Promise<StorageStats>;
 }
 
+/**
+ * Subscribes to one core event.
+ *
+ * A signal from the core is a convenience: if the event bridge is unavailable
+ * the palette must still open, so a failure here degrades to a window that
+ * misses a refresh rather than to a broken one.
+ */
+const subscribe = (event: string, listener: () => void): (() => void) => {
+  let stop: (() => void) | null = null;
+  let cancelled = false;
+  void listen(event, () => listener())
+    .then((unlisten) => {
+      if (cancelled) unlisten();
+      else stop = unlisten;
+    })
+    .catch(() => undefined);
+  return () => {
+    cancelled = true;
+    stop?.();
+  };
+};
+
 export const tauriGateway: ClipboardGateway = {
   search: (request) => invoke<HistoryPage>('search_history', { request }),
   preview: (eventId) => invoke<Preview>('get_preview', { eventId }),
   setPinned: (eventId, pinned) => invoke<void>('set_pinned', { eventId, pinned }),
   deleteEvent: (eventId) => invoke<void>('delete_event', { eventId }),
-  copyEvent: (eventId, plainText) =>
-    invoke<CopyResult>('copy_event', { eventId, plainText }),
+  copyEvent: (eventId, plainText, paste) =>
+    invoke<CopyResult>('copy_event', { eventId, plainText, paste }),
   chooseImportFile: () =>
     open({
       title: 'Wybierz eksport historii schowka',
@@ -81,23 +109,8 @@ export const tauriGateway: ClipboardGateway = {
       validateImportProgress(progress, runId),
     ),
   revealSource: (eventId) => invoke<void>('reveal_source', { eventId }),
-  onHistoryChanged: (listener) => {
-    // A refresh signal is a convenience: if the event bridge is unavailable the
-    // palette must still open, so a failure here degrades to a history that
-    // updates on the next query rather than to a blank window.
-    let stop: (() => void) | null = null;
-    let cancelled = false;
-    void listen('history-changed', () => listener())
-      .then((unlisten) => {
-        if (cancelled) unlisten();
-        else stop = unlisten;
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-      stop?.();
-    };
-  },
+  onOpenSettingsRequested: (listener) => subscribe('open-settings', listener),
+  onHistoryChanged: (listener) => subscribe('history-changed', listener),
   getThumbnail: (eventId) => invoke<Thumbnail | null>('get_thumbnail', { eventId }),
   getSettings: () => invoke<AppSettings>('get_settings'),
   isAutostartEnabled: () => isEnabled(),

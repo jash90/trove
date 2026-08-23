@@ -2,6 +2,7 @@ pub mod commands;
 pub mod hotkey;
 pub mod monitor;
 pub mod state;
+pub mod tray;
 
 use tauri::Manager;
 
@@ -24,8 +25,15 @@ pub fn run() {
             if hotkey::install(app.handle()).is_err() {
                 eprintln!("clipboard-history: global shortcut unavailable");
             }
+            app.manage(hotkey::PasteTarget::new());
             let control = monitor::MonitorControl::new();
             app.manage(control.clone());
+            // The window spends most of its life hidden, so the menu bar is
+            // where the application exists on screen. Failing to place it there
+            // is not a reason to refuse to start.
+            if let Err(error) = tray::install(app.handle(), control.clone()) {
+                eprintln!("clipboard-history: menu bar item unavailable ({error})");
+            }
             monitor::start(app.handle(), control);
             Ok(())
         })

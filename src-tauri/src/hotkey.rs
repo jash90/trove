@@ -6,11 +6,40 @@
 //! the same key in charge of both directions instead of forcing a reach for the
 //! mouse or Escape.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicI32, Ordering},
+};
+
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 /// The label of the window the shortcut toggles.
 const PALETTE_WINDOW: &str = "main";
+
+/// The window the user was working in before the palette appeared.
+///
+/// Recorded on the way in, because once the palette has focus the frontmost
+/// application is the palette, and pasting into ourselves helps nobody.
+#[derive(Clone, Debug, Default)]
+pub struct PasteTarget {
+    pid: Arc<AtomicI32>,
+}
+
+impl PasteTarget {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn remember(&self, pid: Option<i32>) {
+        self.pid.store(pid.unwrap_or_default(), Ordering::Relaxed);
+    }
+
+    pub fn take(&self) -> Option<i32> {
+        let pid = self.pid.swap(0, Ordering::Relaxed);
+        (pid > 0).then_some(pid)
+    }
+}
 
 /// Cmd+Shift+Space on macOS, Ctrl+Shift+Space elsewhere.
 ///
@@ -50,8 +79,21 @@ pub fn toggle_palette<R: Runtime>(app: &AppHandle<R>) {
         let _ = window.hide();
         return;
     }
+    if let Some(target) = app.try_state::<PasteTarget>() {
+        target.remember(current_frontmost_pid());
+    }
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+#[cfg(target_os = "macos")]
+fn current_frontmost_pid() -> Option<i32> {
+    platform_macos::frontmost_pid()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_frontmost_pid() -> Option<i32> {
+    None
 }
 
 /// Keeps the process alive when the palette window is closed.

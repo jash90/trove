@@ -448,7 +448,7 @@ describe('history actions', () => {
   });
 
   it('removes a deleted item and moves selection without stale activation', async () => {
-    const copyEvent = vi.fn(async (_eventId: number, plainText: boolean) => ({
+    const copyEvent = vi.fn(async (_eventId: number, plainText: boolean, _paste: boolean) => ({
       mode: 'copied' as const,
       plainText,
     }));
@@ -466,11 +466,11 @@ describe('history actions', () => {
     expect(screen.getByRole('option', { selected: true })).toHaveAttribute('data-event-id', '2');
 
     await user.keyboard('{Enter}');
-    expect(copyEvent).toHaveBeenLastCalledWith(2, false);
+    expect(copyEvent).toHaveBeenLastCalledWith(2, false, true);
   });
 
   it('supports copy, paste, plain-text and pin hotkeys from search focus', async () => {
-    const copyEvent = vi.fn(async (_eventId: number, plainText: boolean) => ({
+    const copyEvent = vi.fn(async (_eventId: number, plainText: boolean, _paste: boolean) => ({
       mode: 'copied' as const,
       plainText,
     }));
@@ -488,8 +488,8 @@ describe('history actions', () => {
     await user.keyboard('{Meta>}p{/Meta}');
     await user.keyboard('{Delete}');
 
-    expect(copyEvent).toHaveBeenCalledWith(1, false);
-    expect(copyEvent).toHaveBeenCalledWith(1, true);
+    expect(copyEvent).toHaveBeenCalledWith(1, false, false);
+    expect(copyEvent).toHaveBeenCalledWith(1, true, true);
     expect(setPinned).toHaveBeenCalledWith(1, true);
     // Delete belongs to the query field while it has focus. Proposing to erase
     // a history entry when the user meant to erase a character is the wrong
@@ -498,7 +498,7 @@ describe('history actions', () => {
   });
 
   it('preserves copy, paste, and plain-text paste intent in fallback feedback', async () => {
-    const copyEvent = vi.fn(async (_eventId: number, plainText: boolean) => ({
+    const copyEvent = vi.fn(async (_eventId: number, plainText: boolean, _paste: boolean) => ({
       mode: 'copied' as const,
       plainText,
     }));
@@ -518,10 +518,12 @@ describe('history actions', () => {
         'Skopiowano jako zwykły tekst — automatyczne wklejenie jest niedostępne.',
       ),
     ).toBeVisible();
+    // Enter and Cmd+Shift+V ask for a paste; Cmd+C only copies. The third
+    // argument is what tells the core which of those the user meant.
     expect(copyEvent.mock.calls).toEqual([
-      [1, false],
-      [1, false],
-      [1, true],
+      [1, false, true],
+      [1, false, false],
+      [1, true, true],
     ]);
   });
 
@@ -557,7 +559,7 @@ describe('history actions', () => {
   });
 
   it('suppresses history hotkeys while a dialog owns focus', async () => {
-    const copyEvent = vi.fn(async (_eventId: number, plainText: boolean) => ({
+    const copyEvent = vi.fn(async (_eventId: number, plainText: boolean, _paste: boolean) => ({
       mode: 'copied' as const,
       plainText,
     }));

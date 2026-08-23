@@ -65,7 +65,7 @@ describe('tauriGateway', () => {
     await tauriGateway.preview(7);
     await tauriGateway.setPinned(7, true);
     await tauriGateway.deleteEvent(7);
-    await tauriGateway.copyEvent(7, true);
+    await tauriGateway.copyEvent(7, true, false);
     await tauriGateway.chooseImportFile();
     await tauriGateway.chooseImportDirectory();
     vi.mocked(invoke).mockResolvedValueOnce({
@@ -99,7 +99,7 @@ describe('tauriGateway', () => {
       ['get_preview', { eventId: 7 }],
       ['set_pinned', { eventId: 7, pinned: true }],
       ['delete_event', { eventId: 7 }],
-      ['copy_event', { eventId: 7, plainText: true }],
+      ['copy_event', { eventId: 7, plainText: true, paste: false }],
       ['analyze_import', { path: '/synthetic/import.json' }],
       ['start_import', { analysisId: 'analysis-id' }],
       ['discard_import_analysis', { analysisId: 'analysis-id' }],

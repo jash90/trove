@@ -342,6 +342,7 @@ pub async fn copy_event<R: tauri::Runtime>(
     state: tauri::State<'_, AppState>,
     event_id: i64,
     plain_text: bool,
+    paste: bool,
 ) -> Result<CopyResultDto, String> {
     let text = prepare_copy_text_service(state.inner(), event_id, plain_text).await?;
     // Putting an entry back changes the clipboard, and the monitor would
@@ -353,10 +354,66 @@ pub async fn copy_event<R: tauri::Runtime>(
     app.clipboard()
         .write_text(text)
         .map_err(|_| "clipboard_unavailable".to_owned())?;
-    Ok(CopyResultDto {
-        mode: CopyModeDto::Copied,
-        plain_text,
-    })
+    let mode = if paste {
+        paste_into_previous_window(&app)
+    } else {
+        CopyModeDto::Copied
+    };
+    Ok(CopyResultDto { mode, plain_text })
+}
+
+/// Sends the entry to the window the user was in before the palette appeared.
+///
+/// The entry is already on the clipboard, so every refusal below still leaves
+/// the user able to paste by hand. Saying which refusal happened is the point:
+/// a silent no-op is indistinguishable from a broken application.
+fn paste_into_previous_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> CopyModeDto {
+    let target = app
+        .try_state::<crate::hotkey::PasteTarget>()
+        .and_then(|target| target.take());
+    match paste_readiness(target) {
+        Some(mode) => mode,
+        None => {
+            // Hide first: the keystroke goes to the window that had focus, and
+            // leaving the palette in front would send it into a dead end.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
+            }
+            let pid = target.unwrap_or_default();
+            if paste_keystroke(pid) {
+                CopyModeDto::Pasted
+            } else {
+                CopyModeDto::CopiedOnlyPlatformLimit
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn paste_readiness(target: Option<i32>) -> Option<CopyModeDto> {
+    use platform_macos::PasteReadiness;
+
+    match platform_macos::readiness(platform_macos::is_trusted(), target) {
+        PasteReadiness::Ready => None,
+        PasteReadiness::PermissionRequired => Some(CopyModeDto::CopiedOnlyPermissionRequired),
+        PasteReadiness::TargetLost => Some(CopyModeDto::CopiedOnlyTargetLost),
+        PasteReadiness::PlatformLimit => Some(CopyModeDto::CopiedOnlyPlatformLimit),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn paste_readiness(_target: Option<i32>) -> Option<CopyModeDto> {
+    Some(CopyModeDto::CopiedOnlyPlatformLimit)
+}
+
+#[cfg(target_os = "macos")]
+fn paste_keystroke(pid: i32) -> bool {
+    platform_macos::post_paste_to(pid)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn paste_keystroke(_pid: i32) -> bool {
+    false
 }
 
 pub async fn prepare_copy_text_service(

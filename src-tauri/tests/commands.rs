@@ -534,7 +534,7 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
         &window,
         ipc_request(
             "copy_event",
-            json!({ "eventId": image.event_id, "plainText": true }),
+            json!({ "eventId": image.event_id, "plainText": true, "paste": false }),
         ),
     )
     .unwrap_err();

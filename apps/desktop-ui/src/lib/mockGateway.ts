@@ -76,6 +76,7 @@ export const mockGateway: ClipboardGateway = {
   },
   // The browser preview has no core behind it, so nothing ever changes.
   onHistoryChanged: () => () => undefined,
+  onOpenSettingsRequested: () => () => undefined,
   getThumbnail: async (eventId) =>
     eventId === 103 ? { mimeType: 'image/png', base64: 'c3ludGhldGlj' } : null,
   getSettings: async () => ({ ...settings, denylistedApps: [...settings.denylistedApps] }),

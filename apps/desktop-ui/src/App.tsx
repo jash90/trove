@@ -85,6 +85,11 @@ const ClipboardPalette = (): React.JSX.Element => {
     selectedItem?.kind === 'image' && selectedItem.hasThumbnail,
   );
 
+  useEffect(
+    () => gateway.onOpenSettingsRequested?.(() => setWorkspace('settings')),
+    [gateway],
+  );
+
   const modalOpen = actions.deleteTargetId !== null || workspace !== 'none';
 
   // Only one workspace at a time, and the invoker gets focus back so keyboard

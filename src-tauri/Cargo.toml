@@ -9,7 +9,7 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 anyhow.workspace = true
-tauri = { version = "2.11.5", features = [] }
+tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-dialog = "2.7.2"

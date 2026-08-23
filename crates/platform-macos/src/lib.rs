@@ -6,9 +6,11 @@
 //! read and nothing else.
 
 pub mod markers;
+pub mod paste;
 pub mod pasteboard;
 
 pub use markers::{MarkerPolicy, classify_types};
+pub use paste::{PasteReadiness, is_trusted, post_paste_to, readiness};
 pub use pasteboard::{MAX_CAPTURED_PAYLOAD_BYTES, PollOutcome, snapshot_from_types};
 
 use std::time::Duration;
@@ -110,6 +112,18 @@ mod platform {
         }
     }
 
+    /// The process id of whatever is in front right now.
+    ///
+    /// Recorded before the palette appears so a paste can go back to the window
+    /// the user was actually working in, rather than to whatever is frontmost
+    /// once the palette has taken focus — which would be the palette itself.
+    pub fn frontmost_pid() -> Option<i32> {
+        let workspace = NSWorkspace::sharedWorkspace();
+        let application = workspace.frontmostApplication()?;
+        let pid = application.processIdentifier();
+        (pid > 0).then_some(pid)
+    }
+
     /// The application in front when the copy happened.
     ///
     /// This is a guess, not a declaration — hence `SourceConfidence::Inferred`
@@ -137,4 +151,4 @@ mod platform {
 }
 
 #[cfg(target_os = "macos")]
-pub use platform::MacPasteboardWatcher;
+pub use platform::{MacPasteboardWatcher, frontmost_pid};

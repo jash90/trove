@@ -11,3 +11,4 @@ clipboard-core = { path = "../clipboard-core" }
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", features = ["NSPasteboard", "NSWorkspace", "NSRunningApplication"] }
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSArray", "NSData"] }
+objc2-core-graphics = { version = "0.3.2", features = ["CGEvent", "CGEventSource", "CGEventTypes"] }
