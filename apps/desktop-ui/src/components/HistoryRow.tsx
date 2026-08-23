@@ -34,16 +34,16 @@ const KIND_ICONS: Record<ContentKind, LucideIcon> = {
 };
 
 const KIND_LABELS: Record<ContentKind, string> = {
-  text: 'Tekst',
+  text: 'Text',
   link: 'Link',
-  image: 'Obraz',
-  file: 'Plik',
-  color: 'Kolor',
-  code: 'Kod',
+  image: 'Image',
+  file: 'File',
+  color: 'Colour',
+  code: 'Code',
   html: 'HTML',
 };
 
-const CAPTURED_AT_FORMATTER = new Intl.DateTimeFormat('pl-PL', {
+const CAPTURED_AT_FORMATTER = new Intl.DateTimeFormat('en-GB', {
   day: '2-digit',
   month: 'short',
   hour: '2-digit',
@@ -85,14 +85,14 @@ export const HistoryRow = ({
         <KindIcon size={17} strokeWidth={1.8} />
       </span>
       <span className="history-row__content">
-        <span className="history-row__preview">{displayPreview || 'Wpis bez podglądu'}</span>
+        <span className="history-row__preview">{displayPreview || 'Entry with no preview'}</span>
         <span className="history-row__metadata">
           <span>{KIND_LABELS[item.kind]}</span>
-          <span>{item.sourceAppName ?? 'Nieznana aplikacja'}</span>
+          <span>{item.sourceAppName ?? 'Unknown application'}</span>
         </span>
       </span>
       <span className="history-row__aside">
-        {item.pinned ? <Pin size={13} fill="currentColor" aria-label="Przypięte" /> : null}
+        {item.pinned ? <Pin size={13} fill="currentColor" aria-label="Pinned" /> : null}
         <time dateTime={new Date(item.capturedAtMs).toISOString()}>
           {formatCapturedAt(item.capturedAtMs)}
         </time>

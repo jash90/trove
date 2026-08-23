@@ -14,7 +14,7 @@ import { mockGateway } from '../lib/mockGateway';
 /// options too. An unscoped option query matches both, so a test can pass
 /// while the list it meant to inspect has not loaded at all.
 const historyList = () =>
-  within(screen.getByRole('listbox', { name: 'Wyniki historii schowka' }));
+  within(screen.getByRole('listbox', { name: 'Clipboard history results' }));
 
 
 /**
@@ -54,7 +54,7 @@ describe('the palette end to end', () => {
 
     await user.keyboard('{Meta>}p{/Meta}');
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: /przypnij wpis|odepnij wpis/i })).toBeVisible(),
+      expect(screen.getByRole('button', { name: /pin entry|unpin entry/i })).toBeVisible(),
     );
 
     // The list carries previews and metadata, never representation bytes.
@@ -69,7 +69,7 @@ describe('the palette end to end', () => {
     const user = userEvent.setup();
     await user.click(historyList().getByRole('option', { name: /raport-syntetyczny\.pdf/ }));
 
-    expect(await screen.findByText('Lokalizacja źródłowa')).toBeVisible();
+    expect(await screen.findByText('Source location')).toBeVisible();
     expect(
       screen.getByText('/synthetic/archiwum/notatka-syntetyczna.pdf'),
     ).toBeVisible();
@@ -82,14 +82,14 @@ describe('the palette end to end', () => {
     await settle();
 
     await user.click(screen.getByRole('button', { name: 'Importuj archiwum' }));
-    expect(screen.getByRole('dialog', { name: 'Importuj historię' })).toBeVisible();
+    expect(screen.getByRole('dialog', { name: 'Import history' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Zamknij import' }));
 
     // Settings are their own OS window, so the palette asks for it and keeps
     // showing the list rather than covering it.
-    await user.click(screen.getByRole('button', { name: 'Otwórz ustawienia' }));
+    await user.click(screen.getByRole('button', { name: 'Open settings' }));
     expect(openSettingsWindow).toHaveBeenCalledOnce();
-    expect(screen.queryByRole('dialog', { name: 'Ustawienia' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument();
     expect(historyList().getAllByRole('option').length).toBeGreaterThan(0);
   });
 

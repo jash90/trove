@@ -30,22 +30,22 @@ export const ImportProgress = ({
       <div
         className="progress-track"
         role="progressbar"
-        aria-label="Postęp importu"
+        aria-label="Import progress"
         aria-valuemin={0}
         aria-valuemax={progress.total}
         aria-valuenow={progress.processed}
-        aria-valuetext={`${percentage}% · ${formatCount(progress.processed)} z ${formatCount(progress.total)} rekordów`}
+        aria-valuetext={`${percentage}% · ${formatCount(progress.processed)} of ${formatCount(progress.total)} records`}
       >
         <span style={{ width: `${percentage}%` }} />
       </div>
       <p className="progress-count" aria-live="polite">
-        {formatCount(progress.processed)} z {formatCount(progress.total)} rekordów
+        {formatCount(progress.processed)} of {formatCount(progress.total)} records
       </p>
       <dl className="count-ledger count-ledger--four">
         <div><dt>Nowe</dt><dd>{formatCount(progress.imported)}</dd></div>
-        <div><dt>Już obecne</dt><dd>{formatCount(progress.alreadyPresent)}</dd></div>
-        <div><dt>Pominięte</dt><dd>{formatCount(progress.skipped)}</dd></div>
-        <div><dt>Błędy</dt><dd>{formatCount(progress.failed)}</dd></div>
+        <div><dt>Already present</dt><dd>{formatCount(progress.alreadyPresent)}</dd></div>
+        <div><dt>Skipped</dt><dd>{formatCount(progress.skipped)}</dd></div>
+        <div><dt>Failed</dt><dd>{formatCount(progress.failed)}</dd></div>
       </dl>
     </section>
   );

@@ -104,7 +104,7 @@ describe('ImportWizard encrypted exports', () => {
 
     await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
 
-    const field = await screen.findByLabelText('Hasło eksportu');
+    const field = await screen.findByLabelText('Export password');
     await user.type(field, SENTINEL_PASSWORD);
     await user.click(screen.getByRole('button', { name: 'Odszyfruj i przeanalizuj' }));
 
@@ -129,15 +129,15 @@ describe('ImportWizard encrypted exports', () => {
     const { container } = render(<ImportWizard gateway={gateway} />);
 
     await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
-    await user.type(await screen.findByLabelText('Hasło eksportu'), SENTINEL_PASSWORD);
+    await user.type(await screen.findByLabelText('Export password'), SENTINEL_PASSWORD);
     await user.click(screen.getByRole('button', { name: 'Odszyfruj i przeanalizuj' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Hasło nie pasuje do tego pliku.',
+      'The password does not match this file.',
     );
     // The field is emptied, so a mistyped password is not resubmitted by
     // accident and does not sit in the DOM waiting to be read.
-    const retry = await screen.findByLabelText('Hasło eksportu');
+    const retry = await screen.findByLabelText('Export password');
     expect(retry).toHaveValue('');
 
     await user.type(retry, 'right');
@@ -166,7 +166,7 @@ describe('ImportWizard encrypted exports', () => {
     render(<ImportWizard gateway={gateway} />);
 
     await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
-    await screen.findByLabelText('Hasło eksportu');
+    await screen.findByLabelText('Export password');
     await user.click(screen.getByRole('button', { name: 'Anuluj' }));
 
     expect(await screen.findByRole('button', { name: 'Wybierz plik eksportu' })).toBeVisible();
@@ -183,8 +183,8 @@ describe('ImportWizard encrypted exports', () => {
 
     await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Nie udało się przeanalizować');
-    expect(screen.queryByLabelText('Hasło eksportu')).not.toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be analysed');
+    expect(screen.queryByLabelText('Export password')).not.toBeInTheDocument();
   });
 });
 
@@ -256,12 +256,12 @@ describe('ImportWizard privacy and confirmation', () => {
     const { container } = render(<ImportWizard gateway={gateway} pollIntervalMs={5} />);
 
     await chooseFile(user);
-    expect(screen.getByText('6 503 rekordów')).toBeVisible();
+    expect(screen.getByText('6,503 records')).toBeVisible();
     expect(container).not.toHaveTextContent(privatePath);
     expect(container).not.toHaveTextContent('fixture secret payload');
 
     await user.click(screen.getByRole('button', { name: 'Rozpocznij import' }));
-    expect(await screen.findByRole('heading', { name: 'Import zakończony' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Import complete' })).toBeVisible();
     expect(analyzeImport).toHaveBeenCalledOnce();
     // A plain export carries no password, and the wizard says so explicitly
     // rather than leaving the argument to chance.
@@ -286,7 +286,7 @@ describe('ImportWizard privacy and confirmation', () => {
     await user.click(screen.getByRole('button', { name: 'Wybierz katalog eksportu' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Nie udało się przeanalizować archiwum',
+      'The archive could not be analysed',
     );
     expect(container).not.toHaveTextContent('/private/archive');
     expect(container).not.toHaveTextContent('secret-token');
@@ -323,7 +323,7 @@ describe('ImportWizard privacy and confirmation', () => {
     await user.click(screen.getByRole('button', { name: 'Anuluj import' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Nie udało się anulować przygotowanego importu',
+      'The prepared import could not be cancelled',
     );
     expect(screen.getByRole('button', { name: 'Rozpocznij import' })).toBeVisible();
     expect(container).not.toHaveTextContent('/private/export.json');
@@ -368,7 +368,7 @@ describe('ImportWizard start recovery and polling', () => {
 
     await user.click(screen.getByRole('button', { name: 'Rozpocznij import' }));
 
-    expect(await screen.findByRole('heading', { name: 'Import nie został ukończony' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'The import did not finish' })).toBeVisible();
     expect(getImportStatus).not.toHaveBeenCalled();
     expect(discardImportAnalysis).not.toHaveBeenCalled();
   });
@@ -390,7 +390,7 @@ describe('ImportWizard start recovery and polling', () => {
 
     await user.click(screen.getByRole('button', { name: 'Rozpocznij import' }));
 
-    expect(await screen.findByRole('heading', { name: 'Import zakończony' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Import complete' })).toBeVisible();
     expect(getImportStatus).toHaveBeenNthCalledWith(1, RUN_ID);
     expect(getImportStatus).toHaveBeenNthCalledWith(2, RUN_ID);
     expect(container).not.toHaveTextContent('archive.json');
@@ -417,10 +417,10 @@ describe('ImportWizard start recovery and polling', () => {
     expect(getImportStatus).toHaveBeenCalledOnce();
 
     await act(async () => first.resolve(runningProgress()));
-    expect(screen.getByRole('progressbar', { name: 'Postęp importu' })).toBeVisible();
+    expect(screen.getByRole('progressbar', { name: 'Import progress' })).toBeVisible();
     await act(async () => vi.advanceTimersByTimeAsync(50));
     expect(getImportStatus).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole('heading', { name: 'Import zakończony' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Import complete' })).toBeVisible();
 
     await act(async () => vi.advanceTimersByTimeAsync(500));
     expect(getImportStatus).toHaveBeenCalledTimes(2);
@@ -440,7 +440,7 @@ describe('ImportWizard start recovery and polling', () => {
     unmount();
 
     await act(async () => request.resolve(completedProgress));
-    expect(screen.queryByRole('heading', { name: 'Import zakończony' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Import complete' })).not.toBeInTheDocument();
   });
 
   it('keeps polling failures private and accepts only a matching progress run id', async () => {
@@ -455,7 +455,7 @@ describe('ImportWizard start recovery and polling', () => {
 
     await user.click(screen.getByRole('button', { name: 'Rozpocznij import' }));
 
-    expect(await screen.findByRole('heading', { name: 'Import nie został ukończony' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'The import did not finish' })).toBeVisible();
     expect(container).not.toHaveTextContent('/private/export.json');
     expect(container).not.toHaveTextContent('different-run');
   });
@@ -466,9 +466,9 @@ describe('Import dialog accessibility', () => {
     const user = userEvent.setup();
     render(<ImportWizard gateway={makeGateway()} />);
 
-    const dialog = screen.getByRole('dialog', { name: 'Importuj historię' });
+    const dialog = screen.getByRole('dialog', { name: 'Import history' });
     expect(dialog).toHaveAttribute('aria-modal', 'true');
-    expect(dialog).toHaveAccessibleDescription(/archiwum może zawierać dane wrażliwe/i);
+    expect(dialog).toHaveAccessibleDescription(/archive may hold sensitive data/i);
     const primary = screen.getByRole('button', { name: 'Wybierz plik eksportu' });
     const close = screen.getByRole('button', { name: 'Zamknij import' });
     expect(primary).toHaveFocus();
@@ -485,11 +485,11 @@ describe('Import dialog accessibility', () => {
       <ImportProgress progress={runningProgress(250)} phase="running" />,
     );
 
-    const progressbar = screen.getByRole('progressbar', { name: 'Postęp importu' });
+    const progressbar = screen.getByRole('progressbar', { name: 'Import progress' });
     expect(progressbar).toHaveAttribute('aria-valuemin', '0');
     expect(progressbar).toHaveAttribute('aria-valuemax', '6503');
     expect(progressbar).toHaveAttribute('aria-valuenow', '250');
-    expect(screen.getByText('250 z 6 503 rekordów')).toHaveAttribute('aria-live', 'polite');
+    expect(screen.getByText('250 of 6,503 records')).toHaveAttribute('aria-live', 'polite');
     expect(container).not.toHaveTextContent('payload');
     expect(container).not.toHaveTextContent('/');
   });

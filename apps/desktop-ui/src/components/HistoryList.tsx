@@ -43,7 +43,7 @@ export const HistoryList = ({
       ref={scrollRef}
       id={id}
       role="listbox"
-      aria-label="Wyniki historii schowka"
+      aria-label="Clipboard history results"
       className="history-list"
     >
       <div

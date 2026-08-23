@@ -8,16 +8,16 @@ interface EmptyStateProps {
 
 const STATE_COPY: Record<EmptyStateKind, { title: string; detail: string }> = {
   loading: {
-    title: 'Ładowanie historii…',
-    detail: 'Porządkujemy najnowsze wpisy.',
+    title: 'Loading history…',
+    detail: 'Sorting the most recent entries.',
   },
   empty: {
-    title: 'Historia jest pusta',
-    detail: 'Skopiowane elementy pojawią się tutaj automatycznie.',
+    title: 'The history is empty',
+    detail: 'Copied items appear here automatically.',
   },
   error: {
-    title: 'Nie udało się wczytać historii',
-    detail: 'Spróbuj ponownie za chwilę.',
+    title: 'The history could not be loaded',
+    detail: 'Try again in a moment.',
   },
 };
 

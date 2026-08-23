@@ -13,11 +13,11 @@ interface FilterDefinition {
 
 const FILTERS: FilterDefinition[] = [
   { id: 'all', label: 'Wszystkie', token: null },
-  { id: 'text', label: 'Tekst', token: 'type:text' },
-  { id: 'link', label: 'Linki', token: 'type:link' },
-  { id: 'image', label: 'Obrazy', token: 'type:image' },
-  { id: 'file', label: 'Pliki', token: 'type:file' },
-  { id: 'pinned', label: 'Przypięte', token: 'is:pinned' },
+  { id: 'text', label: 'Text', token: 'type:text' },
+  { id: 'link', label: 'Links', token: 'type:link' },
+  { id: 'image', label: 'Images', token: 'type:image' },
+  { id: 'file', label: 'Files', token: 'type:file' },
+  { id: 'pinned', label: 'Pinned', token: 'is:pinned' },
 ];
 
 const FILTER_TOKEN_PATTERN = /(^|\s)(?:type:(?:text|link|image|file|color|code|html)|is:pinned)(?=\s|$)/giu;
@@ -68,7 +68,7 @@ export const TypeFilter = ({
       >
         {/* Only reachable when the query carries an operator with no control of
             its own; picking anything else replaces it. */}
-        {activeFilter === null ? <option value="">Własny filtr</option> : null}
+        {activeFilter === null ? <option value="">Custom filter</option> : null}
         {FILTERS.map((filter) => (
           <option key={filter.id} value={filter.id}>
             {filter.label}

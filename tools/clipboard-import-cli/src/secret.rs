@@ -54,7 +54,7 @@ fn prompt_without_echo() -> Result<RayconfigSecret, CliFailure> {
     let stdin = std::io::stdin();
     let mut stderr = std::io::stderr();
     // The prompt goes to stderr so that stdout stays machine-readable.
-    let _ = write!(stderr, "Hasło do pliku .rayconfig: ");
+    let _ = write!(stderr, "Password for the .rayconfig file: ");
     let _ = stderr.flush();
 
     let original = tcgetattr(&stdin).map_err(|_| CliFailure::new("password_unreadable"))?;

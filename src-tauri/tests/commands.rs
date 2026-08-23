@@ -98,7 +98,7 @@ fn a_saved_shortcut_is_parsed_back_into_the_one_that_will_be_registered() {
     assert!(hotkey::parse_shortcut("Control+Alt+7").is_some());
     // Nonsense yields nothing rather than the default: quietly registering a
     // different shortcut leaves the user pressing keys that do nothing.
-    assert!(hotkey::parse_shortcut("nie-skrót").is_none());
+    assert!(hotkey::parse_shortcut("not-a-shortcut").is_none());
     assert!(hotkey::parse_shortcut("").is_none());
 }
 
@@ -405,7 +405,7 @@ async fn preview_pin_delete_and_storage_commands_expose_only_selected_bounded_da
     let state = AppState::open_data_dir(directory.path()).unwrap();
     let text = state
         .store
-        .ingest(text_capture("wybrany podgląd", 1_725_000_000_100))
+        .ingest(text_capture("the selected preview", 1_725_000_000_100))
         .await
         .unwrap();
     state
@@ -418,7 +418,7 @@ async fn preview_pin_delete_and_storage_commands_expose_only_selected_bounded_da
         .await
         .unwrap();
     assert_eq!(preview.event_id, text.event_id);
-    assert_eq!(preview.text.as_deref(), Some("wybrany podgląd"));
+    assert_eq!(preview.text.as_deref(), Some("the selected preview"));
     assert_eq!(preview.mime_type, "text/plain");
     let preview_json = serde_json::to_value(&preview).unwrap();
     // The wire contract no longer carries a missing-payload flag: the importer

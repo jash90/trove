@@ -115,16 +115,16 @@ describe('tauriGateway', () => {
     expect(vi.mocked(open).mock.calls).toEqual([
       [
         {
-          title: 'Wybierz eksport historii schowka',
+          title: 'Choose a clipboard history export',
           multiple: false,
           // The file Raycast actually writes is offered alongside the plain
           // JSON somebody decrypted by hand.
-          filters: [{ name: 'Eksport schowka', extensions: ['json', 'rayconfig'] }],
+          filters: [{ name: 'Clipboard export', extensions: ['json', 'rayconfig'] }],
         },
       ],
       [
         {
-          title: 'Wybierz katalog eksportu historii schowka',
+          title: 'Choose the clipboard history export directory',
           directory: true,
           recursive: true,
           multiple: false,

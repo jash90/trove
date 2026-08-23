@@ -50,12 +50,12 @@ export const PaletteWorkspace = ({
       <button
         type="button"
         className="preview-toggle"
-        aria-label="Pokaż podgląd zaznaczonego wpisu"
+        aria-label="Show the selected entry preview"
         disabled={items.length === 0}
         onClick={onOpenPreview}
       >
         <PanelRightOpen size={15} aria-hidden="true" />
-        Podgląd
+        Preview
       </button>
       <div className="history-panel">
         {/* `loading` now means there is nothing to show yet, so this replaces

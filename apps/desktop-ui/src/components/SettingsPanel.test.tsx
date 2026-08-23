@@ -75,7 +75,7 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
   }) as ClipboardGateway;
 
 const loadSettings = async (): Promise<HTMLInputElement> =>
-  screen.findByRole('textbox', { name: 'Skrót globalny' });
+  screen.findByRole('textbox', { name: 'Global shortcut' });
 
 describe('settings normalization', () => {
   it.each([
@@ -103,7 +103,7 @@ describe('settings normalization', () => {
     expect(normalizeExecutableDenylistEntry('Clipboard_Helper-2')).toBe(
       'clipboard_helper-2',
     );
-    expect(() => normalizeExecutableDenylistEntry('AplikacjaŻ')).toThrow(
+    expect(() => normalizeExecutableDenylistEntry('Applicationé')).toThrow(
       'invalid_denylist_entry',
     );
   });
@@ -148,9 +148,9 @@ describe('SettingsPanel validation and transactions', () => {
     const retention = screen.getByRole('spinbutton', { name: 'Dni przechowywania' });
     await user.clear(retention);
     await user.type(retention, days);
-    await user.click(screen.getByRole('button', { name: 'Zapisz ustawienia' }));
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
 
-    expect(await screen.findByText('Podaj pełną liczbę dni od 1 do 3650.')).toBeVisible();
+    expect(await screen.findByText('Give a whole number of days from 1 to 3650.')).toBeVisible();
     expect(saveSettings).not.toHaveBeenCalled();
   });
 
@@ -163,7 +163,7 @@ describe('SettingsPanel validation and transactions', () => {
     const retention = screen.getByRole('spinbutton', { name: 'Dni przechowywania' });
     await user.clear(retention);
     await user.type(retention, days);
-    await user.click(screen.getByRole('button', { name: 'Zapisz ustawienia' }));
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
 
     await waitFor(() => expect(saveSettings).toHaveBeenCalled());
     expect(saveSettings.mock.calls[0]?.[0].retentionDays).toBe(Number(days));
@@ -177,7 +177,7 @@ describe('SettingsPanel validation and transactions', () => {
 
     await user.click(screen.getByRole('checkbox', { name: 'Bez limitu retencji' }));
     expect(screen.getByRole('spinbutton', { name: 'Dni przechowywania' })).toBeDisabled();
-    await user.click(screen.getByRole('button', { name: 'Zapisz ustawienia' }));
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
 
     await waitFor(() => expect(saveSettings).toHaveBeenCalled());
     expect(saveSettings.mock.calls[0]?.[0].retentionDays).toBeNull();
@@ -205,9 +205,9 @@ describe('SettingsPanel validation and transactions', () => {
     await loadSettings();
 
     await user.click(screen.getByRole('checkbox', { name: 'Uruchamiaj przy logowaniu' }));
-    await user.click(screen.getByRole('button', { name: 'Zapisz ustawienia' }));
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Ustawienia zapisane');
+    expect(await screen.findByRole('status')).toHaveTextContent('Settings saved');
     expect(order).toEqual(['native:true', 'persisted']);
     expect(saveSettings.mock.calls[0]?.[0].autostart).toBe(true);
   });
@@ -227,10 +227,10 @@ describe('SettingsPanel validation and transactions', () => {
     await loadSettings();
 
     await user.click(screen.getByRole('checkbox', { name: 'Uruchamiaj przy logowaniu' }));
-    await user.click(screen.getByRole('button', { name: 'Zapisz ustawienia' }));
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Nie udało się zastosować ustawień',
+      'The settings could not be applied',
     );
     expect(saveSettings).not.toHaveBeenCalled();
     expect(isAutostartEnabled).toHaveBeenCalledTimes(2);
@@ -255,10 +255,10 @@ describe('SettingsPanel validation and transactions', () => {
     await loadSettings();
 
     await user.click(screen.getByRole('checkbox', { name: 'Uruchamiaj przy logowaniu' }));
-    await user.click(screen.getByRole('button', { name: 'Zapisz ustawienia' }));
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Nie udało się zastosować ustawień',
+      'The settings could not be applied',
     );
     expect(setAutostartEnabled.mock.calls).toEqual([[true], [false]]);
     expect(isAutostartEnabled).toHaveBeenCalledTimes(2);
@@ -273,7 +273,7 @@ describe('SettingsPanel validation and transactions', () => {
     render(<SettingsPanel gateway={makeGateway({ saveSettings })} />);
     await loadSettings();
 
-    const submit = screen.getByRole('button', { name: 'Zapisz ustawienia' });
+    const submit = screen.getByRole('button', { name: 'Save settings' });
     await user.click(submit);
     expect(screen.getByRole('button', { name: 'Zapisywanie…' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Zapisywanie…' }));
@@ -294,10 +294,10 @@ describe('SettingsPanel validation and transactions', () => {
     await loadSettings();
 
     expect(screen.getByRole('status')).toHaveTextContent(
-      'Stan autostartu różni się od zapisanego ustawienia',
+      'The autostart state differs from the saved setting',
     );
-    expect(screen.getByText(/zapisane: włączony/i)).toBeVisible();
-    expect(screen.getByText(/system: wyłączony/i)).toBeVisible();
+    expect(screen.getByText(/saved: on/i)).toBeVisible();
+    expect(screen.getByText(/system: off/i)).toBeVisible();
   });
 });
 
@@ -308,23 +308,23 @@ describe('Settings page and storage semantics', () => {
 
     // Its own window now, so there is nothing behind it to trap focus against
     // and nothing to mark as modal.
-    const page = screen.getByRole('main', { name: 'Ustawienia' });
+    const page = screen.getByRole('main', { name: 'Settings' });
     expect(page).not.toHaveAttribute('aria-modal');
-    expect(page).toHaveAccessibleDescription(/ustawienia pozostają lokalne/i);
+    expect(page).toHaveAccessibleDescription(/settings stay local/i);
     // Saving rebinds the shortcut with the system, so the screen must say that
     // rather than promising it takes effect on the next launch.
-    expect(screen.getByText(/zapisanie zmienia aktywny skrót od razu/i)).toBeVisible();
+    expect(screen.getByText(/saving changes the active shortcut immediately/i)).toBeVisible();
     expect(hotkey).toHaveFocus();
-    expect(screen.getByRole('button', { name: 'Zamknij ustawienia' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Close settings' })).toBeVisible();
   });
 
   it('describes the database main file and referenced blobs without claiming total disk use', () => {
     render(<StorageStatsView stats={storageStats} status="ready" />);
 
-    expect(screen.getByText('Główny plik bazy danych')).toBeVisible();
-    expect(screen.getByText('Bloby wskazane przez bazę')).toBeVisible();
-    expect(screen.getByText(/nie jest to całkowite użycie dysku/i)).toBeVisible();
-    expect(screen.queryByText('Łączny rozmiar aplikacji')).not.toBeInTheDocument();
+    expect(screen.getByText('Main database file')).toBeVisible();
+    expect(screen.getByText('Blobs the database references')).toBeVisible();
+    expect(screen.getByText(/not the application's total disk use/i)).toBeVisible();
+    expect(screen.queryByText('Total application size')).not.toBeInTheDocument();
   });
 
   it('shows unavailable instead of rendering unsafe storage values', async () => {
@@ -341,7 +341,7 @@ describe('Settings page and storage semantics', () => {
     );
     await loadSettings();
 
-    expect(await screen.findByText('Dane o pamięci są niedostępne.')).toBeVisible();
+    expect(await screen.findByText('Storage figures are unavailable.')).toBeVisible();
     expect(screen.queryByText(`${Number.MAX_SAFE_INTEGER} B`)).not.toBeInTheDocument();
   });
 });

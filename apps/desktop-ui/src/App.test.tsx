@@ -7,23 +7,23 @@ import { mockGateway } from './lib/gateway';
 
 it('renders the private clipboard palette landmark', () => {
   render(<App />);
-  expect(screen.getByRole('application', { name: 'Historia schowka' })).toBeVisible();
+  expect(screen.getByRole('application', { name: 'Clipboard history' })).toBeVisible();
 });
 
 it('opens the import wizard over the palette and returns focus to the search field', async () => {
   const user = userEvent.setup();
   render(<App />);
-  const search = screen.getByRole('searchbox', { name: 'Przeszukaj historię' });
+  const search = screen.getByRole('searchbox', { name: 'Search history' });
 
   await user.click(screen.getByRole('button', { name: 'Importuj archiwum' }));
-  expect(screen.getByRole('dialog', { name: 'Importuj historię' })).toBeVisible();
-  expect(screen.getByLabelText('Paleta historii schowka')).toHaveAttribute('inert');
+  expect(screen.getByRole('dialog', { name: 'Import history' })).toBeVisible();
+  expect(screen.getByLabelText('Clipboard history palette')).toHaveAttribute('inert');
 
   await user.click(screen.getByRole('button', { name: 'Zamknij import' }));
   // The palette has one place a keyboard user works from, and a shortcut has
   // no button to hand focus back to.
   await waitFor(() => expect(search).toHaveFocus());
-  expect(screen.getByLabelText('Paleta historii schowka')).not.toHaveAttribute('inert');
+  expect(screen.getByLabelText('Clipboard history palette')).not.toHaveAttribute('inert');
 });
 
 it('asks for the settings window rather than covering the list with a dialog', async () => {
@@ -31,13 +31,13 @@ it('asks for the settings window rather than covering the list with a dialog', a
   const openSettingsWindow = vi.fn(async () => undefined);
   render(<App gateway={{ ...mockGateway, openSettingsWindow }} />);
 
-  await user.click(screen.getByRole('button', { name: 'Otwórz ustawienia' }));
+  await user.click(screen.getByRole('button', { name: 'Open settings' }));
   expect(openSettingsWindow).toHaveBeenCalledOnce();
 
   await user.keyboard('{Meta>},{/Meta}');
   expect(openSettingsWindow).toHaveBeenCalledTimes(2);
   // Nothing was drawn over the palette either way.
-  expect(screen.queryByRole('dialog', { name: 'Ustawienia' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument();
 });
 
 it('opens the import wizard from the keyboard, with no history selected', async () => {
@@ -45,5 +45,5 @@ it('opens the import wizard from the keyboard, with no history selected', async 
   render(<App />);
 
   await user.keyboard('{Meta>}i{/Meta}');
-  expect(await screen.findByRole('dialog', { name: 'Importuj historię' })).toBeVisible();
+  expect(await screen.findByRole('dialog', { name: 'Import history' })).toBeVisible();
 });

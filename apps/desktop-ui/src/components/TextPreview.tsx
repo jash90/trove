@@ -5,12 +5,12 @@ interface TextPreviewProps {
 }
 
 export const TextPreview = ({ preview }: TextPreviewProps): React.JSX.Element => {
-  const content = preview.text ?? 'Brak treści do wyświetlenia';
+  const content = preview.text ?? 'Nothing to display';
 
   if (preview.kind === 'file') {
     return (
       <div className="text-preview text-preview--file">
-        <span className="preview-label">Ścieżka pliku</span>
+        <span className="preview-label">File path</span>
         <p>{content}</p>
       </div>
     );

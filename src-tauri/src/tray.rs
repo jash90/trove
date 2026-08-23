@@ -25,15 +25,15 @@ const QUIT_ID: &str = "quit";
 /// "is it recording", and a second read-only row would only repeat it.
 pub fn pause_label(paused: bool) -> &'static str {
     if paused {
-        "Wznów nasłuch"
+        "Resume capture"
     } else {
-        "Wstrzymaj nasłuch"
+        "Pause capture"
     }
 }
 
 pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, SHOW_ID, "Pokaż historię", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, SETTINGS_ID, "Ustawienia…", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, SHOW_ID, "Show history", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, SETTINGS_ID, "Settings…", true, None::<&str>)?;
     let pause = MenuItem::with_id(
         app,
         PAUSE_ID,
@@ -41,7 +41,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri
         true,
         None::<&str>,
     )?;
-    let quit = MenuItem::with_id(app, QUIT_ID, "Zakończ", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, QUIT_ID, "Quit", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&show, &settings, &pause, &separator, &quit])?;
 
@@ -55,7 +55,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri
         // transparent, so what survives the flattening is the clipboard.
         .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
         .icon_as_template(true)
-        .tooltip("Historia schowka")
+        .tooltip("Clipboard history")
         .menu(&menu)
         // The menu belongs to the right button. A left click should do the
         // obvious thing — show the history — not open a menu to get there.
@@ -106,7 +106,7 @@ mod tests {
     fn the_pause_entry_says_what_pressing_it_will_do() {
         // Reading "Wstrzymaj" tells the user it is recording now, so a separate
         // status row would only say the same thing twice.
-        assert_eq!(pause_label(false), "Wstrzymaj nasłuch");
-        assert_eq!(pause_label(true), "Wznów nasłuch");
+        assert_eq!(pause_label(false), "Pause capture");
+        assert_eq!(pause_label(true), "Resume capture");
     }
 }

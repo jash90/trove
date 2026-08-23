@@ -26,7 +26,7 @@ import { PreviewPane } from './PreviewPane';
 /// options too. An unscoped option query matches both, so a test can pass
 /// while the list it meant to inspect has not loaded at all.
 const historyList = () =>
-  within(screen.getByRole('listbox', { name: 'Wyniki historii schowka' }));
+  within(screen.getByRole('listbox', { name: 'Clipboard history results' }));
 
 
 const makeItem = (eventId: number, overrides: Partial<HistoryItem> = {}): HistoryItem => ({
@@ -142,7 +142,7 @@ const makeGateway = (
 };
 
 const settleInitialSearch = async (): Promise<void> => {
-  await screen.findByRole('listbox', { name: 'Wyniki historii schowka' });
+  await screen.findByRole('listbox', { name: 'Clipboard history results' });
 };
 
 /// The list selects its first row on its own, one effect after the listbox
@@ -210,7 +210,7 @@ describe('safe preview rendering', () => {
 
     // The importer no longer keeps entries whose source is gone, so the only
     // remaining case is a thumbnail that could not be produced.
-    expect(screen.getByText('Miniatura jest niedostępna')).toBeVisible();
+    expect(screen.getByText('The thumbnail is unavailable')).toBeVisible();
   });
 
   it('accepts only bounded PNG thumbnail payloads', () => {
@@ -300,7 +300,7 @@ describe('link previews', () => {
     );
 
     expect(screen.getByText('example.invalid')).toBeVisible();
-    expect(screen.getByText(/pobieranie podglądów stron jest wyłączone/i)).toBeVisible();
+    expect(screen.getByText(/link preview fetching is off/i)).toBeVisible();
   });
 
   it('falls back to the raw address when nothing describes the link', () => {
@@ -373,7 +373,7 @@ describe('selected preview sequencing', () => {
       historyList().getByRole('option', { name: /Synthetic item 2/ }).click();
       second.resolve({ mimeType: 'image/png', base64: 'bmV3' });
     });
-    expect(await screen.findByRole('img', { name: 'Podgląd obrazu ze schowka' })).toHaveAttribute(
+    expect(await screen.findByRole('img', { name: 'Clipboard image preview' })).toHaveAttribute(
       'src',
       'data:image/png;base64,bmV3',
     );
@@ -381,7 +381,7 @@ describe('selected preview sequencing', () => {
     await act(async () => {
       first.resolve({ mimeType: 'image/png', base64: 'b2xk' });
     });
-    expect(screen.getByRole('img', { name: 'Podgląd obrazu ze schowka' })).toHaveAttribute(
+    expect(screen.getByRole('img', { name: 'Clipboard image preview' })).toHaveAttribute(
       'src',
       'data:image/png;base64,bmV3',
     );
@@ -397,7 +397,7 @@ describe('selected preview sequencing', () => {
     render(<App gateway={gateway} />);
     await settleInitialSearch();
 
-    const listbox = screen.getByRole('listbox', { name: 'Wyniki historii schowka' });
+    const listbox = screen.getByRole('listbox', { name: 'Clipboard history results' });
     expect(listbox).toHaveTextContent('report.txt');
     expect(listbox).not.toHaveTextContent('/synthetic/private-folder');
     expect(await screen.findByText(fullPath)).toBeVisible();
@@ -413,7 +413,7 @@ describe('selected preview sequencing', () => {
     await settleInitialSearch();
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('Nie udało się wczytać podglądu');
+    expect(alert).toHaveTextContent('The preview could not be loaded');
     expect(alert).not.toHaveTextContent('private-folder');
     expect(alert).not.toHaveTextContent('secret');
   });
@@ -424,16 +424,16 @@ describe('selected preview sequencing', () => {
     await settleInitialSearch();
 
     const previewColumn = screen
-      .getByLabelText('Podgląd zaznaczonego wpisu')
+      .getByLabelText('Selected entry preview')
       .closest('.preview-column');
     expect(previewColumn).not.toHaveClass('is-mobile-open');
 
     await user.click(
-      screen.getByRole('button', { name: 'Pokaż podgląd zaznaczonego wpisu' }),
+      screen.getByRole('button', { name: 'Show the selected entry preview' }),
     );
     expect(previewColumn).toHaveClass('is-mobile-open');
 
-    await user.click(screen.getByRole('button', { name: 'Zamknij podgląd' }));
+    await user.click(screen.getByRole('button', { name: 'Close preview' }));
     expect(previewColumn).not.toHaveClass('is-mobile-open');
   });
 });
@@ -463,7 +463,7 @@ describe('source location', () => {
     ).toBeVisible();
     expect(screen.getByRole('heading', { name: 'raport syntetyczny.pdf' })).toBeVisible();
 
-    await user.click(screen.getByRole('button', { name: 'Pokaż w Finderze' }));
+    await user.click(screen.getByRole('button', { name: 'Show in Finder' }));
     expect(revealSource).toHaveBeenCalledWith(1);
   });
 
@@ -484,7 +484,7 @@ describe('source location', () => {
     await settleInitialSearch();
 
     expect(await screen.findByText('/Users/synthetic/Pobrane/usuniety.pdf')).toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Pokaż w Finderze' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Show in Finder' })).toBeNull();
   });
 
   it('shows no location block for an entry whose source recorded none', async () => {
@@ -492,7 +492,7 @@ describe('source location', () => {
     await settleInitialSearch();
 
     await screen.findByText('Synthetic preview 1');
-    expect(screen.queryByText('Lokalizacja źródłowa')).toBeNull();
+    expect(screen.queryByText('Source location')).toBeNull();
   });
 });
 
@@ -516,16 +516,16 @@ describe('history actions', () => {
     await settleInitialSearch();
     await screen.findByText('Synthetic preview 1');
 
-    await user.click(screen.getByRole('button', { name: 'Przypnij wpis' }));
-    expect(screen.getByRole('button', { name: 'Odepnij wpis' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Pin entry' }));
+    expect(screen.getByRole('button', { name: 'Unpin entry' })).toBeVisible();
 
     await act(async () => {
       request.reject(new Error('/private/archive.json backend detail'));
     });
     expect(await screen.findByRole('status')).toHaveTextContent(
-      'Nie udało się zmienić przypięcia',
+      'The pin could not be changed',
     );
-    expect(screen.getByRole('button', { name: 'Przypnij wpis' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Pin entry' })).toBeVisible();
     expect(screen.getByRole('status')).not.toHaveTextContent('archive.json');
   });
 
@@ -535,19 +535,19 @@ describe('history actions', () => {
     render(<App gateway={gateway} />);
     await settleInitialSearch();
 
-    await user.click(screen.getByRole('button', { name: 'Usuń wpis' }));
+    await user.click(screen.getByRole('button', { name: 'Delete entry' }));
 
-    const dialog = screen.getByRole('dialog', { name: 'Usunąć wpis z historii?' });
+    const dialog = screen.getByRole('dialog', { name: 'Delete this entry from the history?' });
     const cancel = screen.getByRole('button', { name: 'Anuluj usuwanie' });
     expect(dialog).toBeVisible();
     expect(cancel).toHaveFocus();
-    expect(screen.getByRole('button', { name: 'Usuń wpis bezpowrotnie' })).toBeVisible();
-    expect(screen.getByLabelText('Paleta historii schowka')).toHaveAttribute('inert');
+    expect(screen.getByRole('button', { name: 'Delete permanently' })).toBeVisible();
+    expect(screen.getByLabelText('Clipboard history palette')).toHaveAttribute('inert');
 
     await user.click(cancel);
     expect(dialog).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Usuń wpis' })).toHaveFocus();
-    expect(screen.getByLabelText('Paleta historii schowka')).not.toHaveAttribute('inert');
+    expect(screen.getByRole('button', { name: 'Delete entry' })).toHaveFocus();
+    expect(screen.getByLabelText('Clipboard history palette')).not.toHaveAttribute('inert');
   });
 
   it('traps forward and reverse focus inside delete confirmation', async () => {
@@ -555,9 +555,9 @@ describe('history actions', () => {
     render(<App gateway={makeGateway([makeItem(1)])} />);
     await settleInitialSearch();
 
-    await user.click(screen.getByRole('button', { name: 'Usuń wpis' }));
+    await user.click(screen.getByRole('button', { name: 'Delete entry' }));
     const cancel = screen.getByRole('button', { name: 'Anuluj usuwanie' });
-    const confirm = screen.getByRole('button', { name: 'Usuń wpis bezpowrotnie' });
+    const confirm = screen.getByRole('button', { name: 'Delete permanently' });
     expect(cancel).toHaveFocus();
 
     await user.tab({ shift: true });
@@ -576,8 +576,8 @@ describe('history actions', () => {
     render(<App gateway={gateway} />);
     await settleInitialSearch();
 
-    await user.click(screen.getByRole('button', { name: 'Usuń wpis' }));
-    await user.click(screen.getByRole('button', { name: 'Usuń wpis bezpowrotnie' }));
+    await user.click(screen.getByRole('button', { name: 'Delete entry' }));
+    await user.click(screen.getByRole('button', { name: 'Delete permanently' }));
 
     await waitFor(() => {
       expect(historyList().queryByRole('option', { name: /Synthetic item 1/ })).not.toBeInTheDocument();
@@ -598,7 +598,7 @@ describe('history actions', () => {
     const user = userEvent.setup();
     render(<App gateway={gateway} />);
     await settleInitialSearch();
-    const search = screen.getByRole('searchbox', { name: 'Przeszukaj historię' });
+    const search = screen.getByRole('searchbox', { name: 'Search history' });
     expect(search).toHaveFocus();
 
     await user.keyboard('{Enter}');
@@ -613,7 +613,7 @@ describe('history actions', () => {
     // Delete belongs to the query field while it has focus. Proposing to erase
     // a history entry when the user meant to erase a character is the wrong
     // trade in a field they type in constantly.
-    expect(screen.queryByRole('dialog', { name: 'Usunąć wpis z historii?' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Delete this entry from the history?' })).toBeNull();
   });
 
   it('preserves copy, paste, and plain-text paste intent in fallback feedback', async () => {
@@ -626,15 +626,15 @@ describe('history actions', () => {
     await settleInitialSearch();
 
     await user.keyboard('{Enter}');
-    expect(await screen.findByText('Skopiowano jako fallback — automatyczne wklejenie jest niedostępne.')).toBeVisible();
+    expect(await screen.findByText('Copied as a fallback — automatic pasting is unavailable.')).toBeVisible();
 
     await user.keyboard('{Meta>}c{/Meta}');
-    expect(await screen.findByText('Skopiowano do schowka.')).toBeVisible();
+    expect(await screen.findByText('Copied to the clipboard.')).toBeVisible();
 
     await user.keyboard('{Meta>}{Shift>}v{/Shift}{/Meta}');
     expect(
       await screen.findByText(
-        'Skopiowano jako zwykły tekst — automatyczne wklejenie jest niedostępne.',
+        'Copied as plain text — automatic pasting is unavailable.',
       ),
     ).toBeVisible();
     // Enter and Cmd+Shift+V ask for a paste; Cmd+C only copies. The third
@@ -662,7 +662,7 @@ describe('history actions', () => {
     await user.keyboard('{Backspace}');
 
     expect(search).toHaveValue('ab');
-    expect(screen.queryByRole('dialog', { name: 'Usunąć wpis z historii?' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Delete this entry from the history?' })).toBeNull();
     expect(deleteEvent).not.toHaveBeenCalled();
   });
 
@@ -672,9 +672,9 @@ describe('history actions', () => {
     await settleInitialSearch();
 
     await user.click(historyList().getByRole('option', { name: /Synthetic item 1/ }));
-    await user.click(screen.getByRole('button', { name: 'Usuń wpis' }));
+    await user.click(screen.getByRole('button', { name: 'Delete entry' }));
 
-    expect(screen.getByRole('dialog', { name: 'Usunąć wpis z historii?' })).toBeVisible();
+    expect(screen.getByRole('dialog', { name: 'Delete this entry from the history?' })).toBeVisible();
   });
 
   it('suppresses history hotkeys while a dialog owns focus', async () => {
@@ -688,21 +688,21 @@ describe('history actions', () => {
     render(<App gateway={gateway} />);
     await settleInitialSearch();
 
-    await user.click(screen.getByRole('button', { name: 'Usuń wpis' }));
+    await user.click(screen.getByRole('button', { name: 'Delete entry' }));
     await user.keyboard('{Meta>}c{/Meta}{Meta>}p{/Meta}');
 
     expect(copyEvent).not.toHaveBeenCalled();
     expect(setPinned).not.toHaveBeenCalled();
     expect(gateway.deleteEvent).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog', { name: 'Usunąć wpis z historii?' })).toBeVisible();
+    expect(screen.getByRole('dialog', { name: 'Delete this entry from the history?' })).toBeVisible();
 
     await user.keyboard('{Enter}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(gateway.deleteEvent).not.toHaveBeenCalled();
 
     const settingsInput = document.createElement('input');
-    settingsInput.setAttribute('aria-label', 'Pole ustawień');
-    screen.getByRole('application', { name: 'Historia schowka' }).append(settingsInput);
+    settingsInput.setAttribute('aria-label', 'Settings field');
+    screen.getByRole('application', { name: 'Clipboard history' }).append(settingsInput);
     settingsInput.focus();
     await user.keyboard('{Meta>}c{/Meta}{Meta>}p{/Meta}{Delete}');
 
@@ -715,9 +715,9 @@ describe('history actions', () => {
     render(<App gateway={makeGateway([makeItem(1)])} />);
     await settleInitialSearch();
 
-    expect(await screen.findByRole('button', { name: 'Wklej lub skopiuj wpis' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Kopiuj jako zwykły tekst' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Przypnij wpis' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Usuń wpis' })).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Paste or copy the entry' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Copy as plain text' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Pin entry' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Delete entry' })).toBeVisible();
   });
 });

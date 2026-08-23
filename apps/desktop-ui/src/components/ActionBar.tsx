@@ -71,10 +71,10 @@ export const ActionBar = ({
         aria-describedby="delete-confirmation-description"
         onKeyDown={handleDialogKeyDown}
       >
-        <span className="preview-label">Nieodwracalne działanie</span>
-        <h2 id="delete-confirmation-title">Usunąć wpis z historii?</h2>
+        <span className="preview-label">Irreversible action</span>
+        <h2 id="delete-confirmation-title">Delete this entry from the history?</h2>
         <p id="delete-confirmation-description">
-          Tego wpisu nie będzie można przywrócić.
+          This entry cannot be restored.
         </p>
         <div className="confirmation-sheet__actions">
           <button ref={cancelRef} type="button" disabled={deletePending} onClick={handleCancelDelete}>
@@ -86,7 +86,7 @@ export const ActionBar = ({
             disabled={deletePending}
             onClick={handleConfirmDelete}
           >
-            {deletePending ? 'Usuwanie…' : 'Usuń wpis bezpowrotnie'}
+            {deletePending ? 'Deleting…' : 'Delete permanently'}
           </button>
         </div>
       </div>
@@ -95,38 +95,38 @@ export const ActionBar = ({
 
   return (
     <>
-      <div className="action-bar" aria-label="Działania dla zaznaczonego wpisu">
-        <button type="button" aria-label="Wklej lub skopiuj wpis" onClick={onPaste}>
+      <div className="action-bar" aria-label="Actions for the selected entry">
+        <button type="button" aria-label="Paste or copy the entry" onClick={onPaste}>
           <ClipboardCopy size={15} aria-hidden="true" />
           <span>Wklej</span>
         </button>
         <button
           type="button"
-          aria-label="Kopiuj jako zwykły tekst"
+          aria-label="Copy as plain text"
           onClick={onPastePlainText}
         >
           <Type size={15} aria-hidden="true" />
-          <span>Tekst</span>
+          <span>Text</span>
         </button>
         <button
           type="button"
-          aria-label={pinned ? 'Odepnij wpis' : 'Przypnij wpis'}
+          aria-label={pinned ? 'Unpin entry' : 'Pin entry'}
           aria-pressed={pinned}
           disabled={pinPending}
           onClick={onTogglePin}
         >
           {pinned ? <PinOff size={15} aria-hidden="true" /> : <Pin size={15} aria-hidden="true" />}
-          <span>{pinned ? 'Odepnij' : 'Przypnij'}</span>
+          <span>{pinned ? 'Unpin' : 'Pin'}</span>
         </button>
         <button
           ref={deleteInvokerRef}
           type="button"
           className="action-bar__delete"
-          aria-label="Usuń wpis"
+          aria-label="Delete entry"
           onClick={onRequestDelete}
         >
           <Trash2 size={15} aria-hidden="true" />
-          <span>Usuń</span>
+          <span>Delete</span>
         </button>
       </div>
       {feedback ? (

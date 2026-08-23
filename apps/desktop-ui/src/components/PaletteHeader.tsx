@@ -41,7 +41,7 @@ export const PaletteHeader = ({
     <header className="palette-header">
       <label className="search-field" htmlFor="history-search">
         <Search className="search-field__icon" size={19} strokeWidth={1.8} aria-hidden="true" />
-        <span className="sr-only">Przeszukaj historię</span>
+        <span className="sr-only">Search history</span>
         <input
           ref={searchInputRef}
           id="history-search"
@@ -52,14 +52,14 @@ export const PaletteHeader = ({
           placeholder="Szukaj tekstu, aplikacji lub operatora…"
           aria-controls="history-results"
           aria-autocomplete="list"
-          aria-label="Przeszukaj historię"
+          aria-label="Search history"
           aria-activedescendant={
             selectedId === null ? undefined : `history-option-${selectedId}`
           }
           onChange={handleChange}
           onKeyDown={onKeyDown}
         />
-        {/* The list is a page, not the whole history: saying "80 wyników"
+        {/* The list is a page, not the whole history: saying "80 results"
             when thousands match reads as a total and is simply untrue.
             Announced only once it settles — mid-typing it would read out a
             new number on every letter. */}

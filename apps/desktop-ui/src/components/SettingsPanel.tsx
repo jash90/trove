@@ -106,12 +106,12 @@ interface SettingsPanelProps {
 
 type StorageStatus = 'loading' | 'ready' | 'unavailable';
 
-const TRANSACTION_ERROR = 'Nie udało się zastosować ustawień. Nic nie zostało zapisane.';
+const TRANSACTION_ERROR = 'The settings could not be applied. Nothing was saved.';
 const EXPORT_ERROR =
-  'Nie udało się zapisać eksportu. Sprawdź, czy wskazany katalog jest pusty i zapisywalny.';
-const RETENTION_ERROR = 'Podaj pełną liczbę dni od 1 do 3650.';
-const HOTKEY_ERROR = 'Skrót musi zawierać modyfikator i jedną literę, cyfrę lub klawisz funkcyjny.';
-const DENYLIST_ERROR = 'Lista wykluczeń zawiera nieprawidłowy wpis lub jest za długa.';
+  'The export could not be written. Check that the directory is empty and writable.';
+const RETENTION_ERROR = 'Give a whole number of days from 1 to 3650.';
+const HOTKEY_ERROR = 'A shortcut needs a modifier and one letter, digit or function key.';
+const DENYLIST_ERROR = 'The exclusion list holds an invalid entry, or is too long.';
 
 export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.JSX.Element => {
   const [persisted, setPersisted] = useState<AppSettings | null>(null);
@@ -295,17 +295,17 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
         <header className="workflow-dialog__header">
           <div>
             <span className="workflow-kicker">Konfiguracja lokalna</span>
-            <h1 id="settings-dialog-title">Ustawienia</h1>
+            <h1 id="settings-dialog-title">Settings</h1>
           </div>
         </header>
 
         <p id="settings-dialog-description" className="workflow-warning">
-          Ustawienia pozostają lokalne. Nic nie jest synchronizowane ani wysyłane poza
-          to urządzenie.
+          Settings stay local. Nothing is synchronised or sent beyond
+          this device.
         </p>
 
         {persisted === null ? (
-          <p className="workflow-pending">Wczytywanie ustawień…</p>
+          <p className="workflow-pending">Loading settings…</p>
         ) : (
           <form className="settings-form" noValidate onSubmit={handleSubmit}>
             {error ? (
@@ -315,15 +315,15 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
             ) : null}
             {saved && !error ? (
               <p className="workflow-status" role="status">
-                Ustawienia zapisane.
+                Settings saved.
               </p>
             ) : null}
             {autostartMismatch ? (
               <p className="workflow-status" role="status">
-                Stan autostartu różni się od zapisanego ustawienia.{' '}
-                <span>zapisane: {persisted.autostart ? 'włączony' : 'wyłączony'}</span>
+                The autostart state differs from the saved setting.{' '}
+                <span>saved: {persisted.autostart ? 'on' : 'off'}</span>
                 {', '}
-                <span>system: {nativeAutostart ? 'włączony' : 'wyłączony'}</span>
+                <span>system: {nativeAutostart ? 'on' : 'off'}</span>
               </p>
             ) : null}
 
@@ -332,10 +332,10 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 <span className="settings-section-icon" aria-hidden="true">
                   <KeyRound size={16} />
                 </span>
-                <h2 id="settings-hotkey-title">Skrót i uruchamianie</h2>
+                <h2 id="settings-hotkey-title">Shortcut and startup</h2>
               </div>
               <label className="settings-field" htmlFor="settings-hotkey">
-                <span>Skrót globalny</span>
+                <span>Global shortcut</span>
                 <input
                   ref={hotkeyRef}
                   id="settings-hotkey"
@@ -347,9 +347,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 />
               </label>
               <p className="settings-help">
-                Aplikację przywołuje <kbd>⌘⇧Space</kbd>; ponowne wciśnięcie ją
-                chowa. Zapisanie zmienia aktywny skrót od razu. Jeśli nowy jest
-                już zajęty przez inną aplikację, obowiązuje dalej poprzedni.
+                The application is summoned by <kbd>⌘⇧Space</kbd>; pressing it again
+                hides it. Saving changes the active shortcut immediately. If the new one
+                is already taken by another application, the previous one stays in force.
               </p>
               <label className="settings-toggle" htmlFor="settings-autostart">
                 <input
@@ -369,7 +369,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 <span className="settings-section-icon" aria-hidden="true">
                   <Timer size={16} />
                 </span>
-                <h2 id="settings-retention-title">Retencja historii</h2>
+                <h2 id="settings-retention-title">History retention</h2>
               </div>
               <label className="settings-toggle" htmlFor="settings-retention-unlimited">
                 <input
@@ -394,8 +394,8 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 />
               </label>
               <p className="settings-help">
-                Historia jest domyślnie nieograniczona. Włączenie retencji trwale usuwa
-                wpisy starsze niż podana liczba dni.
+                History is unlimited by default. Turning retention on permanently deletes
+                entries older than the given number of days.
               </p>
             </section>
 
@@ -407,7 +407,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 <h2 id="settings-denylist-title">Aplikacje wykluczone</h2>
               </div>
               <label className="settings-field" htmlFor="settings-denylist">
-                <span>Identyfikatory pakietów lub nazwy plików wykonywalnych</span>
+                <span>Bundle identifiers or executable names</span>
                 <textarea
                   id="settings-denylist"
                   rows={4}
@@ -417,8 +417,8 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 />
               </label>
               <p className="settings-help">
-                Jeden wpis w wierszu, maksymalnie {MAX_DENYLIST_ENTRIES}. Treść skopiowana
-                w tych aplikacjach nie trafia do historii.
+                One entry per line, at most {MAX_DENYLIST_ENTRIES}. Content copied
+                in these applications never reaches the history.
               </p>
             </section>
 
@@ -427,7 +427,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
             <section className="workflow-section" aria-labelledby="settings-links-title">
               <h2 id="settings-links-title">
                 <Globe size={15} aria-hidden="true" />
-                Podgląd stron
+                Preview stron
               </h2>
               <label className="settings-toggle">
                 <input
@@ -435,44 +435,44 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                   checked={linkPreviews}
                   onChange={(event) => setLinkPreviews(event.currentTarget.checked)}
                 />
-                Pobieraj tytuł i ikonę strony
+                Fetch the page title and icon
               </label>
               <p className="settings-help">
-                To jedyne miejsce, w którym aplikacja łączy się z siecią. Włączone
-                oznacza, że otwarcie palety odpytuje strony widoczne na liście —
-                każda z nich dowiaduje się wtedy, że zaglądasz do schowka. Wynik
-                jest zapamiętywany, więc ta sama strona jest pytana raz. Adresy
-                lokalne i prywatne nie są odpytywane nigdy.
+                This is the only place the application talks to the network. On, it
+                means opening the palette queries the pages visible in the list —
+                each of them then learns that you are looking at your clipboard. The result
+                is remembered, so the same page is asked once. Local and private
+                addresses are never queried.
               </p>
             </section>
 
             <section className="workflow-section" aria-labelledby="settings-export-title">
               <h2 id="settings-export-title">
                 <Download size={15} aria-hidden="true" />
-                Eksport historii
+                History export
               </h2>
               <p className="settings-help">
-                Zapisuje całą historię w formacie SuperCmd — {'clipboard.json'},
+                Writes the whole history in SuperCmd format — {'clipboard.json'},
                 {' clipboard.csv'} i katalog {'images'} z obrazami. Ten sam format
                 importer czyta z powrotem.
               </p>
               <div className="workflow-actions workflow-actions--start">
                 <button type="button" onClick={() => void runExport()} disabled={exporting}>
-                  {exporting ? 'Eksportowanie…' : 'Eksportuj historię'}
+                  {exporting ? 'Exporting…' : 'Export history'}
                 </button>
               </div>
               {exportSummary ? (
                 <p className="workflow-status" role="status">
-                  Zapisano {exportSummary.records} wpisów, w tym {exportSummary.images}{' '}
-                  z obrazem. {exportSummary.withoutPayload} bez zapisanej treści —
-                  zostały wyeksportowane jako same metadane.
+                  Wrote {exportSummary.records} entries, of which {exportSummary.images}{' '}
+                  carry an image. {exportSummary.withoutPayload} bez zapisanej contents —
+                  were exported as metadata only.
                 </p>
               ) : null}
             </section>
 
             <div className="workflow-actions">
               <button type="submit" className="workflow-primary" disabled={pending}>
-                {pending ? 'Zapisywanie…' : 'Zapisz ustawienia'}
+                {pending ? 'Zapisywanie…' : 'Save settings'}
               </button>
             </div>
           </form>
@@ -481,7 +481,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
         <button
           type="button"
           className="workflow-dismiss"
-          aria-label="Zamknij ustawienia"
+          aria-label="Close settings"
           onClick={onClose}
         >
           <X size={16} aria-hidden="true" />

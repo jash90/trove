@@ -23,7 +23,7 @@ export const ImagePreview = ({
   if (thumbnailStatus === 'ready' && thumbnailUrl) {
     return (
       <div className="image-preview">
-        <img src={thumbnailUrl} alt="Podgląd obrazu ze schowka" />
+        <img src={thumbnailUrl} alt="Clipboard image preview" />
       </div>
     );
   }
@@ -31,8 +31,8 @@ export const ImagePreview = ({
   return (
     <div className="image-preview__state">
       <ImageIcon size={27} aria-hidden="true" />
-      <strong>Miniatura jest niedostępna</strong>
-      <span>Możesz nadal skopiować wpis, jeśli jego źródło istnieje.</span>
+      <strong>The thumbnail is unavailable</strong>
+      <span>You can still copy the entry if its source exists.</span>
     </div>
   );
 };

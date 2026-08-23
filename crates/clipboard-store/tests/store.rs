@@ -107,12 +107,12 @@ async fn retention_deletes_only_what_aged_out_and_never_a_pinned_entry() {
         .await
         .unwrap();
     let pinned = store
-        .ingest(text_capture("stary przypięty", now_ms - 41 * day_ms))
+        .ingest(text_capture("an old pinned entry", now_ms - 41 * day_ms))
         .await
         .unwrap();
     store.set_pinned(pinned.event_id, true).await.unwrap();
     store
-        .ingest(text_capture("świeży wpis", now_ms - day_ms))
+        .ingest(text_capture("a fresh entry", now_ms - day_ms))
         .await
         .unwrap();
 

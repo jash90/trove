@@ -182,12 +182,12 @@ const ClipboardPalette = (): React.JSX.Element => {
     <main
       className="palette-stage"
       role="application"
-      aria-label="Historia schowka"
+      aria-label="Clipboard history"
       onKeyDown={handlePaletteKeyDown}
     >
       <section
         className="palette-shell"
-        aria-label="Paleta historii schowka"
+        aria-label="Clipboard history palette"
         inert={modalOpen}
       >
         <PaletteHeader
@@ -230,7 +230,7 @@ const ClipboardPalette = (): React.JSX.Element => {
           </p>
         ) : null}
         <footer className="palette-footer">
-          <span>↵ wklej · ⌘C kopiuj · ⌘⇧V zwykły tekst · ⌘⇧Space przywołaj</span>
+          <span>↵ paste · ⌘C copy · ⌘⇧V plain text · ⌘⇧Space summon</span>
           {/* Out of the way but still visible: a shortcut nobody was told about
               is the same as no way in. */}
           <span className="palette-footer__entries">
@@ -245,10 +245,10 @@ const ClipboardPalette = (): React.JSX.Element => {
             <button
               type="button"
               className="footer-action"
-              aria-label="Otwórz ustawienia"
+              aria-label="Open settings"
               onClick={openSettings}
             >
-              Ustawienia <kbd>⌘,</kbd>
+              Settings <kbd>⌘,</kbd>
             </button>
           </span>
         </footer>

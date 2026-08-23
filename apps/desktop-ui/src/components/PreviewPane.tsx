@@ -33,14 +33,14 @@ export const PreviewPane = ({
   onRevealSource,
 }: PreviewPaneProps): React.JSX.Element => {
   return (
-    <aside className="preview-pane" aria-label="Podgląd zaznaczonego wpisu">
+    <aside className="preview-pane" aria-label="Selected entry preview">
       <header className="preview-pane__header">
-        <h2>{preview ? KIND_LABELS[preview.kind] : 'Zaznacz wpis'}</h2>
+        <h2>{preview ? KIND_LABELS[preview.kind] : 'Select an entry'}</h2>
         {onClose ? (
           <button
             type="button"
             className="preview-pane__close"
-            aria-label="Zamknij podgląd"
+            aria-label="Close preview"
             onClick={onClose}
           >
             <X size={16} aria-hidden="true" />
@@ -52,20 +52,20 @@ export const PreviewPane = ({
         {status === 'loading' ? (
           <div className="preview-placeholder" role="status">
             <Eye size={24} aria-hidden="true" />
-            <span>Wczytywanie podglądu…</span>
+            <span>Loading preview…</span>
           </div>
         ) : null}
         {status === 'error' ? (
           <div className="preview-placeholder" role="alert">
             <Eye size={24} aria-hidden="true" />
-            <strong>Nie udało się wczytać podglądu</strong>
-            <span>Wybierz wpis ponownie lub spróbuj później.</span>
+            <strong>The preview could not be loaded</strong>
+            <span>Select the entry again, or try later.</span>
           </div>
         ) : null}
         {status === 'idle' ? (
           <div className="preview-placeholder">
             <Eye size={24} aria-hidden="true" />
-            <span>Wybierz wpis z historii.</span>
+            <span>Choose an entry from the history.</span>
           </div>
         ) : null}
         {status === 'ready' && preview ? (
@@ -89,8 +89,8 @@ export const PreviewPane = ({
             ) : null}
             <dl className="preview-metadata">
               <div>
-                <dt>Źródło</dt>
-                <dd>{preview.sourceAppName ?? 'Nieznana aplikacja'}</dd>
+                <dt>Source</dt>
+                <dd>{preview.sourceAppName ?? 'Unknown application'}</dd>
               </div>
               <div>
                 <dt>Rozmiar</dt>

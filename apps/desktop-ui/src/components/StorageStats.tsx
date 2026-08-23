@@ -29,29 +29,29 @@ export const StorageStats = ({ stats, status }: StorageStatsProps): React.JSX.El
       <div className="settings-section-heading">
         <span className="settings-section-icon" aria-hidden="true"><Database size={16} /></span>
         <div>
-          <span className="workflow-kicker">Lokalna pamięć</span>
-          <h2 id="storage-stats-title">Pamięć danych</h2>
+          <span className="workflow-kicker">Local storage</span>
+          <h2 id="storage-stats-title">Data storage</h2>
         </div>
       </div>
       {status === 'loading' ? <p role="status">Obliczanie rozmiaru danych…</p> : null}
-      {unavailable ? <p role="status">Dane o pamięci są niedostępne.</p> : null}
+      {unavailable ? <p role="status">Storage figures are unavailable.</p> : null}
       {status === 'ready' && validated ? (
         <>
           <dl className="storage-ledger">
             <div>
-              <dt><Database size={14} aria-hidden="true" /> Główny plik bazy danych</dt>
+              <dt><Database size={14} aria-hidden="true" /> Main database file</dt>
               <dd>{formatByteSize(validated.databaseBytes)}</dd>
             </div>
             <div>
-              <dt><FileArchive size={14} aria-hidden="true" /> Bloby wskazane przez bazę</dt>
+              <dt><FileArchive size={14} aria-hidden="true" /> Blobs the database references</dt>
               <dd>{formatByteSize(validated.blobBytes)}</dd>
             </div>
           </dl>
           <p className="settings-help">
-            To rozmiar głównego pliku bazy i wskazanych blobów; nie jest to całkowite użycie dysku aplikacji.
+            The size of the main database file and the blobs it references; not the application's total disk use.
           </p>
           <p className="storage-counts">
-            {formatCount(validated.eventCount)} zdarzeń · {formatCount(validated.contentCount)} treści
+            {formatCount(validated.eventCount)} events · {formatCount(validated.contentCount)} contents
           </p>
         </>
       ) : null}

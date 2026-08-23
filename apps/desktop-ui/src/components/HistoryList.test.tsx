@@ -17,7 +17,7 @@ import { HistoryList } from './HistoryList';
 /// options too. An unscoped option query matches both, so a test can pass
 /// while the list it meant to inspect has not loaded at all.
 const historyList = () =>
-  within(screen.getByRole('listbox', { name: 'Wyniki historii schowka' }));
+  within(screen.getByRole('listbox', { name: 'Clipboard history results' }));
 
 
 const makeItems = (count: number, startAt = 1): HistoryItem[] =>
@@ -55,7 +55,7 @@ const KeyboardHarness = ({ items, onActivate }: KeyboardHarnessProps): React.JSX
 
   return (
     <>
-      <label htmlFor="keyboard-search">Przeszukaj historię</label>
+      <label htmlFor="keyboard-search">Search history</label>
       <input
         id="keyboard-search"
         autoFocus
@@ -129,7 +129,7 @@ describe('HistoryList', () => {
       />,
     );
 
-    const listbox = screen.getByRole('listbox', { name: 'Wyniki historii schowka' });
+    const listbox = screen.getByRole('listbox', { name: 'Clipboard history results' });
     const selectedOption = historyList().getByRole('option', { selected: true });
 
     expect(listbox).toContainElement(selectedOption);
@@ -143,7 +143,7 @@ describe('HistoryList', () => {
     const onActivate = vi.fn();
     render(<KeyboardHarness items={makeItems(3)} onActivate={onActivate} />);
 
-    const input = screen.getByRole('textbox', { name: 'Przeszukaj historię' });
+    const input = screen.getByRole('textbox', { name: 'Search history' });
     expect(input).toHaveFocus();
 
     await user.keyboard('{ArrowDown}{Enter}');
@@ -160,7 +160,7 @@ describe('HistoryList', () => {
     const user = userEvent.setup();
     render(<KeyboardHarness items={makeItems(4)} onActivate={vi.fn()} />);
 
-    const input = screen.getByRole('textbox', { name: 'Przeszukaj historię' });
+    const input = screen.getByRole('textbox', { name: 'Search history' });
     await user.keyboard('{End}{ArrowUp}');
     expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
       'data-event-id',
@@ -226,11 +226,11 @@ describe('HistoryList', () => {
 
 describe('TypeFilter', () => {
   it.each([
-    ['Tekst', 'roadmap app:Editor type:text'],
-    ['Linki', 'roadmap app:Editor type:link'],
-    ['Obrazy', 'roadmap app:Editor type:image'],
-    ['Pliki', 'roadmap app:Editor type:file'],
-    ['Przypięte', 'roadmap app:Editor is:pinned'],
+    ['Text', 'roadmap app:Editor type:text'],
+    ['Links', 'roadmap app:Editor type:link'],
+    ['Images', 'roadmap app:Editor type:image'],
+    ['Files', 'roadmap app:Editor type:file'],
+    ['Pinned', 'roadmap app:Editor is:pinned'],
     ['Wszystkie', 'roadmap app:Editor'],
   ])('emits the supported query for the %s filter', async (label, expectedQuery) => {
     const user = userEvent.setup();
@@ -276,7 +276,7 @@ describe('clipboard palette states', () => {
     const search = vi.fn<ClipboardGateway['search']>(async () => page);
     render(<App gateway={makeGateway(search)} />);
 
-    expect(screen.getByRole('searchbox', { name: 'Przeszukaj historię' })).toHaveFocus();
+    expect(screen.getByRole('searchbox', { name: 'Search history' })).toHaveFocus();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150);
@@ -305,11 +305,11 @@ describe('clipboard palette states', () => {
       rankedTruncated: false,
     };
     render(<App gateway={makeGateway(async () => page)} />);
-    await screen.findByRole('listbox', { name: 'Wyniki historii schowka' });
+    await screen.findByRole('listbox', { name: 'Clipboard history results' });
     const selectedRow = historyList().getByRole('option', {
       name: /Synthetic clipboard item 2/,
     });
-    const search = screen.getByRole('searchbox', { name: 'Przeszukaj historię' });
+    const search = screen.getByRole('searchbox', { name: 'Search history' });
 
     await user.click(selectedRow);
 
@@ -328,10 +328,10 @@ describe('clipboard palette states', () => {
       rankedTruncated: false,
     };
     render(<App gateway={makeGateway(async () => page)} />);
-    await screen.findByRole('listbox', { name: 'Wyniki historii schowka' });
-    const search = screen.getByRole('searchbox', { name: 'Przeszukaj historię' });
+    await screen.findByRole('listbox', { name: 'Clipboard history results' });
+    const search = screen.getByRole('searchbox', { name: 'Search history' });
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Filtr typu' }), 'Obrazy');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Filtr typu' }), 'Images');
 
     expect(search).toHaveFocus();
   });
@@ -341,7 +341,7 @@ describe('clipboard palette states', () => {
     const pending = new Promise<HistoryPage>(() => undefined);
     const { rerender } = render(<App gateway={makeGateway(() => pending)} />);
 
-    expect(screen.getByRole('status')).toHaveTextContent('Ładowanie historii');
+    expect(screen.getByRole('status')).toHaveTextContent('Loading history');
 
     const emptyGateway = makeGateway(async () => ({
       items: [],
@@ -352,7 +352,7 @@ describe('clipboard palette states', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150);
     });
-    expect(screen.getByRole('status')).toHaveTextContent('Historia jest pusta');
+    expect(screen.getByRole('status')).toHaveTextContent('The history is empty');
 
     const errorGateway = makeGateway(async () => {
       throw new Error('/private/archive.json contains private query text');
@@ -363,7 +363,7 @@ describe('clipboard palette states', () => {
     });
 
     const alert = screen.getByRole('alert');
-    expect(alert).toHaveTextContent('Nie udało się wczytać historii');
+    expect(alert).toHaveTextContent('The history could not be loaded');
     expect(alert).not.toHaveTextContent('private');
     expect(alert).not.toHaveTextContent('archive.json');
   });

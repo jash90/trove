@@ -21,13 +21,13 @@ export const SourceLocation = ({
   onReveal,
 }: SourceLocationProps): React.JSX.Element => (
   <section className="source-location" aria-labelledby="source-location-title">
-    <span className="preview-label">Lokalizacja źródłowa</span>
+    <span className="preview-label">Source location</span>
     <h3 id="source-location-title">{fileBasename(path)}</h3>
     <p className="source-location__path">{path}</p>
     {exists ? (
       <button type="button" className="source-location__reveal" onClick={onReveal}>
         <FolderSearch size={15} aria-hidden="true" />
-        Pokaż w Finderze
+        Show in Finder
       </button>
     ) : null}
   </section>

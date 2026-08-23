@@ -16,31 +16,30 @@ export const thumbnailDataUrl = (value: Thumbnail): string => {
 };
 
 /**
- * Polish CLDR leaves four-digit numbers ungrouped, so 6503 and 65030 would be
- * rendered inconsistently side by side. Group every three digits with a plain
- * space: deterministic across ICU versions and free of non-breaking separators
- * that make counts hard to read and hard to assert on.
+ * Grouped here rather than through `toLocaleString`, which varies with the
+ * host's ICU version and can emit non-breaking separators — those read badly
+ * and are awkward to assert on. Every three digits, one comma, always.
  */
 export const formatCount = (value: number): string =>
-  String(value).replace(/\B(?=(?:\d{3})+(?!\d))/gu, ' ');
+  String(value).replace(/\B(?=(?:\d{3})+(?!\d))/gu, ',');
 
 export const fileBasename = (value: string): string => {
   const segments = value.split(/[\\/]/u).filter(Boolean);
-  return segments.at(-1) ?? 'Plik bez nazwy';
+  return segments.at(-1) ?? 'Unnamed file';
 };
 
 export const formatByteSize = (bytes: number): string => {
   if (bytes < 1_024) return `${bytes} B`;
-  if (bytes < 1_048_576) return `${(bytes / 1_024).toLocaleString('pl-PL', { maximumFractionDigits: 1 })} KB`;
-  return `${(bytes / 1_048_576).toLocaleString('pl-PL', { maximumFractionDigits: 1 })} MB`;
+  if (bytes < 1_048_576) return `${(bytes / 1_024).toLocaleString('en-US', { maximumFractionDigits: 1 })} KB`;
+  return `${(bytes / 1_048_576).toLocaleString('en-US', { maximumFractionDigits: 1 })} MB`;
 };
 
 export const KIND_LABELS: Record<ContentKind, string> = {
-  text: 'Tekst',
+  text: 'Text',
   link: 'Link',
-  image: 'Obraz',
-  file: 'Plik',
-  color: 'Kolor',
-  code: 'Kod',
+  image: 'Image',
+  file: 'File',
+  color: 'Colour',
+  code: 'Code',
   html: 'HTML',
 };

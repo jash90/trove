@@ -18,14 +18,14 @@ export const ImportSummary = ({ summary }: ImportSummaryProps): React.JSX.Elemen
       <div className="workflow-state-icon workflow-state-icon--success" aria-hidden="true">
         <BadgeCheck size={27} strokeWidth={1.7} />
       </div>
-      <span className="workflow-kicker">Rozliczono wszystkie rekordy</span>
-      <h2 id="import-summary-title">Import zakończony</h2>
-      <p className="workflow-count">{formatCount(validSummary.total)} rekordów</p>
+      <span className="workflow-kicker">Every record accounted for</span>
+      <h2 id="import-summary-title">Import complete</h2>
+      <p className="workflow-count">{formatCount(validSummary.total)} records</p>
       <dl className="count-ledger count-ledger--four">
         <div><dt>Zaimportowane</dt><dd>{formatCount(validSummary.imported)}</dd></div>
-        <div><dt>Już obecne</dt><dd>{formatCount(validSummary.alreadyPresent)}</dd></div>
-        <div><dt>Pominięte</dt><dd>{formatCount(validSummary.skipped)}</dd></div>
-        <div><dt>Błędy</dt><dd>{formatCount(validSummary.failed)}</dd></div>
+        <div><dt>Already present</dt><dd>{formatCount(validSummary.alreadyPresent)}</dd></div>
+        <div><dt>Skipped</dt><dd>{formatCount(validSummary.skipped)}</dd></div>
+        <div><dt>Failed</dt><dd>{formatCount(validSummary.failed)}</dd></div>
       </dl>
     </section>
   );

@@ -28,9 +28,9 @@ type WizardPhase =
 
 // Every message here is a fixed literal. Gateway errors may embed a path or a
 // payload fragment, so their text never reaches the DOM.
-const ANALYSIS_ERROR = 'Nie udało się przeanalizować archiwum. Sprawdź, czy wskazany plik lub katalog jest eksportem Raycast albo SuperCmd.';
-const DISCARD_ERROR = 'Nie udało się anulować przygotowanego importu. Spróbuj ponownie.';
-const PASSWORD_ERROR = 'Hasło nie pasuje do tego pliku. Spróbuj ponownie.';
+const ANALYSIS_ERROR = 'The archive could not be analysed. Check that the file or directory is a Raycast or SuperCmd export.';
+const DISCARD_ERROR = 'The prepared import could not be cancelled. Try again.';
+const PASSWORD_ERROR = 'The password does not match this file. Try again.';
 
 /// The backend answers with a stable code, never a message.
 const PASSWORD_REQUIRED = 'rayconfig_password_required';
@@ -246,14 +246,14 @@ export const ImportWizard = ({
         <header className="workflow-dialog__header">
           <div>
             <span className="workflow-kicker">Import lokalny</span>
-            <h1 id="import-dialog-title">Importuj historię</h1>
+            <h1 id="import-dialog-title">Import history</h1>
           </div>
         </header>
 
         <p id="import-dialog-description" className="workflow-warning">
           <ShieldAlert size={15} aria-hidden="true" />
-          Archiwum może zawierać dane wrażliwe. Import odbywa się wyłącznie na tym
-          urządzeniu i nic nie jest wysyłane na zewnątrz.
+          The archive may hold sensitive data. Importing happens only on this
+          device, and nothing is sent anywhere.
         </p>
 
         {error ? (
@@ -298,20 +298,20 @@ export const ImportWizard = ({
             }}
           >
             <p className="workflow-note">
-              Ten eksport jest zaszyfrowany. Hasło służy tylko do jego
+              This export is encrypted. The password is used only to
               odczytania — nie jest nigdzie zapisywane.
             </p>
             <label className="workflow-field" htmlFor="rayconfig-password">
               <KeyRound size={15} aria-hidden="true" />
-              <span className="sr-only">Hasło eksportu</span>
+              <span className="sr-only">Export password</span>
               <input
                 ref={passwordInputRef}
                 id="rayconfig-password"
                 type="password"
                 autoComplete="off"
                 spellCheck={false}
-                placeholder="Hasło eksportu"
-                aria-label="Hasło eksportu"
+                placeholder="Export password"
+                aria-label="Export password"
                 autoFocus
               />
             </label>
@@ -373,10 +373,10 @@ export const ImportWizard = ({
 
         {phase.tag === 'failed' ? (
           <section className="import-failure" aria-labelledby="import-failure-title">
-            <h2 id="import-failure-title">Import nie został ukończony</h2>
+            <h2 id="import-failure-title">The import did not finish</h2>
             <p>
-              Stan przebiegu jest nieznany. Otwórz import ponownie — powtórzenie tego
-              samego archiwum nie utworzy duplikatów.
+              The state of the run is unknown. Open the import again — repeating the
+              same archive creates no duplicates.
             </p>
           </section>
         ) : null}

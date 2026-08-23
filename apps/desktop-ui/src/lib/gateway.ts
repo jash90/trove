@@ -97,13 +97,13 @@ export const tauriGateway: ClipboardGateway = {
     invoke<CopyResult>('copy_event', { eventId, plainText, paste }),
   chooseImportFile: () =>
     open({
-      title: 'Wybierz eksport historii schowka',
+      title: 'Choose a clipboard history export',
       multiple: false,
-      filters: [{ name: 'Eksport schowka', extensions: ['json', 'rayconfig'] }],
+      filters: [{ name: 'Clipboard export', extensions: ['json', 'rayconfig'] }],
     }),
   chooseImportDirectory: () =>
     open({
-      title: 'Wybierz katalog eksportu historii schowka',
+      title: 'Choose the clipboard history export directory',
       directory: true,
       recursive: true,
       multiple: false,
@@ -125,7 +125,7 @@ export const tauriGateway: ClipboardGateway = {
   onLinkPreviewReady: (listener) => subscribe<number>('link-preview-ready', listener),
   chooseExportDirectory: () =>
     save({
-      title: 'Wybierz katalog na eksport historii',
+      title: 'Choose a directory for the history export',
       defaultPath: 'clipboard-export',
     }),
   exportHistory: (directory) => invoke<ExportSummary>('export_history', { directory }),

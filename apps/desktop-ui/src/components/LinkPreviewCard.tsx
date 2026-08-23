@@ -48,7 +48,7 @@ export const LinkPreviewCard = ({ preview }: LinkPreviewCardProps): React.JSX.El
     {preview.localOnly ? (
       <p className="link-card__note">
         <ShieldOff size={13} aria-hidden="true" />
-        Pobieranie podglądów stron jest wyłączone — pokazany jest sam adres.
+        Link preview fetching is off — only the address is shown.
       </p>
     ) : null}
   </div>

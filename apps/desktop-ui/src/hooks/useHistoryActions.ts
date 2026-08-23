@@ -8,19 +8,19 @@ export type HistoryActionIntent = 'copy' | 'paste' | 'pastePlain';
 const copyFeedback = (mode: CopyMode, intent: HistoryActionIntent): string => {
   if (mode === 'pasted') {
     return intent === 'pastePlain'
-      ? 'Wklejono jako zwykły tekst.'
-      : 'Wklejono zaznaczony wpis.';
+      ? 'Pasted as plain text.'
+      : 'Pasted the selected entry.';
   }
   if (mode === 'copied') {
     if (intent === 'paste') {
-      return 'Skopiowano jako fallback — automatyczne wklejenie jest niedostępne.';
+      return 'Copied as a fallback — automatic pasting is unavailable.';
     }
     if (intent === 'pastePlain') {
-      return 'Skopiowano jako zwykły tekst — automatyczne wklejenie jest niedostępne.';
+      return 'Copied as plain text — automatic pasting is unavailable.';
     }
-    return 'Skopiowano do schowka.';
+    return 'Copied to the clipboard.';
   }
-  return 'Skopiowano. Automatyczne wklejenie nie jest dostępne.';
+  return 'Copied. Automatic pasting is not available.';
 };
 
 interface UseHistoryActionsOptions {
@@ -74,7 +74,7 @@ export const useHistoryActions = ({
     void gateway
       .copyEvent(eventId, plainText, intent !== 'copy')
       .then((result) => setFeedback(copyFeedback(result.mode, intent)))
-      .catch(() => setFeedback('Nie udało się skopiować wpisu.'));
+      .catch(() => setFeedback('The entry could not be copied.'));
   };
 
   const togglePin = (item: HistoryItem): void => {
@@ -89,7 +89,7 @@ export const useHistoryActions = ({
       .setPinned(eventId, nextPinned)
       .catch(() => {
         setPinOverrides((current) => ({ ...current, [eventId]: previousPinned }));
-        setFeedback('Nie udało się zmienić przypięcia.');
+        setFeedback('The pin could not be changed.');
       })
       .finally(() => setPinPendingId(null));
   };
@@ -115,11 +115,11 @@ export const useHistoryActions = ({
       .then(() => {
         setDeletedIds((current) => new Set([...current, eventId]));
         setDeleteTargetId(null);
-        setFeedback('Usunięto wpis z historii.');
+        setFeedback('Entry deleted from the history.');
       })
       .catch(() => {
         setDeleteTargetId(null);
-        setFeedback('Nie udało się usunąć wpisu.');
+        setFeedback('The entry could not be deleted.');
       })
       .finally(() => {
         setDeletePending(false);
