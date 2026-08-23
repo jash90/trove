@@ -263,6 +263,24 @@ impl CasStore {
         })
     }
 
+    pub fn read_bounded(
+        &self,
+        relpath: &str,
+        expected_size: u64,
+        maximum_size: usize,
+    ) -> Result<Vec<u8>, CasError> {
+        if expected_size > maximum_size as u64 || expected_size > MAX_CAS_OBJECT_BYTES as u64 {
+            return Err(CasError::ObjectTooLarge);
+        }
+        self.with_valid_boundary(|| {
+            if self.storage_boundary.is_some() {
+                self.read_bounded_leased(relpath, expected_size, maximum_size)
+            } else {
+                self.read_bounded_inner(relpath, expected_size, maximum_size)
+            }
+        })
+    }
+
     pub fn verify(&self, relpath: &str, expected_size: u64) -> Result<CasVerification, CasError> {
         if expected_size > MAX_CAS_OBJECT_BYTES as u64 {
             return Err(CasError::ObjectTooLarge);
@@ -288,6 +306,54 @@ impl CasStore {
                     "CAS blob is not present",
                 ))
             })
+    }
+
+    fn read_bounded_inner(
+        &self,
+        relpath: &str,
+        expected_size: u64,
+        maximum_size: usize,
+    ) -> Result<Vec<u8>, CasError> {
+        let (shard_name, blob_name) = split_relpath(relpath)?;
+        let root = self.existing_root()?;
+        let shard = self.validate_existing_directory(&root, &root.join(shard_name))?;
+        let path = shard.join(blob_name);
+        let metadata = fs::symlink_metadata(&path).map_err(CasError::Io)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || MetadataExt::nlink(&metadata) != 1
+        {
+            return Err(CasError::FilesystemBoundary);
+        }
+        validate_private_direct_file(&metadata)?;
+        let canonical_path = fs::canonicalize(&path).map_err(CasError::Io)?;
+        if !canonical_path.starts_with(&root) {
+            return Err(CasError::FilesystemBoundary);
+        }
+        if metadata.len() > maximum_size as u64 || metadata.len() > MAX_CAS_OBJECT_BYTES as u64 {
+            return Err(CasError::ObjectTooLarge);
+        }
+        if metadata.len() != expected_size {
+            return Err(CasError::CorruptBlob);
+        }
+        let identity = (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata));
+        let mut file = open_direct_file_nofollow(&path)?;
+        let opened = file.metadata().map_err(CasError::Io)?;
+        validate_private_direct_file(&opened)?;
+        if (MetadataExt::dev(&opened), MetadataExt::ino(&opened)) != identity
+            || opened.len() != expected_size
+        {
+            return Err(CasError::FilesystemBoundary);
+        }
+        let bytes = read_verified_bytes_bounded(&mut file, relpath, expected_size, maximum_size)?;
+        let after = fs::symlink_metadata(&path).map_err(CasError::Io)?;
+        validate_private_direct_file(&after)?;
+        if (MetadataExt::dev(&after), MetadataExt::ino(&after)) != identity
+            || after.len() != expected_size
+        {
+            return Err(CasError::FilesystemBoundary);
+        }
+        Ok(bytes)
     }
 
     fn verify_inner(&self, relpath: &str, expected_size: u64) -> Result<CasVerification, CasError> {
@@ -491,6 +557,38 @@ impl CasStore {
                 "CAS blob is not present",
             ))
         })
+    }
+
+    fn read_bounded_leased(
+        &self,
+        relpath: &str,
+        expected_size: u64,
+        maximum_size: usize,
+    ) -> Result<Vec<u8>, CasError> {
+        let (shard_name, blob_name) = split_relpath(relpath)?;
+        let root = self.leased_root()?;
+        let shard = open_cap_directory(&root, shard_name)?;
+        let metadata = shard.symlink_metadata(blob_name).map_err(CasError::Io)?;
+        let identity = CapFileIdentity::from_metadata(&metadata)?;
+        if metadata.len() > maximum_size as u64 || metadata.len() > MAX_CAS_OBJECT_BYTES as u64 {
+            return Err(CasError::ObjectTooLarge);
+        }
+        if metadata.len() != expected_size {
+            return Err(CasError::CorruptBlob);
+        }
+        let mut options = CapOpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let mut file = shard
+            .open_with(blob_name, &options)
+            .map_err(|_| CasError::FilesystemBoundary)?;
+        let opened = file.metadata().map_err(CasError::Io)?;
+        let handle_identity = CapFileIdentity::from_metadata(&opened)?;
+        if handle_identity != identity || opened.len() != expected_size {
+            return Err(CasError::FilesystemBoundary);
+        }
+        let bytes = read_verified_bytes_bounded(&mut file, relpath, expected_size, maximum_size)?;
+        validate_named_cap_file(&shard, OsStr::new(blob_name), identity)?;
+        Ok(bytes)
     }
 
     fn verify_leased(
@@ -1339,6 +1437,15 @@ fn read_verified_bytes(
     relpath: &str,
     expected_size: u64,
 ) -> Result<Vec<u8>, CasError> {
+    read_verified_bytes_bounded(reader, relpath, expected_size, MAX_CAS_OBJECT_BYTES)
+}
+
+fn read_verified_bytes_bounded(
+    reader: &mut impl Read,
+    relpath: &str,
+    expected_size: u64,
+    maximum_size: usize,
+) -> Result<Vec<u8>, CasError> {
     #[cfg(test)]
     FORBID_FULL_BLOB_ALLOCATION.with(|forbidden| {
         assert!(
@@ -1347,7 +1454,7 @@ fn read_verified_bytes(
         );
     });
     let capacity = usize::try_from(expected_size).map_err(|_| CasError::ObjectTooLarge)?;
-    if capacity > MAX_CAS_OBJECT_BYTES {
+    if capacity > maximum_size || capacity > MAX_CAS_OBJECT_BYTES {
         return Err(CasError::ObjectTooLarge);
     }
     let mut bytes = Vec::with_capacity(capacity);
@@ -1528,7 +1635,7 @@ enum TestFailure {
 mod tests {
     use std::{fs, path::Path, sync::Arc};
 
-    use super::{CasStore, FORBID_FULL_BLOB_ALLOCATION, TestFailure};
+    use super::{CasStore, TestFailure, FORBID_FULL_BLOB_ALLOCATION};
     use crate::{ReadOnlyStore, StorageBoundaryLease, StoreConfig, StoreHandle};
 
     struct FullBlobAllocationGuard;

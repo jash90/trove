@@ -20,6 +20,7 @@ const MAX_DENYLISTED_APP_BYTES: usize = 256;
 const MAX_PREVIEW_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_COPY_TEXT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_THUMBNAIL_BASE64_BYTES: usize = 256 * 1024;
+const MAX_THUMBNAIL_RAW_BYTES: usize = MAX_THUMBNAIL_BASE64_BYTES / 4 * 3;
 
 #[macro_export]
 macro_rules! clipboard_history_command_registry {
@@ -446,10 +447,8 @@ fn get_thumbnail_blocking(
     let cas = store
         .cas_store()
         .map_err(|error| store_error_code(&error, "thumbnail_unavailable"))?;
-    cas.verify(&relpath, byte_size as u64)
-        .map_err(|error| cas_error_code(&error, "thumbnail_unavailable"))?;
     let bytes = cas
-        .read(&relpath)
+        .read_bounded(&relpath, byte_size as u64, MAX_THUMBNAIL_RAW_BYTES)
         .map_err(|error| cas_error_code(&error, "thumbnail_unavailable"))?;
     let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     if base64.len() > MAX_THUMBNAIL_BASE64_BYTES {
@@ -686,10 +685,8 @@ fn read_primary_bytes(
             let cas = store
                 .cas_store()
                 .map_err(|error| store_error_code(&error, unavailable_code))?;
-            cas.verify(relpath, original_size as u64)
-                .map_err(|error| cas_error_code(&error, unavailable_code))?;
             let bytes = cas
-                .read(relpath)
+                .read_bounded(relpath, original_size as u64, maximum)
                 .map_err(|error| cas_error_code(&error, unavailable_code))?;
             if bytes.len() != original_size {
                 return Err(unavailable_code.to_owned());

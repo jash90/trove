@@ -28,6 +28,83 @@ fn cas_is_content_addressed_and_idempotent() {
 }
 
 #[test]
+fn bounded_read_enforces_the_caller_limit_before_payload_sized_allocation() {
+    let (_directory, cas) = test_cas();
+    let payload = vec![b'x'; 2 * 1024 * 1024];
+    let blob = cas.put(&payload).unwrap();
+
+    let allocations = allocation_counter::measure(|| {
+        let error = cas
+            .read_bounded(&blob.relpath, blob.byte_size, 1024 * 1024)
+            .unwrap_err();
+        assert!(matches!(error, CasError::ObjectTooLarge));
+    });
+
+    assert!(allocations.bytes_max < 128 * 1024, "{allocations:?}");
+}
+
+#[test]
+fn bounded_read_rejects_oversized_metadata_with_a_stable_limit_error() {
+    let (_directory, cas) = test_cas();
+    let blob = cas.put(&vec![b'x'; 2 * 1024 * 1024]).unwrap();
+
+    let error = cas
+        .read_bounded(&blob.relpath, 32, 1024 * 1024)
+        .unwrap_err();
+
+    assert!(matches!(error, CasError::ObjectTooLarge));
+}
+
+#[test]
+fn bounded_read_rejects_same_size_corruption() {
+    let (_directory, cas) = test_cas();
+    let blob = cas.put(b"payload").unwrap();
+    fs::write(cas.root().join(&blob.relpath), b"corrupt").unwrap();
+
+    let error = cas
+        .read_bounded(&blob.relpath, blob.byte_size, 1024)
+        .unwrap_err();
+
+    assert!(matches!(error, CasError::CorruptBlob));
+}
+
+#[test]
+fn leased_bounded_read_rejects_oversized_metadata_before_opening_the_payload() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = StoreConfig::new(directory.path().join("history.sqlite"))
+        .with_blob_root(directory.path().join("blobs"));
+    let lease = Arc::new(StorageBoundaryLease::create_writer(&config).unwrap());
+    let store = StoreHandle::open(config.with_storage_boundary(lease)).unwrap();
+    let cas = store.cas_store().unwrap();
+    let blob = cas.put(&vec![b'x'; 2 * 1024 * 1024]).unwrap();
+
+    let error = cas
+        .read_bounded(&blob.relpath, 32, 1024 * 1024)
+        .unwrap_err();
+
+    assert!(matches!(error, CasError::ObjectTooLarge));
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_read_rejects_a_replaced_blob_without_following_it() {
+    use std::os::unix::fs::symlink;
+
+    let (directory, cas) = test_cas();
+    let blob = cas.put(b"payload").unwrap();
+    let outside = directory.path().join("outside");
+    fs::write(&outside, b"payload").unwrap();
+    fs::remove_file(cas.root().join(&blob.relpath)).unwrap();
+    symlink(&outside, cas.root().join(&blob.relpath)).unwrap();
+
+    let error = cas
+        .read_bounded(&blob.relpath, blob.byte_size, 1024)
+        .unwrap_err();
+
+    assert!(matches!(error, CasError::FilesystemBoundary));
+}
+
+#[test]
 fn cas_rejects_paths_outside_its_content_addressed_root() {
     let (directory, cas) = test_cas();
     let outside = directory.path().join("outside");
@@ -207,7 +284,7 @@ fn gc_session_preserves_uncertain_corrupt_blobs() {
 mod unix_symlink_tests {
     use std::{
         fs,
-        os::unix::fs::{PermissionsExt, symlink},
+        os::unix::fs::{symlink, PermissionsExt},
     };
 
     use clipboard_store::GcStepBudget;
