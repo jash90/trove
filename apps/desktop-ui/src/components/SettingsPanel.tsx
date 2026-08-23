@@ -1,7 +1,11 @@
-import { KeyRound, Power, ShieldBan, Timer, X } from 'lucide-react';
+import { Download, KeyRound, Power, ShieldBan, Timer, X } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEventHandler, type KeyboardEventHandler } from 'react';
 
-import type { AppSettings, StorageStats as StorageStatsContract } from '../lib/contracts';
+import type {
+  AppSettings,
+  ExportSummary as ExportSummaryContract,
+  StorageStats as StorageStatsContract,
+} from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
 import { StorageStats } from './StorageStats';
 
@@ -103,6 +107,8 @@ interface SettingsPanelProps {
 type StorageStatus = 'loading' | 'ready' | 'unavailable';
 
 const TRANSACTION_ERROR = 'Nie udało się zastosować ustawień. Nic nie zostało zapisane.';
+const EXPORT_ERROR =
+  'Nie udało się zapisać eksportu. Sprawdź, czy wskazany katalog jest pusty i zapisywalny.';
 const RETENTION_ERROR = 'Podaj pełną liczbę dni od 1 do 3650.';
 const HOTKEY_ERROR = 'Skrót musi zawierać modyfikator i jedną literę, cyfrę lub klawisz funkcyjny.';
 const DENYLIST_ERROR = 'Lista wykluczeń zawiera nieprawidłowy wpis lub jest za długa.';
@@ -116,6 +122,8 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [retentionDays, setRetentionDays] = useState('');
   const [denylist, setDenylist] = useState('');
   const [stats, setStats] = useState<StorageStatsContract | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportSummary, setExportSummary] = useState<ExportSummaryContract | null>(null);
   const [storageStatus, setStorageStatus] = useState<StorageStatus>('loading');
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -242,6 +250,25 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setNativeAutostart(await gateway.isAutostartEnabled().catch(() => null));
       setPending(false);
     })();
+  };
+
+  /// Writes the whole history somewhere the user picks.
+  ///
+  /// The chosen path never enters state: it goes straight to the command and
+  /// dies with this call, the same rule the import wizard follows.
+  const runExport = async (): Promise<void> => {
+    setError(null);
+    setExportSummary(null);
+    const directory = await gateway.chooseExportDirectory().catch(() => null);
+    if (directory === null) return;
+    setExporting(true);
+    try {
+      setExportSummary(await gateway.exportHistory(directory));
+    } catch {
+      // The failure may carry a path, so only a fixed sentence is shown.
+      setError(EXPORT_ERROR);
+    }
+    setExporting(false);
   };
 
   const handleKeyDown: KeyboardEventHandler<HTMLDivElement> = (event) => {
@@ -393,6 +420,30 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
             </section>
 
             <StorageStats stats={stats} status={storageStatus} />
+
+            <section className="workflow-section" aria-labelledby="settings-export-title">
+              <h2 id="settings-export-title">
+                <Download size={15} aria-hidden="true" />
+                Eksport historii
+              </h2>
+              <p className="settings-help">
+                Zapisuje całą historię w formacie SuperCmd — {'clipboard.json'},
+                {' clipboard.csv'} i katalog {'images'} z obrazami. Ten sam format
+                importer czyta z powrotem.
+              </p>
+              <div className="workflow-actions workflow-actions--start">
+                <button type="button" onClick={() => void runExport()} disabled={exporting}>
+                  {exporting ? 'Eksportowanie…' : 'Eksportuj historię'}
+                </button>
+              </div>
+              {exportSummary ? (
+                <p className="workflow-status" role="status">
+                  Zapisano {exportSummary.records} wpisów, w tym {exportSummary.images}{' '}
+                  z obrazem. {exportSummary.withoutPayload} bez zapisanej treści —
+                  zostały wyeksportowane jako same metadane.
+                </p>
+              ) : null}
+            </section>
 
             <div className="workflow-actions">
               <button type="submit" className="workflow-primary" disabled={pending}>

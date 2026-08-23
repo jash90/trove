@@ -1371,3 +1371,7 @@
   flex-direction: column;
   gap: 18px;
 }
+
+.workflow-actions--start {
+  justify-content: flex-start;
+}

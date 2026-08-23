@@ -525,6 +525,7 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "get_thumbnail",
             "reveal_source",
             "open_settings_window",
+            "export_history",
         ]
     );
 
@@ -870,6 +871,100 @@ async fn an_entry_with_nothing_to_render_reports_no_thumbnail_rather_than_an_err
             .is_none()
     );
     assert_eq!(stored_thumbnail_count(&state), 0);
+}
+
+#[tokio::test]
+async fn an_export_can_be_imported_again_as_the_same_history() {
+    // The only definition of "correct" this format has: the reader next door
+    // accepts what the writer produced, and produces the same entries from it.
+    let source_dir = tempfile::tempdir().unwrap();
+    let output_dir = tempfile::tempdir().unwrap();
+    let reimport_dir = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(source_dir.path()).unwrap();
+    state
+        .store
+        .ingest(text_capture("synthetic, with a comma", 1_725_000_000_100))
+        .await
+        .unwrap();
+    state
+        .store
+        .ingest(text_capture(
+            "synthetic \"quoted\"\nand wrapped",
+            1_725_000_000_200,
+        ))
+        .await
+        .unwrap();
+    state
+        .store
+        .ingest(image_capture(synthetic_png(), 1_725_000_000_300))
+        .await
+        .unwrap();
+
+    let export_dir = output_dir.path().join("export");
+    let summary = commands::export_history_service(&state, export_dir.clone())
+        .await
+        .unwrap();
+    assert_eq!(summary.records, 3);
+    assert_eq!(summary.images, 1);
+    assert!(export_dir.join("clipboard.json").is_file());
+    assert!(export_dir.join("clipboard.csv").is_file());
+
+    // Read back through the importer, into a database that has never seen it.
+    let reimported = AppState::open_data_dir(reimport_dir.path()).unwrap();
+    let analysis = commands::analyze_import_service(&reimported, export_dir.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(analysis.total, 3);
+    assert_eq!(analysis.candidate_records, 3);
+    assert_eq!(analysis.failed, 0);
+
+    let handle = commands::start_import_service(&reimported, &analysis.analysis_id.to_string())
+        .await
+        .unwrap();
+    let progress = wait_for_import(&reimported, handle.run_id).await;
+    let summary = progress.summary.expect("a finished run reports a summary");
+    assert_eq!(summary.imported, 3);
+    assert_eq!(summary.failed, 0);
+
+    // The text came back through CSV-hostile characters intact.
+    let previews = reimported
+        .store
+        .with_reader(|connection| {
+            let mut statement =
+                connection.prepare("SELECT preview_text FROM content ORDER BY content_id")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap();
+    assert!(
+        previews
+            .iter()
+            .any(|preview| preview.contains("with a comma"))
+    );
+    assert!(
+        previews
+            .iter()
+            .any(|preview| preview.contains("and wrapped"))
+    );
+}
+
+#[tokio::test]
+async fn an_export_refuses_a_directory_that_already_holds_something() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let output_dir = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(source_dir.path()).unwrap();
+    let occupied = output_dir.path().join("occupied");
+    std::fs::create_dir_all(&occupied).unwrap();
+    std::fs::write(occupied.join("something.txt"), b"already here").unwrap();
+
+    // Mixing two exports into one directory would produce a manifest pair that
+    // describes neither.
+    assert_eq!(
+        commands::export_history_service(&state, occupied)
+            .await
+            .unwrap_err(),
+        "export_destination_not_empty"
+    );
 }
 
 async fn wait_for_import(state: &AppState, run_id: uuid::Uuid) -> clipboard_import::ImportProgress {

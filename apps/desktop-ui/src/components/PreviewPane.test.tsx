@@ -121,6 +121,8 @@ const makeGateway = (
     getImportStatus: vi.fn(async () => importProgress),
     revealSource: vi.fn(async () => undefined),
     openSettingsWindow: vi.fn(async () => undefined),
+    chooseExportDirectory: vi.fn(async () => null),
+    exportHistory: vi.fn(async () => ({ records: 0, images: 0, withoutPayload: 0 })),
     onHistoryChanged: vi.fn(() => () => undefined),
     getThumbnail: vi.fn(async (): Promise<Thumbnail | null> => null),
     getSettings: vi.fn(async () => settings),

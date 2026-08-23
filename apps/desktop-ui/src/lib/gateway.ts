@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { disable, enable, isEnabled } from '@tauri-apps/plugin-autostart';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import { createContext, createElement, useContext, type ReactNode } from 'react';
 
 import {
@@ -10,6 +10,7 @@ import {
   validateStorageStats,
   type AppSettings,
   type CopyResult,
+  type ExportSummary,
   type HistoryPage,
   type ImportAnalysis,
   type ImportProgress,
@@ -39,6 +40,8 @@ export interface ClipboardGateway {
   getImportStatus(runId: string): Promise<ImportProgress>;
   revealSource(eventId: number): Promise<void>;
   openSettingsWindow(): Promise<void>;
+  chooseExportDirectory(): Promise<string | null>;
+  exportHistory(directory: string): Promise<ExportSummary>;
   /**
    * Calls back whenever the core records something new. Returns a function
    * that stops listening; without it the palette would show a history that is
@@ -112,6 +115,12 @@ export const tauriGateway: ClipboardGateway = {
     ),
   revealSource: (eventId) => invoke<void>('reveal_source', { eventId }),
   openSettingsWindow: () => invoke<void>('open_settings_window'),
+  chooseExportDirectory: () =>
+    save({
+      title: 'Wybierz katalog na eksport historii',
+      defaultPath: 'clipboard-export',
+    }),
+  exportHistory: (directory) => invoke<ExportSummary>('export_history', { directory }),
   onHistoryChanged: (listener) => subscribe('history-changed', listener),
   getThumbnail: (eventId) => invoke<Thumbnail | null>('get_thumbnail', { eventId }),
   getSettings: () => invoke<AppSettings>('get_settings'),

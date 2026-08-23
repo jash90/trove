@@ -87,6 +87,8 @@ export const mockGateway: ClipboardGateway = {
   // Nothing to open in a browser preview; the settings page is reachable by
   // hand at #settings.
   openSettingsWindow: async () => undefined,
+  chooseExportDirectory: async () => 'synthetic://clipboard-export',
+  exportHistory: async () => ({ records: 4, images: 1, withoutPayload: 1 }),
   // The browser preview has no core behind it, so nothing ever changes.
   onHistoryChanged: () => () => undefined,
   getThumbnail: async (eventId) =>

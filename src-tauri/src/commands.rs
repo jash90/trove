@@ -42,6 +42,7 @@ macro_rules! clipboard_history_command_registry {
             get_thumbnail => $crate::commands::get_thumbnail,
             reveal_source => $crate::commands::reveal_source,
             open_settings_window => $crate::commands::open_settings_window,
+            export_history => $crate::commands::export_history,
         }
     };
 }
@@ -513,6 +514,31 @@ pub fn open_settings_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     crate::hotkey::show_settings(&app);
 }
 
+pub async fn export_history_service(
+    state: &AppState,
+    directory: PathBuf,
+) -> Result<crate::export::ExportSummary, String> {
+    let store = state.store.clone();
+    run_blocking("export_unavailable", move || {
+        let destination = crate::export::prepare_destination(&directory)?;
+        crate::export::export_supercmd(&store, &destination)
+    })
+    .await
+}
+
+/// Writes the whole history into a directory the user chose.
+///
+/// The bytes are assembled and written here rather than in the interface: a
+/// history of any size would otherwise cross the bridge record by record, and
+/// the shell already has the store and the blobs open.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn export_history(
+    state: tauri::State<'_, AppState>,
+    directory: PathBuf,
+) -> Result<crate::export::ExportSummary, String> {
+    export_history_service(state.inner(), directory).await
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn analyze_import(
     state: tauri::State<'_, AppState>,
@@ -947,6 +973,27 @@ fn read_primary_metadata(
         original_byte_size,
         stored_byte_size,
     })
+}
+
+/// Reads one entry's primary payload for the exporter.
+///
+/// Returns nothing for the ordinary reasons — the payload is gone, or too
+/// large to write out — because an export skips those rather than failing.
+pub(crate) fn export_payload_bytes(
+    store: &StoreHandle,
+    event_id: i64,
+    maximum: usize,
+) -> Option<Vec<u8>> {
+    let metadata = read_primary_metadata(store, event_id, "export_unavailable").ok()?;
+    read_primary_bytes(
+        store,
+        &metadata,
+        maximum,
+        "export_too_large",
+        "export_unavailable",
+    )
+    .ok()
+    .flatten()
 }
 
 fn read_primary_bytes(

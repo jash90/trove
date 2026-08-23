@@ -734,7 +734,7 @@ fn map_record(
     })
 }
 
-fn parse_timestamp_ms(value: &str) -> Option<i64> {
+pub(crate) fn parse_timestamp_ms(value: &str) -> Option<i64> {
     if let Ok(timestamp) = DateTime::parse_from_rfc3339(value) {
         return Some(timestamp.with_timezone(&Utc).timestamp_millis());
     }

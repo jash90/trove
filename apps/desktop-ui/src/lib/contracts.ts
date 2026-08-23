@@ -79,6 +79,13 @@ export interface ImportRunHandle {
   runId: string;
 }
 
+export interface ExportSummary {
+  records: number;
+  images: number;
+  /** Entries stored without a payload, written as metadata only. */
+  withoutPayload: number;
+}
+
 export interface ImportAnalysis {
   analysisId: string;
   total: number;

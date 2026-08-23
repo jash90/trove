@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod detect;
+mod export;
 mod raycast;
 mod rayconfig;
 mod service;
@@ -30,6 +31,9 @@ use clipboard_store::ImportOperationPermit;
 use thiserror::Error;
 use zeroize::Zeroize;
 
+pub use export::{
+    SUPERCMD_CSV_HEADER, SuperCmdExportRecord, format_timestamp_ms, render_csv, render_json,
+};
 pub use rayconfig::RayconfigSecret;
 
 const JSON_READER_BUFFER_BYTES: usize = 8 * 1024;
