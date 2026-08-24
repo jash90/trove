@@ -208,6 +208,17 @@ impl StorageBoundaryLease {
         }
         let database_name = direct_child_name(&configured_data_path, &configured_database_path)?;
         let blob_name = direct_child_name(&configured_data_path, &configured_blob_path)?;
+        // On a machine that has just installed the application, the directory
+        // the operating system names for our data has never been made, and
+        // nothing else makes it. Asking for its metadata then fails as
+        // NotFound, which used to end the whole start-up — the first run of
+        // every fresh install.
+        //
+        // Only a writer creates it. A reader opening a store that is not there
+        // still gets nothing, because there is genuinely nothing to read.
+        if writer && !configured_data_path.exists() {
+            create_private_directory(&configured_data_path)?;
+        }
         let configured_metadata = fs::symlink_metadata(&configured_data_path).map_err(changed)?;
         if configured_metadata.file_type().is_symlink() || !configured_metadata.is_dir() {
             return Err(StorageBoundaryError::Changed);
@@ -689,6 +700,40 @@ fn validate_directory_chain(chain: &[LeasedDirectory]) -> Result<(), StorageBoun
 
 fn changed(_: io::Error) -> StorageBoundaryError {
     StorageBoundaryError::Changed
+}
+
+/// Makes the data directory, private from the moment it exists.
+///
+/// The mode is set as it is created rather than afterwards: a directory that is
+/// briefly world-readable is briefly readable by the world, and the contents
+/// arriving right behind it are a clipboard history.
+///
+/// Only the leaf is ours to make private. The path above it belongs to the
+/// operating system — `~/Library/Application Support` and its like are shared
+/// by every application, and narrowing them would be reaching outside what this
+/// program owns.
+///
+/// Nothing here decides the directory is *acceptable*. It is created and then
+/// judged by exactly the same checks as one found already in place: not a
+/// symlink, a real directory, ours, and holding still through the ancestor
+/// chain. Losing a race to something hostile therefore fails the same way it
+/// always did.
+#[cfg(unix)]
+fn create_private_directory(path: &Path) -> Result<(), StorageBoundaryError> {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(changed)?;
+    }
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(path) {
+        Ok(()) => Ok(()),
+        // Someone got there first between the check and here; whatever they
+        // made is validated below like anything else.
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(changed(error)),
+    }
 }
 
 #[cfg(test)]

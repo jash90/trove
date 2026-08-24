@@ -2204,3 +2204,58 @@ async fn import_batch_propagates_private_storage_without_recording_a_candidate_f
     assert_eq!(status.next_candidate_offset, 0);
     assert_eq!(status.failed_records, 0);
 }
+
+#[tokio::test]
+async fn a_data_directory_that_does_not_exist_yet_is_created_rather_than_refused() {
+    // The state of every machine that has just installed the application: the
+    // directory the operating system names for our data has never been made.
+    // Refusing it there is refusing the first run.
+    let parent = tempfile::tempdir().unwrap();
+    let data_dir = parent.path().join("never-created");
+    assert!(!data_dir.exists());
+
+    let store = StoreHandle::open(StoreConfig::in_data_dir(&data_dir)).unwrap();
+
+    assert_eq!(store.stats().unwrap().event_count, 0);
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(&data_dir).unwrap().permissions(),
+    );
+    // Private from the moment it exists, not hardened afterwards: a directory
+    // that is briefly world-readable is briefly readable by the world.
+    assert_eq!(
+        mode & 0o777,
+        0o700,
+        "a fresh data directory must be private"
+    );
+}
+
+#[test]
+fn a_reader_still_refuses_a_data_directory_that_is_not_there() {
+    // Creating on demand is a writer's job. A reader finding nothing has found
+    // nothing, and inventing an empty store for it would turn "your history is
+    // missing" into "your history is empty".
+    let parent = tempfile::tempdir().unwrap();
+    let absent = parent.path().join("never-created");
+
+    let error =
+        StorageBoundaryLease::open_read_only(&StoreConfig::in_data_dir(&absent)).unwrap_err();
+
+    assert_eq!(error.to_string(), "storage boundary changed");
+    assert!(!absent.exists(), "a reader must not create anything");
+}
+
+#[test]
+fn a_symlink_standing_in_for_the_data_directory_is_still_refused() {
+    // The check that creating on demand must not have weakened: whatever is at
+    // the path when we look is judged the same way, made by us or not.
+    let parent = tempfile::tempdir().unwrap();
+    let elsewhere = parent.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let planted = parent.path().join("data");
+    std::os::unix::fs::symlink(&elsewhere, &planted).unwrap();
+
+    let error =
+        StorageBoundaryLease::create_writer(&StoreConfig::in_data_dir(&planted)).unwrap_err();
+
+    assert_eq!(error.to_string(), "storage boundary changed");
+}
