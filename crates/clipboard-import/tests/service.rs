@@ -114,6 +114,23 @@ async fn wait_for_terminal(service: &ImportService, run_id: uuid::Uuid) {
     panic!("import worker did not reach a terminal state");
 }
 
+/// The run's progress once the worker has stopped moving it.
+///
+/// Only for a run with nothing left to do. A run interrupted mid-way stays
+/// `Running` on purpose, so that it can be resumed — waiting for a terminal
+/// state there waits forever.
+///
+/// Where it does apply, the counter reaches its mark before the state that
+/// follows it is written, so a snapshot taken at the checkpoint records a
+/// `Running` the worker is about to replace. Comparing a later read against
+/// that snapshot then passes on one machine and fails on another; CI found
+/// exactly that. Anything asserting "this did not change the run" has to start
+/// from a state that had finished changing.
+async fn settled_status(service: &ImportService, run_id: uuid::Uuid) -> ImportProgress {
+    wait_for_terminal(service, run_id).await;
+    service.status(run_id).unwrap()
+}
+
 async fn wait_for_processed(service: &ImportService, run_id: uuid::Uuid, processed: u64) {
     for _ in 0..50_000 {
         if let Some(progress) = poll_progress(service, run_id)
@@ -865,7 +882,7 @@ async fn resume_rejects_an_auxiliary_image_becoming_available_after_checkpoint()
     // The image record leads nowhere, so it is skipped before the run starts:
     // one skipped plus a full batch of imported records is the checkpoint.
     wait_for_processed(&service, handle.run_id, IMPORT_BATCH_SIZE as u64 + 1).await;
-    let before = service.status(handle.run_id).unwrap();
+    let before = settled_status(&service, handle.run_id).await;
     drop(service);
     drop(store);
 
