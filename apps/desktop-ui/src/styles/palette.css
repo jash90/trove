@@ -1456,7 +1456,28 @@
 .link-card__image {
   width: 100%;
   max-height: 190px;
-  object-fit: cover;
+  /* Contained, not covered: the picture arrives in its own proportions, and
+     cropping it again here would undo that. */
+  object-fit: contain;
   border-radius: 6px;
   background: var(--paper);
+}
+
+/* Holds the slot while the answer is still coming, so the rest of the card
+   does not slide down the moment the picture lands.
+
+   Shaped 1.91:1 rather than given a fixed height: that is what Open Graph asks
+   for and what nearly every page serves, so for the common case the reserved
+   box is the size the picture turns out to be and nothing moves at all. The
+   same max-height still bounds it. */
+.link-card__image--pending {
+  aspect-ratio: 1.91 / 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px dashed var(--line);
+  color: var(--muted);
+  font-size: 12px;
 }

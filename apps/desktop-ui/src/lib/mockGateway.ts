@@ -99,6 +99,7 @@ export const mockGateway: ClipboardGateway = {
       imageMime: null,
       imageBase64: null,
       localOnly: false,
+      fetching: false,
     };
   },
   chooseExportDirectory: async () => 'synthetic://clipboard-export',

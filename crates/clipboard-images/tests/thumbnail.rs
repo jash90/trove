@@ -223,3 +223,67 @@ fn an_svg_embedding_its_own_image_still_draws_it() {
 
     assert!(has_visible_pixels(&thumbnail));
 }
+
+/// Encodes a solid image of the given size, for asking what happens to shape.
+fn png_of(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::ImageBuffer::from_pixel(
+        width,
+        height,
+        image::Rgba([90, 120, 200, 255]),
+    ))
+    .write_to(&mut bytes, image::ImageFormat::Png)
+    .unwrap();
+    bytes.into_inner()
+}
+
+#[test]
+fn a_wide_picture_keeps_its_shape() {
+    // The proportions a page's own card actually arrives in: 1200x600 is what
+    // GitHub and most others serve. Filling a square threw half the width away
+    // before anything had a chance to display it.
+    let thumbnail = make_thumbnail(&png_of(1200, 600), MAX_THUMBNAIL_DIMENSION).unwrap();
+
+    assert_eq!(png_dimensions(&thumbnail), (320, 160));
+}
+
+#[test]
+fn a_tall_picture_keeps_its_shape() {
+    let thumbnail = make_thumbnail(&png_of(600, 1200), MAX_THUMBNAIL_DIMENSION).unwrap();
+
+    assert_eq!(png_dimensions(&thumbnail), (160, 320));
+}
+
+#[test]
+fn a_wide_svg_keeps_its_shape() {
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100" width="200" height="100"><rect width="200" height="100" fill="teal"/></svg>"#;
+
+    let thumbnail = make_thumbnail(svg, MAX_THUMBNAIL_DIMENSION).unwrap();
+
+    // Not a square with transparent margins: the shape is the picture.
+    assert_eq!(png_dimensions(&thumbnail), (320, 160));
+}
+
+#[test]
+fn an_extreme_shape_still_has_both_sides() {
+    // Preserving proportions means one side can be driven towards nothing. A
+    // zero-sided image is not a thumbnail, it is a failure that looks like one.
+    for (width, height) in [(10_000_u32, 1_u32), (1, 10_000), (4096, 3)] {
+        let thumbnail = make_thumbnail(&png_of(width, height), MAX_THUMBNAIL_DIMENSION).unwrap();
+        let (out_width, out_height) = png_dimensions(&thumbnail);
+
+        assert!(
+            out_width >= 1 && out_height >= 1,
+            "{width}x{height} collapsed"
+        );
+        assert!(
+            out_width <= MAX_THUMBNAIL_DIMENSION && out_height <= MAX_THUMBNAIL_DIMENSION,
+            "{width}x{height} escaped the bound"
+        );
+    }
+
+    let sliver = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10000 1" width="10000" height="1"><rect width="10000" height="1" fill="red"/></svg>"#;
+    let thumbnail = make_thumbnail(sliver, MAX_THUMBNAIL_DIMENSION).unwrap();
+
+    assert_eq!(png_dimensions(&thumbnail), (320, 1));
+}

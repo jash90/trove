@@ -91,6 +91,13 @@ export interface LinkPreview {
   imageBase64: string | null;
   /** True when nothing was fetched and nothing will be. */
   localOnly: boolean;
+  /**
+   * True only while a fetch is under way and its result will be announced.
+   *
+   * Not derivable here: a page still being asked and a page that answered
+   * without a picture both arrive with no image and localOnly false.
+   */
+  fetching: boolean;
 }
 
 export interface ExportSummary {

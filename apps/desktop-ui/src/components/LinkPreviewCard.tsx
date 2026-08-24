@@ -1,4 +1,4 @@
-import { Globe, ShieldOff } from 'lucide-react';
+import { Globe, LoaderCircle, ShieldOff } from 'lucide-react';
 
 import type { LinkPreview } from '../lib/contracts';
 
@@ -21,6 +21,14 @@ export const LinkPreviewCard = ({ preview }: LinkPreviewCardProps): React.JSX.El
         src={`data:${preview.imageMime};base64,${preview.imageBase64}`}
         alt=""
       />
+    ) : preview.fetching ? (
+      // Only while the core says an answer is still coming. A page that has no
+      // picture of its own is the common case, and it must not leave something
+      // turning here forever.
+      <div className="link-card__image link-card__image--pending" role="status">
+        <LoaderCircle className="image-preview__spinner" size={20} aria-hidden="true" />
+        <span>Loading preview…</span>
+      </div>
     ) : null}
     <div className="link-card__identity">
       {preview.iconBase64 && preview.iconMime ? (

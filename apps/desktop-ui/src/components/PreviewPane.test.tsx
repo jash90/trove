@@ -236,6 +236,7 @@ describe('link previews', () => {
     imageMime: null,
     imageBase64: null,
     localOnly: false,
+    fetching: false,
     ...overrides,
   });
 
@@ -301,6 +302,38 @@ describe('link previews', () => {
 
     expect(screen.getByText('example.invalid')).toBeVisible();
     expect(screen.getByText(/link preview fetching is off/i)).toBeVisible();
+  });
+
+  it('waits visibly only while an answer is actually coming', () => {
+    render(
+      <PreviewPane
+        preview={makePreview(1, { kind: 'link', text: 'https://example.invalid/synthetic/page' })}
+        thumbnailUrl={null}
+        thumbnailStatus="idle"
+        linkPreview={linkPreview({ fetching: true })}
+      />,
+    );
+
+    expect(screen.getByRole('status')).toHaveTextContent(/loading preview/i);
+    // The address is readable straight away; waiting is for the picture only.
+    expect(screen.getByText('example.invalid')).toBeVisible();
+  });
+
+  it('waits for nothing on a page that has no picture of its own', () => {
+    // The common case, and the one a naive spinner gets wrong: most pages
+    // carry no og:image at all, so "no image yet" is the final answer rather
+    // than a stage on the way to one.
+    render(
+      <PreviewPane
+        preview={makePreview(1, { kind: 'link', text: 'https://example.invalid/synthetic/page' })}
+        thumbnailUrl={null}
+        thumbnailStatus="idle"
+        linkPreview={linkPreview({ title: 'Synthetic page', fetching: false })}
+      />,
+    );
+
+    expect(screen.getByText('Synthetic page')).toBeVisible();
+    expect(screen.queryByText(/loading preview/i)).toBeNull();
   });
 
   it('falls back to the raw address when nothing describes the link', () => {

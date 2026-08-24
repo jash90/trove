@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use clipboard_import::ImportService;
 use clipboard_store::{StoreConfig, StoreHandle};
@@ -7,6 +8,11 @@ use tauri::Manager;
 pub struct AppState {
     pub store: StoreHandle,
     pub importer: ImportService,
+    /// Guards the one network path in the application against asking twice at
+    /// once and against asking a host that has stopped answering. Shared
+    /// mutable state behind a lock rather than globals, so tests can hold a
+    /// coordinator of their own.
+    pub previews: Mutex<crate::links::FetchCoordinator>,
 }
 
 impl AppState {
@@ -16,7 +22,11 @@ impl AppState {
         let store = StoreHandle::open(StoreConfig::in_data_dir(data_dir))?;
         let importer = ImportService::new(store.clone())
             .map_err(|_| anyhow::anyhow!("import service initialization failed"))?;
-        Ok(Self { store, importer })
+        Ok(Self {
+            store,
+            importer,
+            previews: Mutex::new(crate::links::FetchCoordinator::default()),
+        })
     }
 }
 

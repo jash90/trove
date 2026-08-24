@@ -714,6 +714,7 @@ async fn importer_commands_keep_analysis_owner_scoped_and_start_only_by_analysis
     let foreign = AppState {
         store: state.store.clone(),
         importer: clipboard_import::ImportService::new(state.store.clone()).unwrap(),
+        previews: std::sync::Mutex::new(clipboard_history_app::links::FetchCoordinator::default()),
     };
     let error = commands::start_import_service(&foreign, &analysis.analysis_id.to_string())
         .await
@@ -1317,3 +1318,110 @@ fn secure_existing_database(data_root: &std::path::Path, database: &std::path::P
 
 #[cfg(not(unix))]
 fn secure_existing_database(_: &std::path::Path, _: &std::path::Path) {}
+
+/// Live check of the whole preview path against a real site.
+///
+/// Ignored by default because it speaks to the network; run it by hand after
+/// touching the fetching code:
+/// `cargo test -p clipboard-history-app --test commands -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "talks to the real internet; run manually"]
+async fn link_preview_fetches_stores_and_renders_a_real_page() {
+    use rusqlite::OptionalExtension;
+
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let event_id = state
+        .store
+        .ingest(clipboard_core::CaptureInput {
+            captured_at_ms: 1_725_000_000_000,
+            kind: clipboard_core::ContentKind::Link,
+            primary_mime: "text/plain".to_owned(),
+            representations: vec![clipboard_core::RepresentationInput {
+                format_id: "text/plain".to_owned(),
+                bytes: Some(b"https://github.com/rust-lang/rust".to_vec()),
+                missing_ref: None,
+            }],
+            source_app_id: Some("com.example.synthetic".to_owned()),
+            source_app_name: Some("Synthetic".to_owned()),
+            source_confidence: clipboard_core::SourceConfidence::Declared,
+            pinned: false,
+            occurrence_count: 1,
+            content_flags: clipboard_core::ContentFlags::empty(),
+            event_flags: clipboard_core::EventFlags::LOCAL_ONLY,
+            display_label: None,
+        })
+        .await
+        .unwrap()
+        .event_id;
+
+    // Fetching must be on for anything to leave the machine.
+    commands::save_settings_service(
+        &state,
+        commands::AppSettingsDto {
+            link_previews: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // First ask answers at once from the address alone, fetching behind it.
+    let first = commands::get_link_preview_service(&state, event_id)
+        .await
+        .unwrap();
+    assert!(first.is_some(), "a link entry always describes itself");
+
+    // The palette asks again when the ready event arrives; here polling takes
+    // its place, since no window is listening.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let row = loop {
+        let row = state.store.with_reader(|connection| {
+            connection
+                .query_row(
+                    "SELECT status, title, icon_relpath IS NOT NULL, image_relpath IS NOT NULL
+                     FROM link_preview WHERE content_id =
+                       (SELECT content_id FROM history_event WHERE event_id = ?1)",
+                    [event_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, bool>(2)?,
+                            row.get::<_, bool>(3)?,
+                        ))
+                    },
+                )
+                .optional()
+        });
+        match row {
+            Ok(Some(found)) if found.0 == "ok" => break found,
+            _ if std::time::Instant::now() > deadline => {
+                let last = row.ok().flatten();
+                panic!("fetch never completed; last row: {last:?}");
+            }
+            _ => tokio::time::sleep(std::time::Duration::from_millis(300)).await,
+        }
+    };
+
+    assert_eq!(row.0, "ok");
+    assert!(row.2, "an icon was stored");
+    assert!(row.3, "the page's own picture was stored");
+    assert!(
+        row.1
+            .as_deref()
+            .is_some_and(|title| title.to_ascii_lowercase().contains("rust")),
+        "title carried the page's name: {:?}",
+        row.1
+    );
+
+    // The second ask renders the remembered answer: bytes encoded, nothing fetched.
+    let rendered = commands::get_link_preview_service(&state, event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!rendered.local_only);
+    assert!(rendered.icon_base64.is_some());
+    assert!(rendered.image_base64.is_some());
+    assert_eq!(rendered.image_mime.as_deref(), Some("image/png"));
+}

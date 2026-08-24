@@ -60,7 +60,10 @@ pub fn make_thumbnail(bytes: &[u8], size: u32) -> Result<Vec<u8>, ImageError> {
     limits.max_alloc = Some(MAX_IMAGE_ALLOCATION_BYTES);
     reader.limits(limits);
     let image = reader.decode()?;
-    let thumbnail = image.resize_to_fill(size, size, FilterType::Lanczos3);
+    // Fitted, not filled. `resize_to_fill` covers the square and crops the
+    // overhang, which on a page's own card — 1200x600 as most sites serve it —
+    // discarded half the width before anything could display it.
+    let thumbnail = image.resize(size, size, FilterType::Lanczos3);
     let mut output = Cursor::new(Vec::new());
     thumbnail.write_to(&mut output, ImageFormat::Png)?;
     Ok(output.into_inner())
@@ -79,26 +82,29 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
     (trimmed.starts_with("<?xml") || trimmed.starts_with("<!")) && trimmed.contains("<svg")
 }
 
-/// Draws an SVG into a bounded square and encodes it as PNG.
+/// Draws an SVG into a bounded box and encodes it as PNG.
 ///
-/// The output size is ours, never the document's: an SVG may declare any
-/// dimensions it likes, and a document claiming a hundred thousand pixels a
-/// side would ask for an allocation that does not exist.
+/// The *bound* is ours, never the document's: an SVG may declare any dimensions
+/// it likes, and a document claiming a hundred thousand pixels a side would ask
+/// for an allocation that does not exist. Within that bound the document keeps
+/// its own proportions — a wide logo comes out wide rather than as a square
+/// with transparent margins nobody asked for.
 fn rasterise_svg(bytes: &[u8], size: u32) -> Result<Vec<u8>, ImageError> {
     let tree = usvg::Tree::from_data(bytes, &svg_options()).map_err(|_| ImageError::InvalidSvg)?;
-    let mut pixmap = tiny_skia::Pixmap::new(size, size).ok_or(ImageError::OutputTooLarge)?;
 
-    // Fitted rather than filled, and centred: a logo cropped to a square stops
-    // being the logo.
     let declared = tree.size();
     let scale = (size as f32 / declared.width()).min(size as f32 / declared.height());
-    let transform = tiny_skia::Transform::from_translate(
-        (size as f32 - declared.width() * scale) / 2.0,
-        (size as f32 - declared.height() * scale) / 2.0,
-    )
-    .pre_scale(scale, scale);
+    // The longer side lands on `size` exactly; the shorter one is whatever the
+    // document's shape makes it, and never zero.
+    let width = ((declared.width() * scale).round() as u32).clamp(1, size);
+    let height = ((declared.height() * scale).round() as u32).clamp(1, size);
 
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or(ImageError::OutputTooLarge)?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
     pixmap.encode_png().map_err(|_| ImageError::SvgRenderFailed)
 }
 
