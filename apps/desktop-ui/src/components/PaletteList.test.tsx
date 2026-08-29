@@ -5,20 +5,27 @@ import { useState, type KeyboardEventHandler } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from '../App';
-import { useKeyboardNavigation } from '../hooks/useKeyboardNavigation';
-import type { HistoryItem, HistoryPage } from '../lib/contracts';
-import type { ClipboardGateway } from '../lib/gateway';
+import { useListNavigation } from '../hooks/useListNavigation';
+import type { AppEntry, HistoryItem, HistoryPage } from '../lib/contracts';
+import { GatewayProvider, type ClipboardGateway } from '../lib/gateway';
+import { buildPaletteItems, keyOfItem, type PaletteItem } from '../lib/paletteItems';
+import { PaletteList } from './PaletteList';
 import { TypeFilter } from './TypeFilter';
-import { HistoryList } from './HistoryList';
 
-/// The history rows, and only those.
+/// The palette's rows, and only those.
 ///
 /// The type filter beside the search field is a combobox, and its choices are
 /// options too. An unscoped option query matches both, so a test can pass
 /// while the list it meant to inspect has not loaded at all.
-const historyList = () =>
-  within(screen.getByRole('listbox', { name: 'Clipboard history results' }));
+const paletteList = () =>
+  within(screen.getByRole('listbox', { name: 'Application and history results' }));
 
+const makeApps = (count: number, startAt = 1): AppEntry[] =>
+  Array.from({ length: count }, (_, index) => ({
+    name: `Synthetic App ${startAt + index}`,
+    bundleId: `app.synthetic.${startAt + index}`,
+    path: `/Applications/Synthetic App ${startAt + index}.app`,
+  }));
 
 const makeItems = (count: number, startAt = 1): HistoryItem[] =>
   Array.from({ length: count }, (_, index) => {
@@ -39,14 +46,15 @@ const makeItems = (count: number, startAt = 1): HistoryItem[] =>
   });
 
 interface KeyboardHarnessProps {
-  items: HistoryItem[];
-  onActivate: (eventId: number) => void;
+  items: PaletteItem[];
+  onActivate: (entry: PaletteItem) => void;
 }
 
 const KeyboardHarness = ({ items, onActivate }: KeyboardHarnessProps): React.JSX.Element => {
   const [query, setQuery] = useState('private phrase');
-  const navigation = useKeyboardNavigation({
+  const navigation = useListNavigation({
     items,
+    keyOf: keyOfItem,
     onActivate,
     onEscape: () => setQuery(''),
   });
@@ -57,25 +65,22 @@ const KeyboardHarness = ({ items, onActivate }: KeyboardHarnessProps): React.JSX
 
   return (
     <>
-      <label htmlFor="keyboard-search">Search history</label>
+      <label htmlFor="keyboard-search">Search applications and history</label>
       <input
         id="keyboard-search"
         autoFocus
         value={query}
         aria-controls="keyboard-results"
         aria-activedescendant={
-          navigation.selectedId === null
-            ? undefined
-            : `history-option-${navigation.selectedId}`
+          navigation.selectedKey === null ? undefined : `selected-${navigation.selectedKey}`
         }
         onChange={(event) => setQuery(event.currentTarget.value)}
         onKeyDown={handleKeyDown}
       />
-      <HistoryList
-        id="keyboard-results"
+      <PaletteList
         items={items}
-        selectedId={navigation.selectedId}
-        onSelect={navigation.setSelectedId}
+        selectedKey={navigation.selectedKey}
+        onSelect={(entry) => navigation.setSelectedKey(keyOfItem(entry))}
         onActivate={onActivate}
       />
     </>
@@ -85,8 +90,6 @@ const KeyboardHarness = ({ items, onActivate }: KeyboardHarnessProps): React.JSX
 const makeGateway = (search: ClipboardGateway['search']): ClipboardGateway =>
   ({
     search,
-    // The catalog is fetched from the first frame now; these suites care
-    // about the history, so the launcher answers with nothing.
     listApps: vi.fn(async () => []),
     preview: vi.fn(async (eventId: number) => ({
       eventId,
@@ -98,10 +101,18 @@ const makeGateway = (search: ClipboardGateway['search']): ClipboardGateway =>
     })),
     getThumbnail: vi.fn(async () => null),
     linkPreview: vi.fn(async () => null),
-    copyEvent: vi.fn(async () => ({ mode: 'copied', plainText: false })),
+    copyEvent: vi.fn(async () => ({ mode: 'copied' as const, plainText: false })),
+    getAppIcon: vi.fn(async () => null),
   }) as unknown as ClipboardGateway;
 
-describe('HistoryList', () => {
+const bareGateway: ClipboardGateway = {
+  getAppIcon: async () => null,
+} as unknown as ClipboardGateway;
+
+const renderList = (ui: React.JSX.Element): ReturnType<typeof render> =>
+  render(<GatewayProvider gateway={bareGateway}>{ui}</GatewayProvider>);
+
+describe('PaletteList', () => {
   beforeEach(() => {
     vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800);
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(420);
@@ -111,120 +122,113 @@ describe('HistoryList', () => {
     vi.restoreAllMocks();
   });
 
-  it('keeps the DOM bounded for ten thousand clipboard events', () => {
-    render(
-      <HistoryList
-        items={makeItems(10_000)}
-        selectedId={1}
+  it('keeps the DOM bounded for ten thousand mixed rows', () => {
+    renderList(
+      <PaletteList
+        items={buildPaletteItems(makeApps(5_000), makeItems(5_000), 'match')}
+        selectedKey={null}
         onSelect={vi.fn()}
         onActivate={vi.fn()}
       />,
     );
 
-    expect(historyList().getAllByRole('option').length).toBeLessThan(80);
+    expect(paletteList().getAllByRole('option').length).toBeLessThan(80);
   });
 
-  it('exposes listbox options with stable event identity and no nested buttons', () => {
-    render(
-      <HistoryList
-        items={makeItems(3)}
-        selectedId={2}
+  it('exposes options with stable identity and no nested buttons', () => {
+    const items = buildPaletteItems(makeApps(2), makeItems(2), 'match');
+    renderList(
+      <PaletteList
+        items={items}
+        selectedKey={items[1]?.kind === 'app' ? items[1].app.path : null}
         onSelect={vi.fn()}
         onActivate={vi.fn()}
       />,
     );
 
-    const listbox = screen.getByRole('listbox', { name: 'Clipboard history results' });
-    const selectedOption = historyList().getByRole('option', { selected: true });
-
-    expect(listbox).toContainElement(selectedOption);
-    expect(selectedOption).toHaveAttribute('data-event-id', '2');
-    expect(selectedOption).toHaveAttribute('id', 'history-option-2');
+    const listbox = screen.getByRole('listbox', { name: 'Application and history results' });
     expect(listbox.querySelector('button')).toBeNull();
+    const appRow = paletteList().getByRole('option', { name: /Synthetic App 1/ });
+    expect(appRow).toHaveAttribute('data-path', items[0]?.kind === 'app' ? items[0].app.path : '');
+    expect(appRow).toHaveAttribute('id', 'app-option-0');
+    const historyRow = paletteList().getByRole('option', { name: /Synthetic clipboard item 1/ });
+    expect(historyRow).toHaveAttribute('data-event-id', '1');
+    expect(historyRow).toHaveAttribute('id', 'history-option-1');
   });
 
-  it('moves selection with ArrowDown and activates the selected event with Enter', async () => {
+  it('moves selection with ArrowDown across the app/history boundary and activates the right kind', async () => {
     const user = userEvent.setup();
-    const onActivate = vi.fn();
-    render(<KeyboardHarness items={makeItems(3)} onActivate={onActivate} />);
-
-    const input = screen.getByRole('textbox', { name: 'Search history' });
-    expect(input).toHaveFocus();
-
-    await user.keyboard('{ArrowDown}{Enter}');
-
-    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
-      'data-event-id',
-      '2',
+    const activated: string[] = [];
+    const items = buildPaletteItems(makeApps(2), makeItems(2), 'match');
+    renderList(
+      <KeyboardHarness
+        items={items}
+        onActivate={(entry) => {
+          activated.push(
+            entry.kind === 'app' ? `app:${entry.app.path}` : `history:${entry.item.eventId}`,
+          );
+        }}
+      />,
     );
-    expect(onActivate).toHaveBeenCalledWith(2);
+
+    const input = screen.getByRole('textbox', { name: 'Search applications and history' });
+    expect(input).toHaveFocus();
+    // Home to the first row, then Down into the history half.
+    await user.keyboard('{Home}{ArrowDown}');
+
+    const selected = paletteList().getByRole('option', { selected: true });
+    expect(selected).toHaveAttribute('data-event-id', '1');
+    await user.keyboard('{Enter}');
+    expect(activated).toEqual(['history:1']);
+
+    // Home again, Enter on the first application: activation crosses back.
+    await user.keyboard('{Home}{Enter}');
+    expect(activated).toEqual(['history:1', 'app:/Applications/Synthetic App 1.app']);
     expect(input).toHaveFocus();
   });
 
   it('supports Home, End, ArrowUp, and Escape without moving focus from search', async () => {
     const user = userEvent.setup();
-    render(<KeyboardHarness items={makeItems(4)} onActivate={vi.fn()} />);
+    renderList(
+      <KeyboardHarness
+        items={buildPaletteItems(makeApps(2), makeItems(2), 'match')}
+        onActivate={vi.fn()}
+      />,
+    );
 
-    const input = screen.getByRole('textbox', { name: 'Search history' });
+    const input = screen.getByRole('textbox', { name: 'Search applications and history' });
     await user.keyboard('{End}{ArrowUp}');
-    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
-      'data-event-id',
-      '3',
+    // End lands on the last history row; ArrowUp crosses back onto the
+    // last application of the apps half.
+    expect(paletteList().getByRole('option', { selected: true })).toHaveAttribute(
+      'data-path',
+      '/Applications/Synthetic App 2.app',
     );
 
     await user.keyboard('{Home}{Escape}');
-    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
-      'data-event-id',
-      '1',
+    expect(paletteList().getByRole('option', { selected: true })).toHaveAttribute(
+      'data-path',
+      '/Applications/Synthetic App 1.app',
     );
     expect(input).toHaveValue('');
     expect(input).toHaveFocus();
   });
 
-  it('reconciles selection to the first available event when results change', () => {
+  it('reconciles selection to the first row when results change', () => {
     const onActivate = vi.fn();
-    const { rerender } = render(
-      <KeyboardHarness items={makeItems(3)} onActivate={onActivate} />,
+    const { rerender } = renderList(
+      <KeyboardHarness items={buildPaletteItems(makeApps(3), makeItems(3), 'match')} onActivate={onActivate} />,
     );
-
-    rerender(<KeyboardHarness items={makeItems(2, 20)} onActivate={onActivate} />);
-
-    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
-      'data-event-id',
-      '20',
-    );
-  });
-
-  it('commits reconciled selection so a removed event cannot reactivate when reintroduced', async () => {
-    const user = userEvent.setup();
-    const onActivate = vi.fn();
-    const { rerender } = render(
-      <KeyboardHarness items={makeItems(2)} onActivate={onActivate} />,
-    );
-
-    await user.keyboard('{ArrowDown}');
-    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
-      'data-event-id',
-      '2',
-    );
-
-    rerender(<KeyboardHarness items={makeItems(2, 3)} onActivate={onActivate} />);
-    await waitFor(() => {
-      expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
-        'data-event-id',
-        '3',
-      );
-    });
 
     rerender(
-      <KeyboardHarness
-        items={[makeItems(1, 2)[0]!, ...makeItems(2, 3)]}
-        onActivate={onActivate}
-      />,
+      <GatewayProvider gateway={bareGateway}>
+        <KeyboardHarness items={buildPaletteItems(makeApps(2, 20), makeItems(2, 30), 'match')} onActivate={onActivate} />
+      </GatewayProvider>,
     );
-    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
-      'data-event-id',
-      '3',
+
+    expect(paletteList().getByRole('option', { selected: true })).toHaveAttribute(
+      'data-path',
+      '/Applications/Synthetic App 20.app',
     );
   });
 });
@@ -255,9 +259,7 @@ describe('TypeFilter', () => {
   it('clears a manually entered supported type when returning to all items', async () => {
     const user = userEvent.setup();
     const handleQueryChange = vi.fn();
-    render(
-      <TypeFilter query="type:color app:Editor" onQueryChange={handleQueryChange} />,
-    );
+    render(<TypeFilter query="type:color app:Editor" onQueryChange={handleQueryChange} />);
 
     await user.selectOptions(screen.getByRole('combobox', { name: 'Filtr typu' }), 'Wszystkie');
 
@@ -310,8 +312,8 @@ describe('clipboard palette states', () => {
       rankedTruncated: false,
     };
     render(<App gateway={makeGateway(async () => page)} />);
-    await screen.findByRole('listbox', { name: 'Clipboard history results' });
-    const selectedRow = historyList().getByRole('option', {
+    await screen.findByRole('listbox', { name: 'Application and history results' });
+    const selectedRow = paletteList().getByRole('option', {
       name: /Synthetic clipboard item 2/,
     });
     const search = screen.getByRole('searchbox', { name: 'Search applications and history' });
@@ -319,7 +321,7 @@ describe('clipboard palette states', () => {
     await user.click(selectedRow);
 
     expect(search).toHaveFocus();
-    expect(historyList().getByRole('option', { selected: true })).toHaveAttribute(
+    expect(paletteList().getByRole('option', { selected: true })).toHaveAttribute(
       'data-event-id',
       '2',
     );
@@ -333,7 +335,7 @@ describe('clipboard palette states', () => {
       rankedTruncated: false,
     };
     render(<App gateway={makeGateway(async () => page)} />);
-    await screen.findByRole('listbox', { name: 'Clipboard history results' });
+    await screen.findByRole('listbox', { name: 'Application and history results' });
     const search = screen.getByRole('searchbox', { name: 'Search applications and history' });
 
     await user.selectOptions(screen.getByRole('combobox', { name: 'Filtr typu' }), 'Images');
@@ -391,16 +393,16 @@ describe('grouped rows', () => {
       occurrenceCount: 3,
       occurrences: [1_775_000_000_000, 1_774_000_000_000, 1_773_000_000_000],
     };
-    render(
-      <HistoryList
-        items={[grouped, ...single]}
-        selectedId={null}
+    renderList(
+      <PaletteList
+        items={buildPaletteItems([], [grouped, ...single], '')}
+        selectedKey={null}
         onSelect={() => undefined}
         onActivate={() => undefined}
       />,
     );
 
-    const row = historyList().getByRole('option', {
+    const row = paletteList().getByRole('option', {
       name: /Synthetic clipboard item 9/,
     });
     expect(within(row).getByText('×3')).toBeVisible();
@@ -408,12 +410,12 @@ describe('grouped rows', () => {
     // Children of an option are presentational, so the count must also ride
     // the row's own accessible name — that is what a screen reader reads.
     expect(
-      historyList().getByRole('option', {
+      paletteList().getByRole('option', {
         name: /Synthetic clipboard item 9, captured 3 times/u,
       }),
     ).toBe(row);
 
-    const once = historyList().getByRole('option', {
+    const once = paletteList().getByRole('option', {
       name: /Synthetic clipboard item 1/,
     });
     expect(within(once).queryByText('×1')).not.toBeInTheDocument();

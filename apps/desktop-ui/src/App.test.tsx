@@ -61,9 +61,9 @@ describe('the unified palette', () => {
   });
 
   const historyResults = () =>
-    within(screen.getByRole('listbox', { name: 'Clipboard history results' }));
+    within(screen.getByRole('listbox', { name: 'Application and history results' }));
   const appsResults = () =>
-    within(screen.getByRole('listbox', { name: 'Application results' }));
+    within(screen.getByRole('listbox', { name: 'Application and history results' }));
 
   const settleHistory = async (): Promise<void> => {
     await waitFor(() =>
@@ -82,10 +82,21 @@ describe('the unified palette', () => {
     await settleHistory();
 
     // A launcher from the first frame: the whole catalog, alphabetically,
-    // with the recent history underneath it.
-    expect(appsResults().getAllByRole('option').length).toBe(SYNTHETIC_APPS.length);
-    expect(screen.getByRole('heading', { name: 'Aplikacje' })).toBeVisible();
-    expect(screen.getByRole('heading', { name: 'Historia' })).toBeVisible();
+    // with the recent history underneath it — one list, apps first.
+    await waitFor(() =>
+      expect(
+        historyResults()
+          .getAllByRole('option')
+          .some((option) => option.hasAttribute('data-event-id')),
+      ).toBe(true),
+    );
+    const options = historyResults().getAllByRole('option');
+    const appRows = options.filter((option) => option.hasAttribute('data-path'));
+    const firstHistoryRow = options.findIndex((option) =>
+      option.hasAttribute('data-event-id'),
+    );
+    expect(appRows).toHaveLength(SYNTHETIC_APPS.length);
+    expect(firstHistoryRow).toBe(appRows.length);
   });
 
   it('filters applications client-side while typing once fetched', async () => {
@@ -131,10 +142,15 @@ describe('the unified palette', () => {
     await settleApps();
     await settleHistory();
 
-    // A query no application matches: the first selectable row is history.
+    // A query no application matches: every row left is history, so the
+    // first selectable one pastes.
     await user.type(screen.getByRole('searchbox'), 'project note');
     await waitFor(() =>
-      expect(screen.queryByRole('listbox', { name: 'Application results' })).toBeNull(),
+      expect(
+        historyResults()
+          .getAllByRole('option')
+          .filter((option) => option.hasAttribute('data-path')),
+      ).toHaveLength(0),
     );
     await waitFor(() =>
       expect(historyResults().getAllByRole('option').length).toBeGreaterThan(0),
@@ -154,11 +170,11 @@ describe('the unified palette', () => {
 
     // An application holds the selection by default; an application has no
     // payload to preview, so the pane shows nothing of one.
-    await user.type(screen.getByRole('searchbox'), 'terminal');
-    await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
-    expect(screen.queryByText('Synthetic document title')).toBeNull();
+    expect(screen.queryByText('Synthetic project note for browser preview')).toBeNull();
 
-    await user.type(screen.getByRole('searchbox'), '{Backspace}project note');
+    // A query no application matches makes a history row the selection, and
+    // that is what the pane opens for.
+    await user.type(screen.getByRole('searchbox'), 'project note');
     await waitFor(() =>
       expect(screen.getByText('Synthetic project note for browser preview')).toBeVisible(),
     );
@@ -249,7 +265,7 @@ describe('the unified palette', () => {
 
     await user.keyboard('{Tab}');
 
-    expect(screen.getByRole('listbox', { name: 'Clipboard history results' })).toBeInTheDocument();
+    expect(screen.getByRole('listbox', { name: 'Application and history results' })).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Import history' })).toBeVisible();
   });
 });

@@ -14,7 +14,7 @@ import { mockGateway } from '../lib/mockGateway';
 /// options too. An unscoped option query matches both, so a test can pass
 /// while the list it meant to inspect has not loaded at all.
 const historyList = () =>
-  within(screen.getByRole('listbox', { name: 'Clipboard history results' }));
+  within(screen.getByRole('listbox', { name: 'Application and history results' }));
 
 
 /**
@@ -67,6 +67,12 @@ describe('the palette end to end', () => {
     await settle();
 
     const user = userEvent.setup();
+    // The applications sit above the history now; a query only the file
+    // entry matches brings its row into the virtualized window.
+    await user.type(screen.getByRole('searchbox'), 'raport');
+    await waitFor(() =>
+      expect(historyList().getByRole('option', { name: /raport-syntetyczny\.pdf/ })).toBeVisible(),
+    );
     await user.click(historyList().getByRole('option', { name: /raport-syntetyczny\.pdf/ }));
 
     expect(await screen.findByText('Source location')).toBeVisible();
@@ -111,7 +117,7 @@ describe('the palette end to end', () => {
 
     await waitFor(() =>
       expect(
-        within(screen.getByRole('listbox', { name: 'Application results' })).getAllByRole(
+        within(screen.getByRole('listbox', { name: 'Application and history results' })).getAllByRole(
           'option',
         ).length,
       ).toBeGreaterThan(0),

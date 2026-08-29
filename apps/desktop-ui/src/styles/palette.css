@@ -1494,47 +1494,6 @@
   color: var(--ink);
 }
 
-/* The two sections of the palette's left column. The applications keep a
-   bounded height with their own scroll so a large catalog cannot push the
-   history out of sight; the history takes whatever is left. */
-.palette-section {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.palette-section--apps {
-  flex: 0 0 auto;
-}
-
-.palette-section--apps .palette-section__panel {
-  height: 348px;
-  min-height: 0;
-}
-
-.palette-section--history {
-  flex: 1 1 auto;
-}
-
-.palette-section--history .history-panel {
-  flex: 1;
-}
-
-.palette-section__panel {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.palette-section__label {
-  margin: 10px 12px 4px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
 /* The application's own icon, rendered by the core and sent as a data URL.
    Sized for the 31px slot at 2x-free comfort: the slot centers it, the row
    never resizes around it. */

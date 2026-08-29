@@ -797,6 +797,12 @@ async fn get_app_icon_returns_a_decodable_png_for_a_scanned_bundle() {
     let raw = base64_decode_prefix(&icon.base64);
     // A PNG announces itself in eight fixed bytes.
     assert_eq!(&raw[..8], b"\x89PNG\r\n\x1a\n", "the icon is not a PNG");
+    let decoded = image::load_from_memory(&raw).expect("a decodable PNG");
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (64, 64),
+        "the icon ships at the row's size, not the artwork's"
+    );
 
     // The same path asked again answers from the cache: the same bytes,
     // no second round through NSWorkspace and the resizer.
