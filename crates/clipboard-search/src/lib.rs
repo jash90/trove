@@ -290,31 +290,34 @@ fn recent_search(
         let fills = occurrence_fills(connection, &content_ids)?;
         Ok((raw_items, fills))
     })?;
-    let pairs = grouped
-        .0
-        .into_iter()
-        .map(|raw| {
-            let content_id = raw.content_id;
-            Ok((convert_item(raw)?, content_id))
-        })
-        .collect::<Result<Vec<_>, SearchError>>()?;
-    let mut items = attach_group_data(pairs, grouped.1);
-    let has_more = items.len() > limit as usize;
-    if has_more {
-        items.truncate(limit as usize);
-    }
-    let next_cursor = has_more.then(|| {
-        let last = items
-            .last()
-            .expect("a non-zero page with more rows has an item");
+    // The page boundary is decided on the rows the query fetched, before any
+    // vanished group is dropped: deciding it after would let one deletion
+    // between the two reads end the list early even though further groups
+    // exist past the boundary.
+    let has_more = grouped.0.len() > limit as usize;
+    let boundary_cursor = has_more.then(|| {
+        let last = grouped
+            .0
+            .get(limit as usize - 1)
+            .expect("a full page has a last row");
         HistoryCursor {
             captured_at_ms: last.captured_at_ms,
             event_id: last.event_id,
         }
     });
+    let pairs = grouped
+        .0
+        .into_iter()
+        .take(limit as usize)
+        .map(|raw| {
+            let content_id = raw.content_id;
+            Ok((convert_item(raw)?, content_id))
+        })
+        .collect::<Result<Vec<_>, SearchError>>()?;
+    let items = attach_group_data(pairs, grouped.1);
     Ok(HistoryPage {
         items,
-        next_cursor,
+        next_cursor: boundary_cursor,
         ranked_truncated: false,
     })
 }

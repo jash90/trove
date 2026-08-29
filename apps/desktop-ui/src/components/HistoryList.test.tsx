@@ -402,6 +402,13 @@ describe('grouped rows', () => {
     });
     expect(within(row).getByText('×3')).toBeVisible();
     expect(within(row).getByLabelText('Captured 3 times')).toBeVisible();
+    // Children of an option are presentational, so the count must also ride
+    // the row's own accessible name — that is what a screen reader reads.
+    expect(
+      historyList().getByRole('option', {
+        name: /Synthetic clipboard item 9, captured 3 times/u,
+      }),
+    ).toBe(row);
 
     const once = historyList().getByRole('option', {
       name: /Synthetic clipboard item 1/,

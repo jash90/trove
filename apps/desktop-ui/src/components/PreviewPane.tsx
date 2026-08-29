@@ -115,13 +115,15 @@ export const PreviewPane = ({
                       className="preview-metadata__occurrences"
                       aria-label={`Captured ${selectedItem.occurrenceCount} times, newest first`}
                     >
-                      {selectedItem.occurrences.slice(0, MAX_OCCURRENCE_STAMPS).map((capturedAtMs) => (
-                        <li key={capturedAtMs}>
-                          <time dateTime={new Date(capturedAtMs).toISOString()}>
-                            {formatCapturedAt(capturedAtMs)}
-                          </time>
-                        </li>
-                      ))}
+                      {selectedItem.occurrences
+                        .slice(0, MAX_OCCURRENCE_STAMPS)
+                        .map((capturedAtMs, index) => (
+                          <li key={`${index}-${capturedAtMs}`}>
+                            <time dateTime={new Date(capturedAtMs).toISOString()}>
+                              {formatCapturedAt(capturedAtMs)}
+                            </time>
+                          </li>
+                        ))}
                     </ul>
                   </dd>
                 </div>
