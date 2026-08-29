@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 aes-gcm.workspace = true
 base64.workspace = true
-num-bigint-dig.workspace = true
 reqwest.workspace = true
 rsa.workspace = true
 serde.workspace = true

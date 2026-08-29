@@ -42,14 +42,17 @@ pub fn config_from(settings: &AppSettingsDto) -> Result<KeyvaultConfig, String> 
 }
 
 /// Spaces vault reads. A refusal does not move the clock, so a retry after a
-/// denial is not punished for the denial's time.
+/// denial is not punished for the denial's time. A backward wall-clock step
+/// (NTP correction, a manual change) also passes: clamping it to zero would
+/// freeze every read until real time passed the stale mark again.
 pub fn throttle(now_ms: i64) -> Result<(), String> {
     static LAST_REQUEST_MS: OnceLock<Mutex<i64>> = OnceLock::new();
     let mut last = LAST_REQUEST_MS
         .get_or_init(|| Mutex::new(0))
         .lock()
         .expect("the vault throttle lock is only taken briefly");
-    if now_ms.saturating_sub(*last) < MIN_REQUEST_INTERVAL_MS {
+    let elapsed = now_ms - *last;
+    if (0..MIN_REQUEST_INTERVAL_MS).contains(&elapsed) {
         return Err("keyvault_rate_limited".to_owned());
     }
     *last = now_ms;
@@ -71,6 +74,32 @@ pub async fn list_service(state: &AppState) -> Result<Vec<clipboard_keyvault::Se
         .map_err(|error| error.to_string())
 }
 
+/// Fetches one secret, opens it, and hands the plaintext to `write` — which
+/// the clipboard path supplies.
+///
+/// The write is a parameter so a test can be *in* it: arming the suppression
+/// before the write is this module's central promise, and the only assertion
+/// that proves the ordering observes the deadline from inside the write.
+pub async fn copy_secret_with<R: Runtime, T: SecretTransport>(
+    app: &AppHandle<R>,
+    transport: T,
+    config: &KeyvaultConfig,
+    slug: &str,
+    write: impl Fn(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let client = KeyvaultClient::new(transport);
+    let (_name, envelope) = client
+        .fetch_sealed(slug)
+        .await
+        .map_err(|error| error.to_string())?;
+    let private_key = parse_private_jwk(&config.private_jwk).map_err(|error| error.to_string())?;
+    let plaintext = decrypt_envelope(&private_key, &envelope).map_err(|error| error.to_string())?;
+    if let Some(control) = app.try_state::<crate::monitor::MonitorControl>() {
+        control.suppress_next_change(crate::commands::current_time_ms());
+    }
+    write(plaintext.as_str())
+}
+
 /// Fetches one secret, opens it, and puts it on the clipboard.
 ///
 /// Arming the suppression before the write is the same contract as copying an
@@ -84,23 +113,16 @@ pub async fn copy_secret_service<R: Runtime, T: SecretTransport>(
     config: &KeyvaultConfig,
     slug: &str,
 ) -> Result<(), String> {
-    let client = KeyvaultClient::new(transport);
-    let (_name, envelope) = client
-        .fetch_sealed(slug)
-        .await
-        .map_err(|error| error.to_string())?;
-    let private_key = parse_private_jwk(&config.private_jwk).map_err(|error| error.to_string())?;
-    let plaintext = decrypt_envelope(&private_key, &envelope).map_err(|error| error.to_string())?;
-    if let Some(control) = app.try_state::<crate::monitor::MonitorControl>() {
-        control.suppress_next_change(crate::commands::current_time_ms());
-    }
-    // Asked through try_state rather than `clipboard()`: the extension method
-    // panics when the plugin is absent, and "the clipboard is unavailable" is
-    // the honest answer a panic would swallow.
-    match app.try_state::<tauri_plugin_clipboard_manager::Clipboard<R>>() {
-        Some(clipboard) => clipboard
-            .write_text(plaintext.as_str())
-            .map_err(|_| "clipboard_unavailable".to_owned()),
-        None => Err("clipboard_unavailable".to_owned()),
-    }
+    copy_secret_with(app, transport, config, slug, |text| {
+        // Asked through try_state rather than `clipboard()`: the extension
+        // method panics when the plugin is absent, and "the clipboard is
+        // unavailable" is the honest answer a panic would swallow.
+        match app.try_state::<tauri_plugin_clipboard_manager::Clipboard<R>>() {
+            Some(clipboard) => clipboard
+                .write_text(text)
+                .map_err(|_| "clipboard_unavailable".to_owned()),
+            None => Err("clipboard_unavailable".to_owned()),
+        }
+    })
+    .await
 }

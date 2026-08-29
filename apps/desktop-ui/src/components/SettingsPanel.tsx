@@ -116,6 +116,13 @@ const DENYLIST_ERROR = 'The exclusion list holds an invalid entry, or is too lon
 const KEYVAULT_SAVE_FIRST =
   'Save the vault address, token and private key first — the pane reads what is saved.';
 
+/**
+ * The code out of a rejected vault call. The core rejects with the bare code
+ * string — not an Error — so both shapes are read; anything else is unknown.
+ */
+export const vaultErrorCode = (error: unknown): string =>
+  typeof error === 'string' ? error : error instanceof Error ? error.message : '';
+
 /** One plain sentence per vault denial. Codes only reach here; never values. */
 export const keyvaultErrorMessage = (code: string): string => {
   switch (code) {
@@ -313,7 +320,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setVaultSecrets(await gateway.keyvaultList());
     } catch (error) {
       setVaultSecrets(null);
-      setVaultError(keyvaultErrorMessage(error instanceof Error ? error.message : ''));
+      setVaultError(keyvaultErrorMessage(vaultErrorCode(error)));
     }
     setVaultBusy(false);
   };
@@ -329,7 +336,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       await gateway.keyvaultCopySecret(slug);
       setVaultCopiedSlug(slug);
     } catch (error) {
-      setVaultError(keyvaultErrorMessage(error instanceof Error ? error.message : ''));
+      setVaultError(keyvaultErrorMessage(vaultErrorCode(error)));
     }
     setVaultBusy(false);
   };

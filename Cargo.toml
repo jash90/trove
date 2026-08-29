@@ -65,7 +65,6 @@ rusqlite_migration = "2.6.0"
 # contractual reason as the symmetric crates above. getrandom gives the
 # blinding RNG the decrypt path needs.
 rsa = { version = "=0.9.8", features = ["getrandom"] }
-num-bigint-dig = "=0.8.4"
 rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.151"

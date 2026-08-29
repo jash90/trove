@@ -88,10 +88,16 @@ pub fn decrypt_envelope(
     );
     let cipher =
         aes_gcm::Aes256Gcm::new_from_slice(&raw_key).map_err(|_| KeyvaultError::DecryptFailed)?;
-    let plaintext = cipher
-        .decrypt((&envelope.iv).into(), envelope.ciphertext.as_ref())
-        .map_err(|_| KeyvaultError::DecryptFailed)?;
-    String::from_utf8(plaintext)
-        .map(Zeroizing::new)
-        .map_err(|_| KeyvaultError::DecryptFailed)
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt((&envelope.iv).into(), envelope.ciphertext.as_ref())
+            .map_err(|_| KeyvaultError::DecryptFailed)?,
+    );
+    // Validated before the one copy into the returned String: a secret that
+    // authenticates but is not UTF-8 must still leave zeroed bytes behind,
+    // which `String::from_utf8` alone would not guarantee on its error path.
+    let text = str::from_utf8(&plaintext)
+        .map_err(|_| KeyvaultError::DecryptFailed)?
+        .to_owned();
+    Ok(Zeroizing::new(text))
 }

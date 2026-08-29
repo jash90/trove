@@ -95,6 +95,10 @@ fn plain_http_off_loopback_and_broken_urls_are_refused() {
         "vault.example.com",
         "https://vault.example.com:not-a-port/",
         "ftp://vault.example.com",
+        // A path prefix would be silently discarded when requests join onto
+        // the base, so a vault behind a reverse-proxy prefix must be named
+        // wrong at save time, not discovered as inexplicable 404s.
+        "https://vault.example.com/vault",
     ] {
         let bad = config(base, TOKEN, &well_formed_jwk());
         assert_eq!(bad.validate(), Err(KeyvaultError::InvalidUrl), "{base}");

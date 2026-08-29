@@ -401,9 +401,11 @@ describe('keyvault section', () => {
   });
 
   it('surfaces a vault denial as a plain sentence', async () => {
+    // The core rejects with the bare code string, not an Error — the mock
+    // matches that shape so the mapper is exercised the way production runs.
     const gateway = makeGateway({
       keyvaultList: vi.fn(async () => {
-        throw new Error('keyvault_unauthorized');
+        throw 'keyvault_unauthorized';
       }),
     });
     render(<SettingsPanel gateway={gateway} />);

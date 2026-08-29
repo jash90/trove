@@ -18,6 +18,10 @@ pub struct KeyvaultConfig {
 impl KeyvaultConfig {
     /// The URL must be https — except on loopback, where a local Convex
     /// deployment is plain http and there is no wire for anyone else to read.
+    ///
+    /// It must also sit at the host root: a path prefix would be silently
+    /// discarded when requests are joined, and a vault behind a reverse-proxy
+    /// prefix would fail every request with nothing naming the mistake.
     pub fn validate(&self) -> Result<(), KeyvaultError> {
         let url = url::Url::parse(self.base_url.trim()).map_err(|_| KeyvaultError::InvalidUrl)?;
         let loopback = matches!(
@@ -28,6 +32,9 @@ impl KeyvaultConfig {
             "https" => {}
             "http" if loopback => {}
             _ => return Err(KeyvaultError::InvalidUrl),
+        }
+        if url.path() != "/" {
+            return Err(KeyvaultError::InvalidUrl);
         }
 
         let body = self

@@ -140,12 +140,26 @@ pub struct AppSettingsDto {
 /// Stored as this application's settings, which is a plaintext row in the
 /// local database — the same trust boundary the database itself already sits
 /// on. Never echoed into a log, an error, or a Debug print anywhere.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KeyvaultSettingsDto {
     pub url: Option<String>,
     pub token: Option<String>,
     pub private_jwk: Option<String>,
+}
+
+/// Debug by hand, redacting the two fields that must never reach a print:
+/// the crate layer refuses `Debug` on the same values for the same reason,
+/// and a derived impl here would be the one-step-away version of that leak.
+impl std::fmt::Debug for KeyvaultSettingsDto {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("KeyvaultSettingsDto")
+            .field("url", &self.url)
+            .field("token", &"<redacted>")
+            .field("private_jwk", &"<redacted>")
+            .finish()
+    }
 }
 
 impl KeyvaultSettingsDto {

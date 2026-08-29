@@ -1621,27 +1621,32 @@ async fn copying_a_key_opens_it_suppresses_capture_and_never_returns_it() {
         private_jwk: jwk_json_for(&holder),
     };
 
-    let outcome = clipboard_history_app::keyvault::copy_secret_service(
+    let outcome = clipboard_history_app::keyvault::copy_secret_with(
         app.handle(),
         CannedVault::with(vec![CannedVault::json(200, &envelope_body)]),
         &config,
         "openai",
+        |text| {
+            // The write is the one place that can prove the ordering this
+            // module promises: the suppression must already cover "now" by
+            // the time any clipboard write is attempted, so a fetched key can
+            // never be recorded as a fresh capture.
+            assert!(
+                app.state::<clipboard_history_app::monitor::MonitorControl>()
+                    .suppression_deadline_active(
+                        clipboard_history_app::commands::current_time_ms()
+                    )
+            );
+            assert_eq!(text, "sklejka-klucz");
+            Err("clipboard_unavailable".to_owned())
+        },
     )
     .await;
 
-    // The mock app registers no clipboard plugin, so the last step of a
-    // successful copy reports clipboard_unavailable. Anything keyvault_* here
-    // would mean the envelope or the key failed to open; reaching the
-    // clipboard means the plaintext existed in between and was consumed.
+    // The refusal is the write's, not the vault's: anything keyvault_* here
+    // would mean the envelope or the key failed to open; reaching the write
+    // means the plaintext existed and was consumed.
     assert_eq!(outcome.unwrap_err(), "clipboard_unavailable");
-
-    // Arming happened before the write: the monitor must not record a fetched
-    // key as a fresh capture, which would put it in the history this
-    // application exists to keep private.
-    assert!(
-        app.state::<clipboard_history_app::monitor::MonitorControl>()
-            .suppression_deadline_active(clipboard_history_app::commands::current_time_ms())
-    );
 
     // Nothing in this command's result or the store carries the key: the
     // store never saw a capture for it at all.
@@ -1658,5 +1663,26 @@ fn the_vault_read_throttle_spaces_requests() {
         clipboard_history_app::keyvault::throttle(10_500),
         Err("keyvault_rate_limited".to_owned())
     );
+    // A backward wall-clock step passes instead of freezing every read
+    // until real time catches up to the stale mark.
+    assert_eq!(clipboard_history_app::keyvault::throttle(9_000), Ok(()));
+    assert_eq!(
+        clipboard_history_app::keyvault::throttle(9_050),
+        Err("keyvault_rate_limited".to_owned())
+    );
     assert_eq!(clipboard_history_app::keyvault::throttle(20_000), Ok(()));
+}
+
+#[test]
+fn keyvault_settings_debug_redacts_the_token_and_the_key() {
+    let settings = vault_settings();
+    let token = settings.keyvault.token.clone().unwrap_or_default();
+    let private_jwk = settings.keyvault.private_jwk.clone().unwrap_or_default();
+    let rendered = format!("{settings:?}");
+
+    assert!(!rendered.contains(&token), "the token must not print");
+    assert!(!rendered.contains(&private_jwk), "the key must not print");
+    assert!(rendered.contains("<redacted>"));
+    // The address is not a secret; a Debug with nothing in it is useless.
+    assert!(rendered.contains("trustworthy-eagle-783"));
 }
