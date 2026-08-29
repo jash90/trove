@@ -527,6 +527,7 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "reveal_source",
             "list_apps",
             "launch_app",
+            "get_app_icon",
             "open_settings_window",
             "export_history",
             "get_link_preview",
@@ -708,6 +709,84 @@ async fn launch_app_refuses_paths_the_scanner_did_not_find() {
             assert!(!error.contains(candidate));
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn get_app_icon_returns_a_decodable_png_for_a_scanned_bundle() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = AppState::open_data_dir(directory.path()).unwrap();
+    let apps_root = tempfile::tempdir().unwrap();
+    make_synthetic_app(apps_root.path(), "Iconed.app", "Iconed");
+    state.launcher = LauncherState::scanning(vec![apps_root.path().to_path_buf()]);
+    let path = apps_root
+        .path()
+        .join("Iconed.app")
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    let icon = commands::get_app_icon_service(&state, path.clone())
+        .await
+        .unwrap()
+        .expect("a scanned bundle owes an icon, the generic one at worst");
+
+    assert_eq!(icon.mime_type, "image/png");
+    let raw = base64_decode_prefix(&icon.base64);
+    // A PNG announces itself in eight fixed bytes.
+    assert_eq!(&raw[..8], b"\x89PNG\r\n\x1a\n", "the icon is not a PNG");
+
+    // The same path asked again answers from the cache: the same bytes,
+    // no second round through NSWorkspace and the resizer.
+    let again = commands::get_app_icon_service(&state, path)
+        .await
+        .unwrap()
+        .expect("the cached icon must still be there");
+    assert_eq!(again.base64, icon.base64);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn get_app_icon_refuses_paths_the_scanner_did_not_find() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = AppState::open_data_dir(directory.path()).unwrap();
+    let apps_root = tempfile::tempdir().unwrap();
+    make_synthetic_app(apps_root.path(), "Inside.app", "Inside");
+    state.launcher = LauncherState::scanning(vec![apps_root.path().to_path_buf()]);
+    let outside_root = tempfile::tempdir().unwrap();
+    make_synthetic_app(outside_root.path(), "Outside.app", "Outside");
+
+    let missing = apps_root
+        .path()
+        .join("Missing.app")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let outside = outside_root
+        .path()
+        .join("Outside.app")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let cases: &[(&str, &str)] = &[
+        (missing.as_str(), "app_not_found"),
+        (outside.as_str(), "app_outside_roots"),
+    ];
+    for (candidate, expected) in cases {
+        let error = commands::get_app_icon_service(&state, candidate.to_string())
+            .await
+            .unwrap_err();
+        assert_eq!(error, *expected);
+        assert!(!error.contains(candidate));
+    }
+}
+
+/// Decodes just enough base64 to check a magic prefix.
+fn base64_decode_prefix(value: &str) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(value.as_bytes())
+        .unwrap()
 }
 
 #[tokio::test]

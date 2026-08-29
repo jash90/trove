@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use clipboard_import::ImportService;
 use clipboard_launcher::AppBundle;
 use clipboard_store::{StoreConfig, StoreHandle};
+use serde::Serialize;
 use tauri::Manager;
 
 /// How long a launcher catalog stays answerable without a rescan. Scanning a
@@ -11,6 +13,14 @@ use tauri::Manager;
 /// on every entry; five minutes bounds how long a freshly installed
 /// application can stay invisible.
 pub const LAUNCHER_CACHE_TTL_MS: i64 = 5 * 60 * 1000;
+
+/// One rendered application icon, in the shape the bridge carries images.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppIconDto {
+    pub mime_type: String,
+    pub base64: String,
+}
 
 /// The application catalog and the roots it was scanned from.
 ///
@@ -21,6 +31,11 @@ pub const LAUNCHER_CACHE_TTL_MS: i64 = 5 * 60 * 1000;
 pub struct LauncherState {
     roots: Arc<[PathBuf]>,
     cached: Arc<Mutex<Option<CachedCatalog>>>,
+    /// Rendered icons, remembered per canonical path. An icon is a fact
+    /// about a bundle that changes only with the bundle, so it outlives the
+    /// catalog's TTL; the map grows with the distinct applications actually
+    /// shown, which the virtualized list keeps to a handful at a time.
+    icons: Arc<Mutex<HashMap<String, AppIconDto>>>,
 }
 
 struct CachedCatalog {
@@ -33,6 +48,7 @@ impl LauncherState {
         Self {
             roots: Arc::from(roots),
             cached: Arc::new(Mutex::new(None)),
+            icons: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -61,6 +77,26 @@ impl LauncherState {
             catalog: catalog.clone(),
         });
         catalog
+    }
+
+    /// Returns the rendered icon for a catalog path, remembered after the
+    /// first answer. Validation refusals are the caller's to report — they
+    /// say the path was never listed, which no cache should paper over.
+    pub fn icon(
+        &self,
+        canonical: &str,
+        render: impl FnOnce() -> Option<AppIconDto>,
+    ) -> Option<AppIconDto> {
+        let mut icons = self
+            .icons
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(icon) = icons.get(canonical) {
+            return Some(icon.clone());
+        }
+        let rendered = render()?;
+        icons.insert(canonical.to_owned(), rendered.clone());
+        Some(rendered)
     }
 }
 

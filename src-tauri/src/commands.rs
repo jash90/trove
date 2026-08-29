@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+use crate::state::AppIconDto;
+
 const APP_SETTINGS_KEY: &str = "app";
 const DEFAULT_HOTKEY: &str = "CommandOrControl+Shift+V";
 const MAX_HOTKEY_BYTES: usize = 128;
@@ -44,6 +46,7 @@ macro_rules! clipboard_history_command_registry {
             reveal_source => $crate::commands::reveal_source,
             list_apps => $crate::commands::list_apps,
             launch_app => $crate::commands::launch_app,
+            get_app_icon => $crate::commands::get_app_icon,
             open_settings_window => $crate::commands::open_settings_window,
             export_history => $crate::commands::export_history,
             get_link_preview => $crate::commands::get_link_preview,
@@ -383,6 +386,65 @@ pub async fn launch_app<R: tauri::Runtime>(
         let _ = window.hide();
     }
     Ok(())
+}
+
+/// The side an application icon is rendered to. Double the ~31 CSS pixels
+/// the row slot shows, so a retina screen gets real pixels instead of a
+/// stretched guess.
+const APP_ICON_DIMENSION: u32 = 64;
+
+/// Renders one application's icon as a small PNG, or `None` when there is
+/// nothing to draw. Validation refusals surface as the launcher's stable
+/// codes — an icon request for a path the scanner never listed is a
+/// question about a path, not about an icon.
+pub async fn get_app_icon_service(
+    state: &AppState,
+    path: String,
+) -> Result<Option<AppIconDto>, String> {
+    let launcher = state.launcher.clone();
+    let roots = state.launcher.roots().to_vec();
+    run_blocking("icon_unavailable", move || {
+        let canonical = clipboard_launcher::validate_launch_path(&path, &roots)
+            .map_err(|error| error.code().to_owned())?;
+        let canonical = canonical.to_str().ok_or("launch_invalid")?.to_owned();
+        // No icon to draw is an answer, not a failure — the row falls back
+        // to its glyph and carries on.
+        let Some(icon) = launcher.icon(&canonical, || render_app_icon(&canonical)) else {
+            return Ok(None);
+        };
+        Ok(Some(icon))
+    })
+    .await
+}
+
+fn render_app_icon(canonical: &str) -> Option<AppIconDto> {
+    #[cfg(target_os = "macos")]
+    {
+        let tiff = platform_macos::application_icon_tiff(canonical)?;
+        // The same bounded bytes→PNG road thumbnails take: icon TIFFs of
+        // 1024px artwork can be megabytes, and the row needs 64 of them.
+        let png = clipboard_images::make_thumbnail(&tiff, APP_ICON_DIMENSION).ok()?;
+        let base64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        Some(AppIconDto {
+            mime_type: "image/png".to_owned(),
+            base64,
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // No workspace to ask; the row falls back to its glyph rather than
+        // pretending every application shares one picture.
+        let _ = canonical;
+        None
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_app_icon(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<Option<AppIconDto>, String> {
+    get_app_icon_service(state.inner(), path).await
 }
 
 /// Starts an application bundle. The validated path is passed as a single
