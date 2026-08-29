@@ -50,6 +50,8 @@ macro_rules! clipboard_history_command_registry {
             open_settings_window => $crate::commands::open_settings_window,
             export_history => $crate::commands::export_history,
             get_link_preview => $crate::commands::get_link_preview,
+            keyvault_list => $crate::commands::keyvault_list,
+            keyvault_copy_secret => $crate::commands::keyvault_copy_secret,
         }
     };
 }
@@ -129,6 +131,66 @@ pub struct AppSettingsDto {
     /// existed still reads.
     #[serde(default = "default_link_previews")]
     pub link_previews: bool,
+    /// Where the keyvault pane looks, when it is configured at all.
+    ///
+    /// Defaulted through serde so a settings row written before it existed
+    /// still reads. All three fields or none: a half-configured vault is a
+    /// settings error, not a surprise at copy time.
+    #[serde(default)]
+    pub keyvault: KeyvaultSettingsDto,
+}
+
+/// The keyvault connection: base URL, bearer token, and the device-side
+/// private key that opens what the vault seals.
+///
+/// Stored as this application's settings, which is a plaintext row in the
+/// local database — the same trust boundary the database itself already sits
+/// on. Never echoed into a log, an error, or a Debug print anywhere.
+#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KeyvaultSettingsDto {
+    pub url: Option<String>,
+    pub token: Option<String>,
+    pub private_jwk: Option<String>,
+}
+
+/// Debug by hand, redacting the two fields that must never reach a print:
+/// the crate layer refuses `Debug` on the same values for the same reason,
+/// and a derived impl here would be the one-step-away version of that leak.
+impl std::fmt::Debug for KeyvaultSettingsDto {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("KeyvaultSettingsDto")
+            .field("url", &self.url)
+            .field("token", &"<redacted>")
+            .field("private_jwk", &"<redacted>")
+            .finish()
+    }
+}
+
+impl KeyvaultSettingsDto {
+    /// The three fields, present and non-blank, or nothing.
+    pub(crate) fn resolved(&self) -> Option<(String, String, String)> {
+        let field = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        Some((
+            field(&self.url)?,
+            field(&self.token)?,
+            field(&self.private_jwk)?,
+        ))
+    }
+
+    /// Whether every field is absent or blank: the unconfigured state.
+    fn is_blank(&self) -> bool {
+        let blank =
+            |value: &Option<String>| value.as_deref().map(str::trim).is_none_or(str::is_empty);
+        blank(&self.url) && blank(&self.token) && blank(&self.private_jwk)
+    }
 }
 
 /// Link previews are on by default, which was a deliberate choice: it is the
@@ -147,6 +209,7 @@ impl Default for AppSettingsDto {
             retention_days: None,
             denylisted_apps: Vec::new(),
             link_previews: default_link_previews(),
+            keyvault: KeyvaultSettingsDto::default(),
         }
     }
 }
@@ -326,9 +389,27 @@ pub async fn set_pinned_service(
 }
 
 pub async fn delete_event_service(state: &AppState, event_id: i64) -> Result<(), String> {
+    // The list shows one row per distinct content, so removing the row the
+    // user sees removes the whole group behind it, not one occurrence.
+    let store = state.store.clone();
+    let content_id = run_blocking("history_write_failed", move || {
+        store
+            .with_reader(|connection| {
+                connection
+                    .query_row(
+                        "SELECT content_id FROM history_event WHERE event_id = ?1",
+                        [event_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+            })
+            .map_err(|error| store_error_code(&error, "history_read_failed"))
+    })
+    .await?
+    .ok_or_else(|| "history_event_not_found".to_owned())?;
     state
         .store
-        .delete_event(event_id)
+        .delete_events_for_content(content_id)
         .await
         .map_err(|error| store_error_code(&error, "history_write_failed"))
 }
@@ -950,7 +1031,7 @@ pub async fn get_thumbnail(
 /// The alternative — treating a read failure as "deny all" — would silently
 /// stop recording, and a clipboard manager that quietly keeps nothing is worse
 /// than one that keeps too much.
-fn current_time_ms() -> i64 {
+pub fn current_time_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
@@ -988,7 +1069,7 @@ pub async fn get_settings_service(state: &AppState) -> Result<AppSettingsDto, St
     .await
 }
 
-fn get_settings_blocking(store: &StoreHandle) -> Result<AppSettingsDto, String> {
+pub(crate) fn get_settings_blocking(store: &StoreHandle) -> Result<AppSettingsDto, String> {
     let settings = match store.get_setting(APP_SETTINGS_KEY) {
         Ok(Some(value_json)) => {
             serde_json::from_str(&value_json).map_err(|_| "invalid_settings".to_owned())?
@@ -1027,8 +1108,16 @@ pub async fn save_settings_with_app<R: tauri::Runtime>(
 
 pub async fn save_settings_service(
     state: &AppState,
-    settings: AppSettingsDto,
+    mut settings: AppSettingsDto,
 ) -> Result<AppSettingsDto, String> {
+    // A cleared keyvault field arrives as an empty string from the form;
+    // storing it as absent keeps the row saying what it means.
+    let keyvault = KeyvaultSettingsDto {
+        url: normalize_keyvault_field(&settings.keyvault.url),
+        token: normalize_keyvault_field(&settings.keyvault.token),
+        private_jwk: normalize_keyvault_field(&settings.keyvault.private_jwk),
+    };
+    settings.keyvault = keyvault;
     validate_settings(&settings)?;
     let value_json = serde_json::to_string(&settings).map_err(|_| "invalid_settings".to_owned())?;
     state
@@ -1039,9 +1128,43 @@ pub async fn save_settings_service(
     Ok(settings)
 }
 
+fn normalize_keyvault_field(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppSettingsDto, String> {
     get_settings_service(state.inner()).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn keyvault_list(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<clipboard_keyvault::SecretRef>, String> {
+    crate::keyvault::throttle(current_time_ms())?;
+    crate::keyvault::list_service(state.inner()).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn keyvault_copy_secret<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    slug: String,
+) -> Result<(), String> {
+    crate::keyvault::throttle(current_time_ms())?;
+    let store = state.store.clone();
+    let settings = run_blocking("settings_unavailable", move || {
+        get_settings_blocking(&store)
+    })
+    .await?;
+    let config = crate::keyvault::config_from(&settings)?;
+    let transport = clipboard_keyvault::ReqwestSecretTransport::new(&config)
+        .map_err(|error| error.to_string())?;
+    crate::keyvault::copy_secret_service(&app, transport, &config, &slug).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1053,7 +1176,7 @@ pub async fn save_settings<R: tauri::Runtime>(
     save_settings_with_app(&app, state.inner(), settings).await
 }
 
-async fn run_blocking<T>(
+pub(crate) async fn run_blocking<T>(
     unavailable_code: &'static str,
     operation: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String>
@@ -1317,7 +1440,23 @@ fn validate_settings(settings: &AppSettingsDto) -> Result<(), String> {
                 && !app.chars().any(char::is_control)
                 && unique_apps.insert(app.as_str())
         });
-    if settings.schema_version != 1 || !retention_is_valid || !hotkey_is_valid || !denylist_is_valid
+    // All three fields or none: a half-configured vault is a settings error,
+    // not a surprise at copy time.
+    let keyvault_is_valid = match settings.keyvault.resolved() {
+        None => settings.keyvault.is_blank(),
+        Some((url, token, private_jwk)) => clipboard_keyvault::KeyvaultConfig {
+            base_url: url,
+            token,
+            private_jwk,
+        }
+        .validate()
+        .is_ok(),
+    };
+    if settings.schema_version != 1
+        || !retention_is_valid
+        || !hotkey_is_valid
+        || !denylist_is_valid
+        || !keyvault_is_valid
     {
         return Err("invalid_settings".to_owned());
     }

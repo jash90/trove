@@ -33,6 +33,8 @@ const makeItems = (count: number, startAt = 1): HistoryItem[] =>
       preview: `Synthetic clipboard item ${eventId}`,
       byteSize: 32,
       hasThumbnail: false,
+      occurrenceCount: 1,
+      occurrences: [1_775_000_000_000 - index * 1_000],
     };
   });
 
@@ -369,5 +371,52 @@ describe('clipboard palette states', () => {
     expect(alert).toHaveTextContent('The history could not be loaded');
     expect(alert).not.toHaveTextContent('private');
     expect(alert).not.toHaveTextContent('archive.json');
+  });
+});
+
+describe('grouped rows', () => {
+  beforeEach(() => {
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(420);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('shows how many times a repeated capture was recorded, and hides the badge for one', () => {
+    const single = makeItems(2);
+    const grouped: HistoryItem = {
+      ...makeItems(1, 9)[0]!,
+      occurrenceCount: 3,
+      occurrences: [1_775_000_000_000, 1_774_000_000_000, 1_773_000_000_000],
+    };
+    render(
+      <HistoryList
+        items={[grouped, ...single]}
+        selectedId={null}
+        onSelect={() => undefined}
+        onActivate={() => undefined}
+      />,
+    );
+
+    const row = historyList().getByRole('option', {
+      name: /Synthetic clipboard item 9/,
+    });
+    expect(within(row).getByText('×3')).toBeVisible();
+    expect(within(row).getByLabelText('Captured 3 times')).toBeVisible();
+    // Children of an option are presentational, so the count must also ride
+    // the row's own accessible name — that is what a screen reader reads.
+    expect(
+      historyList().getByRole('option', {
+        name: /Synthetic clipboard item 9, captured 3 times/u,
+      }),
+    ).toBe(row);
+
+    const once = historyList().getByRole('option', {
+      name: /Synthetic clipboard item 1/,
+    });
+    expect(within(once).queryByText('×1')).not.toBeInTheDocument();
+    expect(within(once).queryByLabelText(/Captured \d+ times/)).not.toBeInTheDocument();
   });
 });

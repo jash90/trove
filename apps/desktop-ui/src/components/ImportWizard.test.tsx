@@ -79,6 +79,7 @@ const settings: AppSettings = {
   retentionDays: 30,
   denylistedApps: [],
   linkPreviews: true,
+  keyvault: { url: null, token: null, privateJwk: null },
 };
 
 const stats: StorageStats = {
@@ -211,6 +212,8 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
     isAutostartEnabled: vi.fn(async () => false),
     setAutostartEnabled: vi.fn(async () => undefined),
     getStorageStats: vi.fn(async () => stats),
+    keyvaultList: vi.fn(async () => []),
+    keyvaultCopySecret: vi.fn(async () => undefined),
     ...overrides,
   }) as ClipboardGateway;
 

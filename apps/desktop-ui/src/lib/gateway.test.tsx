@@ -36,6 +36,7 @@ const settings: AppSettings = {
   retentionDays: null,
   denylistedApps: [],
   linkPreviews: true,
+  keyvault: { url: null, token: null, privateJwk: null },
 };
 
 const progress: ImportProgress = {
@@ -217,5 +218,15 @@ describe('GatewayProvider', () => {
     const { result } = renderHook(() => useGateway(), { wrapper });
 
     expect(result.current).toBe(tauriGateway);
+  });
+});
+
+describe('keyvault gateway calls', () => {
+  it('delivers a core rejection as the bare code string, not an Error', async () => {
+    // The core's Result<T, String> commands reject invoke with the string
+    // itself; the settings pane's error mapper depends on that shape.
+    vi.mocked(invoke).mockRejectedValueOnce('keyvault_unauthorized');
+
+    await expect(tauriGateway.keyvaultList()).rejects.toBe('keyvault_unauthorized');
   });
 });

@@ -7,6 +7,7 @@ members = [
   "crates/clipboard-search",
   "crates/clipboard-images",
   "crates/clipboard-import",
+  "crates/clipboard-keyvault",
   "crates/clipboard-launcher",
   "crates/clipboard-link-preview",
   "crates/platform-macos",
@@ -26,6 +27,9 @@ license = "MIT"
 aes = "=0.8.4"
 anyhow = "1.0"
 allocation-counter = "=0.8.1"
+# Pinned exactly like the other cipher crates: envelope decryption is
+# contractual against the keyvault server's Web Crypto sealing.
+aes-gcm = "=0.10.3"
 base64 = "0.23.1"
 bitflags = { version = "2.13.1", features = ["serde"] }
 blake3 = "1.8.7"
@@ -67,6 +71,10 @@ resvg = "=0.46.0"
 reqwest = { version = "=0.13.4", default-features = false, features = ["native-tls", "charset"] }
 rusqlite = { version = "0.40.2", features = ["backup", "bundled", "cache"] }
 rusqlite_migration = "2.6.0"
+# RSA-OAEP unwrap of the keyvault agent envelope; pinned for the same
+# contractual reason as the symmetric crates above. getrandom gives the
+# blinding RNG the decrypt path needs.
+rsa = { version = "=0.9.8", features = ["getrandom"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.151"

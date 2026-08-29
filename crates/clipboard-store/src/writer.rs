@@ -735,6 +735,14 @@ enum WriteCommand {
         event_id: i64,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    PruneOccurrences {
+        max_events: u32,
+        reply: oneshot::Sender<Result<PruneOutcome, StoreError>>,
+    },
+    DeleteEventsForContent {
+        content_id: i64,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     SaveSetting {
         key: String,
         value_json: String,
@@ -948,6 +956,41 @@ impl StoreHandle {
             .runtime
             .writer_sender()?
             .send(WriteCommand::DeleteEvent { event_id, reply })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    /// Deletes occurrence rows a database written before the cap accumulated.
+    ///
+    /// Bounded for the same reason retention is: the writer is shared with
+    /// capture, so a long cleanup must not hold the queue.
+    pub async fn prune_occurrence_events(
+        &self,
+        max_events: u32,
+    ) -> Result<PruneOutcome, StoreError> {
+        let (reply, response) = oneshot::channel();
+        self.runtime
+            .runtime
+            .writer_sender()?
+            .send(WriteCommand::PruneOccurrences { max_events, reply })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    /// Deletes every occurrence of one content: the list shows a group per
+    /// distinct payload, so removing the visible group removes the whole group.
+    pub async fn delete_events_for_content(&self, content_id: i64) -> Result<(), StoreError> {
+        let (reply, response) = oneshot::channel();
+        self.runtime
+            .runtime
+            .writer_sender()?
+            .send(WriteCommand::DeleteEventsForContent { content_id, reply })
             .await
             .map_err(|_| StoreError::WriterClosed)?;
         response
@@ -1289,6 +1332,16 @@ fn handle_command(
         WriteCommand::DeleteEvent { event_id, reply } => {
             let _ = reply.send(with_storage_boundary(boundary, || {
                 delete_event(connection, event_id)
+            }));
+        }
+        WriteCommand::PruneOccurrences { max_events, reply } => {
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                prune_occurrence_events(connection, max_events)
+            }));
+        }
+        WriteCommand::DeleteEventsForContent { content_id, reply } => {
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                delete_events_for_content(connection, content_id)
             }));
         }
         WriteCommand::SaveSetting {
@@ -1913,10 +1966,22 @@ fn store_thumbnail(
 
 fn set_pinned(connection: &mut Connection, event_id: i64, pinned: bool) -> Result<(), StoreError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let updated = transaction.execute(
-        "UPDATE history_event SET pinned = ?1 WHERE event_id = ?2",
-        params![i64::from(pinned), event_id],
-    )?;
+    let updated = if pinned {
+        transaction.execute(
+            "UPDATE history_event SET pinned = ?1 WHERE event_id = ?2",
+            params![i64::from(pinned), event_id],
+        )?
+    } else {
+        // Unpinning clears the whole group. The list shows one row per
+        // content, and a pinned older occurrence would otherwise keep the row
+        // pinned — and surviving retention — with no way to unpin it from the
+        // interface that shows it.
+        transaction.execute(
+            "UPDATE history_event SET pinned = 0
+             WHERE content_id = (SELECT content_id FROM history_event WHERE event_id = ?1)",
+            [event_id],
+        )?
+    };
     if updated == 0 {
         return Err(StoreError::HistoryEventNotFound);
     }
@@ -2200,10 +2265,124 @@ fn write_ingest(
             }
         }
     }
+    prune_occurrences(transaction, content_id, event_id)?;
     Ok(IngestOutcome {
         content_id,
         event_id,
     })
+}
+
+/// How many captures of one distinct payload are kept as separate events.
+pub const MAX_OCCURRENCES_PER_CONTENT: u32 = 5;
+
+/// Collapses repeated captures of one content to the occurrence cap.
+///
+/// Pinned rows always survive: pinning is the user saying "keep this", which
+/// outranks the cap. The row inserted by the surrounding ingest is spared even
+/// when a historical timestamp ranks it below the cap — its id has already been
+/// promised to the caller (an import writes it into `import_record`), and the
+/// maintenance sweep converges on the cap later without that promise to keep.
+fn prune_occurrences(
+    transaction: &Transaction<'_>,
+    content_id: i64,
+    inserted_event_id: i64,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "DELETE FROM history_event
+         WHERE content_id = ?1 AND pinned = 0 AND event_id != ?2
+           AND event_id NOT IN (
+             SELECT event_id FROM history_event WHERE content_id = ?1
+             ORDER BY captured_at_ms DESC, event_id DESC LIMIT ?3
+           )",
+        params![
+            content_id,
+            inserted_event_id,
+            i64::from(MAX_OCCURRENCES_PER_CONTENT),
+        ],
+    )?;
+    Ok(())
+}
+
+/// What one occurrence sweep pass did.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PruneOutcome {
+    pub deleted_events: u64,
+    pub more_remaining: bool,
+}
+
+fn prune_occurrence_events(
+    connection: &mut Connection,
+    max_events: u32,
+) -> Result<PruneOutcome, StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Same rule as the in-ingest prune, stated as a count so it can be batched:
+    // a row goes when it is unpinned and five newer occurrences of its content
+    // exist. The order keeps the sweep moving oldest-first across groups.
+    //
+    // Candidates are narrowed to over-cap contents first, through a
+    // covering-index aggregate. A converged database — the steady state, since
+    // ingest prunes inline — costs one index scan to answer "nothing
+    // qualifies", not a correlated probe per row: the sweep runs every fifteen
+    // minutes on the writer queue capture shares, and a full-table probe per
+    // row is exactly the unbounded pass the queue must never sit behind.
+    let deleted = transaction.execute(
+        "DELETE FROM history_event
+         WHERE event_id IN (
+           WITH over_cap AS (
+             SELECT content_id FROM history_event
+             GROUP BY content_id HAVING count(*) > ?2
+           )
+           SELECT candidate.event_id
+           FROM history_event candidate
+           JOIN over_cap ON over_cap.content_id = candidate.content_id
+           WHERE candidate.pinned = 0
+             AND (SELECT count(*) FROM history_event newer
+                  WHERE newer.content_id = candidate.content_id
+                    AND (newer.captured_at_ms, newer.event_id)
+                      > (candidate.captured_at_ms, candidate.event_id)) >= ?2
+           ORDER BY candidate.captured_at_ms, candidate.event_id
+           LIMIT ?1
+         )",
+        params![
+            i64::from(max_events),
+            i64::from(MAX_OCCURRENCES_PER_CONTENT),
+        ],
+    )?;
+    let more_remaining = transaction.query_row(
+        "WITH over_cap AS (
+           SELECT content_id FROM history_event
+           GROUP BY content_id HAVING count(*) > ?1
+         )
+         SELECT EXISTS(
+           SELECT 1 FROM history_event candidate
+           JOIN over_cap ON over_cap.content_id = candidate.content_id
+           WHERE candidate.pinned = 0
+             AND (SELECT count(*) FROM history_event newer
+                  WHERE newer.content_id = candidate.content_id
+                    AND (newer.captured_at_ms, newer.event_id)
+                      > (candidate.captured_at_ms, candidate.event_id)) >= ?1
+         )",
+        [i64::from(MAX_OCCURRENCES_PER_CONTENT)],
+        |row| row.get::<_, bool>(0),
+    )?;
+    transaction.commit()?;
+    Ok(PruneOutcome {
+        deleted_events: deleted as u64,
+        more_remaining,
+    })
+}
+
+fn delete_events_for_content(
+    connection: &mut Connection,
+    content_id: i64,
+) -> Result<(), StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "DELETE FROM history_event WHERE content_id = ?1",
+        [content_id],
+    )?;
+    transaction.commit()?;
+    Ok(())
 }
 
 fn original_preview(

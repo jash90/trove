@@ -59,6 +59,16 @@ impl MonitorControl {
         );
     }
 
+    /// Whether a suppression armed earlier still covers `now_ms`.
+    ///
+    /// Reading without consuming, for tests that need to see the arming
+    /// happen rather than prove it by what the monitor then ignores.
+    #[doc(hidden)]
+    pub fn suppression_deadline_active(&self, now_ms: i64) -> bool {
+        let deadline = self.inner.suppress_until_ms.load(Ordering::Relaxed);
+        deadline != 0 && now_ms <= deadline
+    }
+
     /// Consumes an armed suppression. Returns true when this change was ours.
     fn take_suppression(&self, now_ms: i64) -> bool {
         let deadline = self.inner.suppress_until_ms.swap(0, Ordering::Relaxed);

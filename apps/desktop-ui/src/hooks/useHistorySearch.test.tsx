@@ -17,6 +17,8 @@ const makePage = (preview: string): HistoryPage => ({
       preview,
       byteSize: preview.length,
       hasThumbnail: false,
+      occurrenceCount: 1,
+      occurrences: [1_775_000_000_000],
     },
   ],
   nextCursor: null,

@@ -14,6 +14,7 @@ import {
   type CopyResult,
   type ExportSummary,
   type HistoryPage,
+  type KeyvaultSecret,
   type LinkPreview,
   type ImportAnalysis,
   type ImportProgress,
@@ -47,6 +48,13 @@ export interface ClipboardGateway {
   onLinkPreviewReady?(listener: (eventId: number) => void): () => void;
   chooseExportDirectory(): Promise<string | null>;
   exportHistory(directory: string): Promise<ExportSummary>;
+  /** Lists the vault's secret metadata — nothing sealed, nothing opened. */
+  keyvaultList(): Promise<KeyvaultSecret[]>;
+  /**
+   * Puts one secret on the clipboard. The value itself stays in the core:
+   * this resolves knowing only whether it worked.
+   */
+  keyvaultCopySecret(slug: string): Promise<void>;
   /**
    * Calls back whenever the core records something new. Returns a function
    * that stops listening; without it the palette would show a history that is
@@ -143,6 +151,8 @@ export const tauriGateway: ClipboardGateway = {
       defaultPath: 'clipboard-export',
     }),
   exportHistory: (directory) => invoke<ExportSummary>('export_history', { directory }),
+  keyvaultList: () => invoke<KeyvaultSecret[]>('keyvault_list'),
+  keyvaultCopySecret: (slug) => invoke<void>('keyvault_copy_secret', { slug }),
   onHistoryChanged: (listener) => subscribe('history-changed', listener),
   getThumbnail: (eventId) => invoke<Thumbnail | null>('get_thumbnail', { eventId }),
   getSettings: () => invoke<AppSettings>('get_settings'),

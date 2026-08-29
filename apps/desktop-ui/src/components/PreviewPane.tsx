@@ -1,14 +1,22 @@
 import { Eye, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 
-import type { LinkPreview as LinkPreviewContract, Preview } from '../lib/contracts';
-import { formatByteSize, KIND_LABELS } from '../lib/format';
+import type {
+  HistoryItem,
+  LinkPreview as LinkPreviewContract,
+  Preview,
+} from '../lib/contracts';
+import { formatByteSize, formatCapturedAt, KIND_LABELS } from '../lib/format';
 import { LinkPreviewCard } from './LinkPreviewCard';
 import { ImagePreview, type ThumbnailStatus } from './ImagePreview';
 import { SourceLocation } from './SourceLocation';
 import { TextPreview } from './TextPreview';
 
 export type PreviewStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+/// The store already caps occurrences per content; slicing again means a
+/// malformed page cannot turn the preview into an unbounded list.
+const MAX_OCCURRENCE_STAMPS = 5;
 
 interface PreviewPaneProps {
   preview: Preview | null;
@@ -17,6 +25,8 @@ interface PreviewPaneProps {
   thumbnailStatus: ThumbnailStatus;
   /** What the selected link points at, when the entry is a link. */
   linkPreview?: LinkPreviewContract | null;
+  /** The selected list row, when one is selected — the group it fronts. */
+  selectedItem?: HistoryItem | null;
   actions?: ReactNode;
   onClose?: () => void;
   onRevealSource?: () => void;
@@ -28,6 +38,7 @@ export const PreviewPane = ({
   thumbnailUrl,
   thumbnailStatus,
   linkPreview = null,
+  selectedItem = null,
   actions,
   onClose,
   onRevealSource,
@@ -96,6 +107,27 @@ export const PreviewPane = ({
                 <dt>Rozmiar</dt>
                 <dd>{formatByteSize(preview.byteSize)}</dd>
               </div>
+              {selectedItem && selectedItem.occurrences.length > 0 ? (
+                <div>
+                  <dt>Captured</dt>
+                  <dd>
+                    <ul
+                      className="preview-metadata__occurrences"
+                      aria-label={`Captured ${selectedItem.occurrenceCount} times, newest first`}
+                    >
+                      {selectedItem.occurrences
+                        .slice(0, MAX_OCCURRENCE_STAMPS)
+                        .map((capturedAtMs, index) => (
+                          <li key={`${index}-${capturedAtMs}`}>
+                            <time dateTime={new Date(capturedAtMs).toISOString()}>
+                              {formatCapturedAt(capturedAtMs)}
+                            </time>
+                          </li>
+                        ))}
+                    </ul>
+                  </dd>
+                </div>
+              ) : null}
             </dl>
           </>
         ) : null}
