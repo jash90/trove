@@ -3,6 +3,7 @@ use std::{collections::HashSet, path::PathBuf};
 use base64::Engine;
 use clipboard_core::ContentFlags;
 use clipboard_import::{ImportAnalysis, ImportError, ImportProgress, ImportRunHandle};
+use clipboard_launcher::AppBundle;
 use clipboard_search::{HistoryPage, SearchError, SearchRequest, SearchStoreExt};
 use clipboard_store::{CasError, StoreError, StoreHandle};
 use rusqlite::OptionalExtension;
@@ -41,6 +42,8 @@ macro_rules! clipboard_history_command_registry {
             get_storage_stats => $crate::commands::get_storage_stats,
             get_thumbnail => $crate::commands::get_thumbnail,
             reveal_source => $crate::commands::reveal_source,
+            list_apps => $crate::commands::list_apps,
+            launch_app => $crate::commands::launch_app,
             open_settings_window => $crate::commands::open_settings_window,
             export_history => $crate::commands::export_history,
             get_link_preview => $crate::commands::get_link_preview,
@@ -338,6 +341,76 @@ pub async fn get_preview(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn reveal_source(state: tauri::State<'_, AppState>, event_id: i64) -> Result<(), String> {
     reveal_source_service(state.inner(), event_id).await
+}
+
+/// The application catalog for the palette's launcher mode. Returns the whole
+/// list at once — a few hundred entries, tens of kilobytes — because the
+/// palette filters as the user types, and an IPC round trip per keystroke
+/// would reintroduce exactly the latency the history list debounces away.
+pub async fn list_apps_service(state: &AppState, now_ms: i64) -> Result<Vec<AppBundle>, String> {
+    let launcher = state.launcher.clone();
+    run_blocking("apps_unavailable", move || Ok(launcher.catalog(now_ms))).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn list_apps(state: tauri::State<'_, AppState>) -> Result<Vec<AppBundle>, String> {
+    list_apps_service(state.inner(), current_time_ms()).await
+}
+
+pub async fn launch_app_service(state: &AppState, path: String) -> Result<(), String> {
+    let roots = state.launcher.roots().to_vec();
+    run_blocking("apps_unavailable", move || {
+        // The string arrives from the webview; the scanner's own validation
+        // decides whether it names a bundle this application ever listed.
+        let canonical = clipboard_launcher::validate_launch_path(&path, &roots)
+            .map_err(|error| error.code().to_owned())?;
+        launch_application(&canonical)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn launch_app<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
+    launch_app_service(state.inner(), path).await?;
+    // The application the user picked is starting; leaving the palette in
+    // front of it would put a window between them and what they asked for.
+    // Hidden, not closed — closing is the Quit item's job and only its.
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    Ok(())
+}
+
+/// Starts an application bundle. The validated path is passed as a single
+/// argument, never through a shell, exactly like revealing a source — a
+/// crafted webview message cannot turn this into command execution, because
+/// by the time it runs the path has already been proven to be a bundle
+/// directory under a scanned root.
+fn launch_application(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/usr/bin/open")
+            .arg("-a")
+            .arg(path)
+            .status()
+            .map_err(|_| "launch_failed".to_owned())
+            .and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err("launch_failed".to_owned())
+                }
+            })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Err("launch_unsupported".to_owned())
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -612,6 +612,7 @@ dependencies = [
  "clipboard-core",
  "clipboard-images",
  "clipboard-import",
+ "clipboard-launcher",
  "clipboard-link-preview",
  "clipboard-search",
  "clipboard-store",
