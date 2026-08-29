@@ -43,3 +43,13 @@ export const KIND_LABELS: Record<ContentKind, string> = {
   code: 'Code',
   html: 'HTML',
 };
+
+const CAPTURED_AT_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+  day: '2-digit',
+  month: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
+export const formatCapturedAt = (capturedAtMs: number): string =>
+  CAPTURED_AT_FORMATTER.format(capturedAtMs);

@@ -16,6 +16,7 @@ interface PaletteWorkspaceProps {
   thumbnailUrl: string | null;
   thumbnailStatus: ThumbnailStatus;
   linkPreview: LinkPreviewContract | null;
+  selectedItem: HistoryItem | null;
   mobilePreviewOpen: boolean;
   actions: React.ReactNode;
   onSelect: (eventId: number) => void;
@@ -34,6 +35,7 @@ export const PaletteWorkspace = ({
   thumbnailUrl,
   thumbnailStatus,
   linkPreview,
+  selectedItem,
   mobilePreviewOpen,
   actions,
   onSelect,
@@ -80,6 +82,7 @@ export const PaletteWorkspace = ({
         thumbnailUrl={thumbnailUrl}
         thumbnailStatus={thumbnailStatus}
         linkPreview={linkPreview}
+        selectedItem={selectedItem}
         onClose={onClosePreview}
         onRevealSource={onRevealSource}
         actions={actions}

@@ -3,10 +3,11 @@
 mod query;
 mod ranking;
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clipboard_core::{ContentFlags, ContentKind};
-use clipboard_store::{StoreError, StoreHandle};
+use clipboard_store::{MAX_OCCURRENCES_PER_CONTENT, StoreError, StoreHandle};
 use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -31,13 +32,22 @@ const RANKED_SEARCH_SQL: &str = "WITH matched_candidates AS MATERIALIZED (
        FROM search_fts
        JOIN content c ON c.content_id = search_fts.rowid
        JOIN history_event he ON he.content_id = c.content_id
+         AND NOT EXISTS (
+              SELECT 1 FROM history_event newer
+              WHERE newer.content_id = he.content_id
+                AND (newer.captured_at_ms, newer.event_id)
+                  > (he.captured_at_ms, he.event_id))
        WHERE search_fts MATCH ?1
          AND (c.flags & ?6) = 0
          AND (?2 IS NULL OR c.kind = ?2)
          AND (?3 IS NULL
               OR he.source_app_id COLLATE NOCASE = ?3 COLLATE NOCASE
               OR he.source_app_name COLLATE NOCASE = ?3 COLLATE NOCASE)
-         AND (?4 IS NULL OR he.pinned = ?4)
+         AND (?4 IS NULL
+              OR EXISTS(
+                   SELECT 1 FROM history_event pinned_member
+                   WHERE pinned_member.content_id = c.content_id
+                     AND pinned_member.pinned = ?4))
        ORDER BY lexical_score, he.captured_at_ms DESC, he.event_id DESC
        LIMIT (?5 + 1)
      ),
@@ -75,7 +85,7 @@ const RANKED_SEARCH_SQL: &str = "WITH matched_candidates AS MATERIALIZED (
               WHERE a.content_id = candidate.content_id AND a.artifact_kind = 'thumbnail'
             ),
             candidate.lexical_score, usage.occurrence_count, usage.paste_count,
-            truncation.ranked_truncated
+            truncation.ranked_truncated, candidate.content_id
      FROM bounded_candidates candidate
      JOIN candidate_usage usage ON usage.content_id = candidate.content_id
      CROSS JOIN truncation
@@ -127,6 +137,11 @@ pub struct HistoryItem {
     pub preview: String,
     pub byte_size: u64,
     pub has_thumbnail: bool,
+    /// How many captures of this content are recorded, summed over its events.
+    pub occurrence_count: u64,
+    /// When this content was captured, newest first, capped at the occurrence
+    /// limit the store keeps.
+    pub occurrences: Vec<i64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -223,27 +238,37 @@ fn recent_search(
     let cursor_event = cursor.map(|value| value.event_id);
     let fetch_limit = i64::from(limit) + 1;
     let do_not_index_mask = i64::from(ContentFlags::DO_NOT_INDEX.bits());
-    let raw_items = store.with_reader(|connection| {
+    let grouped = store.with_reader(|connection| {
         let mut statement = connection.prepare(
             "SELECT he.event_id, he.global_id, c.kind, he.captured_at_ms, he.source_app_name,
                     he.pinned, c.preview_text, c.byte_size, c.flags,
                     EXISTS(
                       SELECT 1 FROM artifact a
                       WHERE a.content_id = c.content_id AND a.artifact_kind = 'thumbnail'
-                    )
+                    ),
+                    c.content_id
              FROM history_event he
              JOIN content c ON c.content_id = he.content_id
-             WHERE (?1 IS NULL OR c.kind = ?1)
+             WHERE NOT EXISTS (
+                    SELECT 1 FROM history_event newer
+                    WHERE newer.content_id = he.content_id
+                      AND (newer.captured_at_ms, newer.event_id)
+                        > (he.captured_at_ms, he.event_id))
+               AND (?1 IS NULL OR c.kind = ?1)
                AND (?2 IS NULL
                     OR he.source_app_id COLLATE NOCASE = ?2 COLLATE NOCASE
                     OR he.source_app_name COLLATE NOCASE = ?2 COLLATE NOCASE)
-               AND (?3 IS NULL OR he.pinned = ?3)
+               AND (?3 IS NULL
+                    OR EXISTS(
+                         SELECT 1 FROM history_event pinned_member
+                         WHERE pinned_member.content_id = he.content_id
+                           AND pinned_member.pinned = ?3))
                AND (?4 IS NULL OR (he.captured_at_ms, he.event_id) < (?4, ?5))
                AND (?6 = 1 OR (c.flags & ?7) = 0)
              ORDER BY he.captured_at_ms DESC, he.event_id DESC
              LIMIT ?8",
         )?;
-        statement
+        let raw_items = statement
             .query_map(
                 params![
                     kind,
@@ -255,11 +280,25 @@ fn recent_search(
                     do_not_index_mask,
                     fetch_limit
                 ],
-                raw_history_item,
+                |row| raw_history_item(row, 10),
             )?
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Result<Vec<_>, _>>()?;
+        let content_ids = raw_items
+            .iter()
+            .map(|raw| raw.content_id)
+            .collect::<Vec<_>>();
+        let fills = occurrence_fills(connection, &content_ids)?;
+        Ok((raw_items, fills))
     })?;
-    let mut items = convert_items(raw_items)?;
+    let pairs = grouped
+        .0
+        .into_iter()
+        .map(|raw| {
+            let content_id = raw.content_id;
+            Ok((convert_item(raw)?, content_id))
+        })
+        .collect::<Result<Vec<_>, SearchError>>()?;
+    let mut items = attach_group_data(pairs, grouped.1)?;
     let has_more = items.len() > limit as usize;
     if has_more {
         items.truncate(limit as usize);
@@ -294,7 +333,7 @@ fn ranked_search(
     let candidate_limit =
         i64::try_from(MAX_RANKED_CANDIDATES).map_err(|_| SearchError::InvalidStoreData)?;
     let do_not_index_mask = i64::from(ContentFlags::DO_NOT_INDEX.bits());
-    let (raw_candidates, ranked_truncated) = store.with_reader(|connection| {
+    let ((raw_candidates, ranked_truncated), fills) = store.with_reader(|connection| {
         let mut statement = connection.prepare(RANKED_SEARCH_SQL)?;
         let rows = statement
             .query_map(
@@ -306,13 +345,26 @@ fn ranked_search(
                     candidate_limit,
                     do_not_index_mask
                 ],
-                |row| Ok((raw_ranked_item(row)?, row.get::<_, bool>(13)?)),
+                |row| {
+                    Ok((
+                        raw_ranked_item(row)?,
+                        row.get::<_, bool>(13)?,
+                        row.get::<_, i64>(14)?,
+                    ))
+                },
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        let truncated = rows.first().is_some_and(|(_, truncated)| *truncated);
-        let candidates: Vec<RawRankedItem> =
-            rows.into_iter().map(|(candidate, _)| candidate).collect();
-        Ok((candidates, truncated))
+        let truncated = rows.first().is_some_and(|(_, truncated, _)| *truncated);
+        let candidates: Vec<RawRankedItem> = rows
+            .into_iter()
+            .map(|(candidate, _, _)| candidate)
+            .collect();
+        let content_ids = candidates
+            .iter()
+            .map(|candidate| candidate.item.content_id)
+            .collect::<Vec<_>>();
+        let fills = occurrence_fills(connection, &content_ids)?;
+        Ok(((candidates, truncated), fills))
     })?;
 
     let mut candidates = raw_candidates
@@ -326,11 +378,12 @@ fn ranked_search(
             .then_with(|| right.item.captured_at_ms.cmp(&left.item.captured_at_ms))
             .then_with(|| right.item.event_id.cmp(&left.item.event_id))
     });
-    let items = candidates
+    let pairs = candidates
         .into_iter()
         .take(limit as usize)
-        .map(|candidate| candidate.item)
-        .collect();
+        .map(|candidate| (candidate.item, candidate.content_id))
+        .collect::<Vec<_>>();
+    let items = attach_group_data(pairs, fills)?;
     Ok(HistoryPage {
         items,
         next_cursor: None,
@@ -348,6 +401,7 @@ struct RawHistoryItem {
     preview: String,
     byte_size: i64,
     has_thumbnail: bool,
+    content_id: i64,
 }
 
 struct RawRankedItem {
@@ -359,6 +413,7 @@ struct RawRankedItem {
 
 struct RankedItem {
     item: HistoryItem,
+    content_id: i64,
     score: f64,
 }
 
@@ -374,6 +429,7 @@ impl RankedItem {
             u64::try_from(raw.paste_count).map_err(|_| SearchError::InvalidStoreData)?;
         let pinned = raw.item.pinned;
         let captured_at_ms = raw.item.captured_at_ms;
+        let content_id = raw.item.content_id;
         let score = rank_score(
             weights,
             RankingSignals {
@@ -387,12 +443,16 @@ impl RankedItem {
         );
         Ok(Self {
             item: convert_item(raw.item)?,
+            content_id,
             score,
         })
     }
 }
 
-fn raw_history_item(row: &Row<'_>) -> rusqlite::Result<RawHistoryItem> {
+/// Reads the columns every search row shares. `content_id_index` is where the
+/// caller's SELECT put the content identity: the two queries carry different
+/// tails, so the position is the caller's to say.
+fn raw_history_item(row: &Row<'_>, content_id_index: usize) -> rusqlite::Result<RawHistoryItem> {
     Ok(RawHistoryItem {
         event_id: row.get(0)?,
         global_id: row.get(1)?,
@@ -403,20 +463,17 @@ fn raw_history_item(row: &Row<'_>) -> rusqlite::Result<RawHistoryItem> {
         preview: row.get(6)?,
         byte_size: row.get(7)?,
         has_thumbnail: row.get(9)?,
+        content_id: row.get(content_id_index)?,
     })
 }
 
 fn raw_ranked_item(row: &Row<'_>) -> rusqlite::Result<RawRankedItem> {
     Ok(RawRankedItem {
-        item: raw_history_item(row)?,
+        item: raw_history_item(row, 14)?,
         bm25: row.get(10)?,
         occurrence_count: row.get(11)?,
         paste_count: row.get(12)?,
     })
-}
-
-fn convert_items(raw_items: Vec<RawHistoryItem>) -> Result<Vec<HistoryItem>, SearchError> {
-    raw_items.into_iter().map(convert_item).collect()
 }
 
 fn convert_item(raw: RawHistoryItem) -> Result<HistoryItem, SearchError> {
@@ -430,7 +487,93 @@ fn convert_item(raw: RawHistoryItem) -> Result<HistoryItem, SearchError> {
         preview: raw.preview,
         byte_size: u64::try_from(raw.byte_size).map_err(|_| SearchError::InvalidStoreData)?,
         has_thumbnail: raw.has_thumbnail,
+        // Group data is attached afterwards, from one bounded fill query.
+        occurrence_count: 0,
+        occurrences: Vec::new(),
     })
+}
+
+/// Per-content group data: when it was captured, how often, and whether any
+/// occurrence is pinned.
+struct OccurrenceFill {
+    occurrence_count: i64,
+    occurrences: Vec<i64>,
+    pinned: bool,
+}
+
+/// Reads the occurrence rows for one page's contents in a single query.
+///
+/// The store keeps at most [`MAX_OCCURRENCES_PER_CONTENT`] events per content,
+/// so this stays a bounded follow-up: one query for the page instead of a
+/// correlated subquery per row.
+fn occurrence_fills(
+    connection: &rusqlite::Connection,
+    content_ids: &[i64],
+) -> rusqlite::Result<HashMap<i64, OccurrenceFill>> {
+    let mut fills = HashMap::with_capacity(content_ids.len());
+    if content_ids.is_empty() {
+        return Ok(fills);
+    }
+    let placeholders = (1..=content_ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT content_id, captured_at_ms, occurrence_count, pinned
+         FROM history_event
+         WHERE content_id IN ({placeholders})
+         ORDER BY content_id, captured_at_ms DESC, event_id DESC"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(
+        rusqlite::params_from_iter(content_ids.iter().copied()),
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, bool>(3)?,
+            ))
+        },
+    )?;
+    for row in rows {
+        let (content_id, captured_at_ms, occurrence_count, pinned) = row?;
+        let fill = fills.entry(content_id).or_insert(OccurrenceFill {
+            occurrence_count: 0,
+            occurrences: Vec::new(),
+            pinned: false,
+        });
+        fill.occurrence_count += occurrence_count;
+        if fill.occurrences.len() < MAX_OCCURRENCES_PER_CONTENT as usize {
+            fill.occurrences.push(captured_at_ms);
+        }
+        fill.pinned |= pinned;
+    }
+    Ok(fills)
+}
+
+/// Stamps each converted row with its group's data.
+///
+/// A content with a representative row but no occurrence rows cannot exist
+/// under one reader lease; hitting that branch means the store lied, which is
+/// an invalid-data failure rather than a silent half-filled item.
+fn attach_group_data(
+    pairs: Vec<(HistoryItem, i64)>,
+    mut fills: HashMap<i64, OccurrenceFill>,
+) -> Result<Vec<HistoryItem>, SearchError> {
+    pairs
+        .into_iter()
+        .map(|(mut item, content_id)| {
+            let fill = fills
+                .remove(&content_id)
+                .ok_or(SearchError::InvalidStoreData)?;
+            item.pinned = fill.pinned;
+            item.occurrence_count =
+                u64::try_from(fill.occurrence_count).map_err(|_| SearchError::InvalidStoreData)?;
+            item.occurrences = fill.occurrences;
+            Ok(item)
+        })
+        .collect()
 }
 
 fn content_kind(value: &str) -> Option<ContentKind> {
@@ -491,8 +634,10 @@ mod sql_plan_tests {
                 .iter()
                 .filter(|detail| detail.contains("CORRELATED SCALAR SUBQUERY"))
                 .count(),
-            1,
-            "only the thumbnail existence probe may remain correlated"
+            3,
+            "exactly three probes may remain correlated: the thumbnail \
+             existence probe, the representative-event probe, and the \
+             pinned-member probe"
         );
         assert!(
             details

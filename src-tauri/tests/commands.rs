@@ -451,6 +451,64 @@ async fn preview_pin_delete_and_storage_commands_expose_only_selected_bounded_da
 }
 
 #[tokio::test]
+async fn deleting_a_listed_group_removes_every_occurrence_behind_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    for offset in 0..3 {
+        state
+            .store
+            .ingest(text_capture(
+                "powtarzana treść",
+                1_725_000_100_000 + offset * 1_000,
+            ))
+            .await
+            .unwrap();
+    }
+    let other = state
+        .store
+        .ingest(text_capture("inna treść", 1_725_000_200_000))
+        .await
+        .unwrap();
+
+    let page = commands::search_history_service(&state, SearchRequest::from_text(""))
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 2, "one row per distinct content");
+    let grouped_index = page
+        .items
+        .iter()
+        .position(|item| item.preview == "powtarzana treść")
+        .unwrap();
+    let grouped = &page.items[grouped_index];
+    assert_eq!(grouped.occurrence_count, 3);
+    assert_eq!(grouped.occurrences.len(), 3);
+    let page_json = serde_json::to_value(&page).unwrap();
+    assert_eq!(
+        page_json["items"][grouped_index]["occurrenceCount"],
+        serde_json::json!(3)
+    );
+    assert_eq!(
+        page_json["items"][grouped_index]["occurrences"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    commands::delete_event_service(&state, grouped.event_id)
+        .await
+        .unwrap();
+
+    let after = commands::search_history_service(&state, SearchRequest::from_text(""))
+        .await
+        .unwrap();
+    assert_eq!(after.items.len(), 1);
+    assert_eq!(after.items[0].event_id, other.event_id);
+    let stats = commands::get_storage_stats_service(&state).await.unwrap();
+    assert_eq!(stats.event_count, 1);
+}
+
+#[tokio::test]
 async fn copy_preparation_restores_text_and_sanitizes_missing_payload_errors() {
     let directory = tempfile::tempdir().unwrap();
     let state = AppState::open_data_dir(directory.path()).unwrap();

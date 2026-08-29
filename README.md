@@ -188,6 +188,19 @@ opened. That needs the Accessibility permission (System Settings → Privacy &
 Security → Accessibility). Without it the entry still reaches the clipboard, and
 the application says why it did not paste instead of staying silent.
 
+## Grouped entries
+
+Copying the same thing again does not add a second row. The list shows one row
+per distinct payload — the newest capture fronts it — with a `×N` badge for how
+often it was recorded, and the preview lists when it was captured, newest
+first, at most five timestamps. Older duplicate captures are pruned on ingest,
+so the history really does shrink rather than merely hiding; pinned
+occurrences are never pruned, and a database from before this rule is
+collapsed by the same fifteen-minute maintenance pass that handles retention.
+
+Deleting a grouped row deletes every occurrence behind it, which is what the
+row promised.
+
 ## Retention and disk space
 
 History is unlimited by default. Turning retention on in settings permanently

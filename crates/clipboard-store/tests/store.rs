@@ -2259,3 +2259,240 @@ fn a_symlink_standing_in_for_the_data_directory_is_still_refused() {
 
     assert_eq!(error.to_string(), "storage boundary changed");
 }
+
+// ------------------------------------------------------------ grouping --
+
+/// Every occurrence of one content, newest first: `(event_id, captured_at_ms)`.
+fn occurrence_rows(store: &StoreHandle, content_id: i64) -> Vec<(i64, i64)> {
+    store
+        .with_reader(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT event_id, captured_at_ms FROM history_event
+                 WHERE content_id = ?1
+                 ORDER BY captured_at_ms DESC, event_id DESC",
+            )?;
+            let rows = statement
+                .query_map([content_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn repeated_captures_of_one_content_collapse_to_five_newest_events() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = StoreHandle::open(StoreConfig::in_data_dir(directory.path())).unwrap();
+
+    let first = store
+        .ingest(text_capture("ta sama treść", 1_000))
+        .await
+        .unwrap();
+    for index in 1..7 {
+        store
+            .ingest(text_capture("ta sama treść", 1_000 + index))
+            .await
+            .unwrap();
+    }
+
+    let rows = occurrence_rows(&store, first.content_id);
+    assert_eq!(
+        rows.len(),
+        clipboard_store::MAX_OCCURRENCES_PER_CONTENT as usize
+    );
+    let timestamps: Vec<i64> = rows.iter().map(|(_, at)| *at).collect();
+    assert_eq!(timestamps, vec![1_006, 1_005, 1_004, 1_003, 1_002]);
+    assert_eq!(store.stats().unwrap().event_count, 5);
+    assert_eq!(store.stats().unwrap().content_count, 1);
+}
+
+#[tokio::test]
+async fn pruning_never_deletes_a_pinned_occurrence() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = StoreHandle::open(StoreConfig::in_data_dir(directory.path())).unwrap();
+
+    let pinned = store
+        .ingest(text_capture("przypięta treść", 1_000))
+        .await
+        .unwrap();
+    store.set_pinned(pinned.event_id, true).await.unwrap();
+    for index in 1..7 {
+        store
+            .ingest(text_capture("przypięta treść", 1_000 + index))
+            .await
+            .unwrap();
+    }
+
+    // The pinned occurrence survives alongside the five newest unpinned ones:
+    // pinning is the user saying "keep this", which outranks the occurrence cap.
+    let rows = occurrence_rows(&store, pinned.content_id);
+    assert_eq!(rows.len(), 6);
+    assert!(
+        rows.iter()
+            .any(|(event_id, _)| *event_id == pinned.event_id)
+    );
+}
+
+#[tokio::test]
+async fn ingest_spares_the_event_it_just_inserted_even_when_older_than_the_cap() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = StoreHandle::open(StoreConfig::in_data_dir(directory.path())).unwrap();
+
+    for index in 0..5 {
+        store
+            .ingest(text_capture("starsze wpisy", 2_000 + index))
+            .await
+            .unwrap();
+    }
+    // A historical import lands with a timestamp older than everything kept so
+    // far; the prune must not delete the row whose id the caller just received.
+    let historical = store
+        .ingest(text_capture("starsze wpisy", 1_000))
+        .await
+        .unwrap();
+
+    let rows = occurrence_rows(&store, historical.content_id);
+    assert_eq!(rows.len(), 6);
+    assert!(
+        rows.iter()
+            .any(|(event_id, _)| *event_id == historical.event_id),
+        "the just-inserted event must survive its own prune"
+    );
+}
+
+#[tokio::test]
+async fn occurrence_sweep_shrinks_legacy_duplicates_and_reports_more() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = StoreHandle::open(StoreConfig::in_data_dir(directory.path())).unwrap();
+
+    let content = store
+        .ingest(text_capture("legacy content", 10_000))
+        .await
+        .unwrap();
+    // A database written before the cap existed: rows beyond the newest five
+    // per content are already sitting in history_event.
+    let database_path = directory.path().join(clipboard_store::DATABASE_FILENAME);
+    let legacy = rusqlite::Connection::open(&database_path).unwrap();
+    for index in 0..10u8 {
+        let mut global_id = [0u8; 16];
+        global_id[6] = 0x70; // UUIDv7
+        global_id[7] = index;
+        global_id[8] = 0x80; // variant
+        legacy
+            .execute(
+                "INSERT INTO history_event (global_id, content_id, captured_at_ms, occurrence_count)
+                 VALUES (?1, ?2, ?3, 1)",
+                rusqlite::params![
+                    global_id.as_slice(),
+                    content.content_id,
+                    9_000 + i64::from(index),
+                ],
+            )
+            .unwrap();
+    }
+    drop(legacy);
+
+    // Deleting is a write on the queue capture shares, so the sweep yields
+    // rather than hold it.
+    let outcome = store.prune_occurrence_events(3).await.unwrap();
+    assert_eq!(outcome.deleted_events, 3);
+    assert!(outcome.more_remaining);
+
+    let rest = store.prune_occurrence_events(u32::MAX).await.unwrap();
+    assert_eq!(rest.deleted_events, 3);
+    assert!(!rest.more_remaining);
+
+    let rows = occurrence_rows(&store, content.content_id);
+    assert_eq!(
+        rows.len(),
+        clipboard_store::MAX_OCCURRENCES_PER_CONTENT as usize
+    );
+    // The five newest survive: the ingested row and the four newest legacy rows.
+    let timestamps: Vec<i64> = rows.iter().map(|(_, at)| *at).collect();
+    assert_eq!(timestamps, vec![10_000, 9_009, 9_008, 9_007, 9_006]);
+}
+
+#[tokio::test]
+async fn deleting_a_grouped_entry_removes_every_occurrence_of_its_content() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = StoreHandle::open(StoreConfig::in_data_dir(directory.path())).unwrap();
+
+    let grouped = store.ingest(text_capture("grupa", 1_000)).await.unwrap();
+    store.ingest(text_capture("grupa", 2_000)).await.unwrap();
+    store.ingest(text_capture("grupa", 3_000)).await.unwrap();
+    let other = store
+        .ingest(text_capture("inny wpis", 1_500))
+        .await
+        .unwrap();
+
+    store
+        .delete_events_for_content(grouped.content_id)
+        .await
+        .unwrap();
+
+    assert_eq!(occurrence_rows(&store, grouped.content_id).len(), 0);
+    assert_eq!(occurrence_rows(&store, other.content_id).len(), 1);
+    assert_eq!(store.stats().unwrap().event_count, 1);
+}
+
+#[tokio::test]
+async fn imported_duplicates_respect_the_occurrence_cap() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        StoreHandle::open(StoreConfig::new(directory.path().join("history.sqlite"))).unwrap();
+
+    let run = store
+        .begin_import(BeginImportRun {
+            run_id: uuid::Uuid::now_v7(),
+            source_kind: ImportSourceKind::SuperCmd,
+            source_fingerprint: [77; 32],
+            total_records: 7,
+            candidate_records: 7,
+            initial_failures: Vec::new(),
+            initial_skips: Vec::new(),
+        })
+        .await
+        .unwrap();
+    // One source record per copy of the same payload: the fingerprint is what
+    // makes them distinct records, the payload is what makes them one group.
+    let candidates = (0..7u8)
+        .map(|offset| {
+            let mut record_fingerprint = [77u8; 32];
+            record_fingerprint[0] = 77u8.wrapping_add(offset);
+            StoreImportCandidate {
+                candidate_offset: u64::from(offset),
+                record_fingerprint,
+                capture: text_capture("importowana grupa", 1_000 + i64::from(offset)),
+                search_ocr: None,
+                source_app_original: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    store
+        .import_batch(
+            import_operation_permit(),
+            run.run_id,
+            run.generation,
+            candidates,
+        )
+        .await
+        .unwrap();
+    store
+        .finish_import(run.run_id, run.generation)
+        .await
+        .unwrap();
+
+    let content_id = store
+        .with_reader(|connection| {
+            connection.query_row("SELECT content_id FROM content", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        occurrence_rows(&store, content_id).len(),
+        clipboard_store::MAX_OCCURRENCES_PER_CONTENT as usize
+    );
+}

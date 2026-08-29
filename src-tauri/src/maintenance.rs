@@ -1,8 +1,9 @@
 //! Housekeeping that runs while the application is idle.
 //!
-//! Two jobs share one slow timer: deleting history the user asked to stop
-//! keeping, and freeing blobs nothing refers to any more. Both are bounded, so
-//! neither can hold the writer while the user is copying, and both are quiet —
+//! Three jobs share one slow timer: deleting history the user asked to stop
+//! keeping, collapsing repeated captures of one content down to the occurrence
+//! cap, and freeing blobs nothing refers to any more. All are bounded, so
+//! none can hold the writer while the user is copying, and all are quiet —
 //! nothing here is worth interrupting anyone for.
 
 use std::time::Duration;
@@ -44,12 +45,30 @@ async fn run_pass<R: Runtime>(app: &AppHandle<R>) {
         return;
     };
     let store = state.store.clone();
-    let deleted = apply_retention(&store).await;
+    let deleted = apply_retention(&store).await + prune_occurrence_groups(&store).await;
     reclaim_unused_blobs(&store).await;
     if deleted > 0 {
         // The list is showing entries that no longer exist.
         let _ = app.emit(crate::monitor::HISTORY_CHANGED_EVENT, ());
     }
+}
+
+/// Collapses occurrence rows a database written before the cap accumulated,
+/// in batches, up to this pass's limit.
+async fn prune_occurrence_groups(store: &StoreHandle) -> u64 {
+    let mut deleted = 0_u64;
+    for _ in 0..MAX_BATCHES_PER_PASS {
+        match store.prune_occurrence_events(MAX_RETENTION_BATCH).await {
+            Ok(outcome) => {
+                deleted += outcome.deleted_events;
+                if !outcome.more_remaining {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    deleted
 }
 
 /// Deletes aged-out history, in batches, up to this pass's limit.

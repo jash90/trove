@@ -526,10 +526,12 @@ async fn ranked_search_rejects_a_recent_mode_cursor() {
 async fn ranked_search_caps_candidates_and_uses_stable_tie_breaks() {
     let (_directory, store) = open_store();
     let mut newest_event_id = 0;
-    for _ in 0..(MAX_RANKED_CANDIDATES + 5) {
+    for index in 0..(MAX_RANKED_CANDIDATES + 5) {
+        // Distinct payloads: repeated captures of one content are one group
+        // now, and capping candidates is about distinct content.
         newest_event_id = store
             .ingest(text_capture(
-                "shared needle",
+                &format!("shared needle {index}"),
                 1_000,
                 "com.example.editor",
                 "Example Editor",
@@ -552,6 +554,199 @@ async fn ranked_search_caps_candidates_and_uses_stable_tie_breaks() {
             .windows(2)
             .all(|pair| pair[0].event_id > pair[1].event_id)
     );
+}
+
+#[tokio::test]
+async fn timeline_groups_repeated_captures_into_one_row_with_occurrence_data() {
+    let (_directory, store) = open_store();
+    for index in 0..7 {
+        store
+            .ingest(text_capture(
+                "ta sama notatka",
+                1_000 + index,
+                "com.example.editor",
+                "Example Editor",
+                false,
+                1,
+            ))
+            .await
+            .unwrap();
+    }
+    store
+        .ingest(text_capture(
+            "osobny wpis",
+            500,
+            "com.example.editor",
+            "Example Editor",
+            false,
+            1,
+        ))
+        .await
+        .unwrap();
+
+    let page = store.search(request("", 10, None)).unwrap();
+
+    assert_eq!(page.items.len(), 2, "one row per distinct content");
+    let grouped = &page.items[0];
+    assert_eq!(grouped.preview, "ta sama notatka");
+    assert_eq!(
+        grouped.captured_at_ms, 1_006,
+        "the newest occurrence fronts the group"
+    );
+    assert_eq!(
+        grouped.occurrence_count, 5,
+        "the cap keeps five recorded occurrences"
+    );
+    assert_eq!(grouped.occurrences, vec![1_006, 1_005, 1_004, 1_003, 1_002]);
+    let single = &page.items[1];
+    assert_eq!(single.preview, "osobny wpis");
+    assert_eq!(single.occurrence_count, 1);
+    assert_eq!(single.occurrences, vec![500]);
+}
+
+#[tokio::test]
+async fn timeline_cursor_pages_groups_without_repeating_or_losing_one() {
+    let (_directory, store) = open_store();
+    for (value, timestamp) in [
+        ("grupa a", 100),
+        ("grupa b", 200),
+        ("grupa c", 300),
+        ("grupa c", 301),
+        ("grupa b", 201),
+        ("grupa a", 101),
+    ] {
+        store
+            .ingest(text_capture(
+                value,
+                timestamp,
+                "com.example.editor",
+                "Example Editor",
+                false,
+                1,
+            ))
+            .await
+            .unwrap();
+    }
+
+    let first = store.search(request("", 2, None)).unwrap();
+    let second = store.search(request("", 2, first.next_cursor)).unwrap();
+    let mut seen: Vec<String> = first
+        .items
+        .iter()
+        .chain(second.items.iter())
+        .map(|item| item.preview.clone())
+        .collect();
+    seen.sort();
+
+    assert_eq!(first.items.len(), 2);
+    assert_eq!(first.items[0].preview, "grupa c");
+    assert_eq!(first.items[0].captured_at_ms, 301);
+    assert_eq!(second.items.len(), 1);
+    assert_eq!(seen, vec!["grupa a", "grupa b", "grupa c"]);
+}
+
+#[tokio::test]
+async fn pinned_filter_matches_a_group_whose_older_occurrence_is_pinned() {
+    let (_directory, store) = open_store();
+    store
+        .ingest(text_capture(
+            "przypięta grupa",
+            1_000,
+            "com.example.editor",
+            "Example Editor",
+            true,
+            1,
+        ))
+        .await
+        .unwrap();
+    for timestamp in [1_001, 1_002] {
+        store
+            .ingest(text_capture(
+                "przypięta grupa",
+                timestamp,
+                "com.example.editor",
+                "Example Editor",
+                false,
+                1,
+            ))
+            .await
+            .unwrap();
+    }
+    store
+        .ingest(text_capture(
+            "zwykła grupa",
+            1_500,
+            "com.example.editor",
+            "Example Editor",
+            false,
+            1,
+        ))
+        .await
+        .unwrap();
+
+    let pinned = store.search(request("is:pinned", 10, None)).unwrap();
+    let timeline = store.search(request("", 10, None)).unwrap();
+
+    assert_eq!(pinned.items.len(), 1);
+    assert_eq!(pinned.items[0].preview, "przypięta grupa");
+    // The group counts as pinned when any occurrence is pinned, even though
+    // the representative fronting it is the newest, unpinned capture.
+    let grouped = timeline
+        .items
+        .iter()
+        .find(|item| item.preview == "przypięta grupa")
+        .unwrap();
+    assert!(grouped.pinned);
+}
+
+#[tokio::test]
+async fn ranked_search_returns_one_row_per_content_keeping_usage_sums() {
+    let (_directory, store) = open_store();
+    let mut newest_event_id = 0;
+    for index in 0..3 {
+        newest_event_id = store
+            .ingest(text_capture(
+                "needle jeden",
+                1_000 + index,
+                "com.example.editor",
+                "Example Editor",
+                false,
+                1,
+            ))
+            .await
+            .unwrap()
+            .event_id;
+    }
+    let single = store
+        .ingest(text_capture(
+            "needle dwa",
+            2_000,
+            "com.example.editor",
+            "Example Editor",
+            false,
+            1,
+        ))
+        .await
+        .unwrap();
+
+    let page = store.search(request("needle", 10, None)).unwrap();
+
+    assert_eq!(page.items.len(), 2, "one row per distinct content");
+    let grouped = page
+        .items
+        .iter()
+        .find(|item| item.preview == "needle jeden")
+        .unwrap();
+    assert_eq!(grouped.event_id, newest_event_id);
+    assert_eq!(grouped.occurrence_count, 3);
+    assert_eq!(grouped.occurrences, vec![1_002, 1_001, 1_000]);
+    let other = page
+        .items
+        .iter()
+        .find(|item| item.preview == "needle dwa")
+        .unwrap();
+    assert_eq!(other.event_id, single.event_id);
+    assert_eq!(other.occurrence_count, 1);
 }
 
 #[tokio::test]
@@ -625,6 +820,8 @@ async fn serialized_list_item_exposes_only_the_plan_two_fields() {
             "globalId",
             "hasThumbnail",
             "kind",
+            "occurrenceCount",
+            "occurrences",
             "pinned",
             "preview",
             "sourceAppName",

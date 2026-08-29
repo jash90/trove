@@ -16,7 +16,7 @@ import {
   type StorageStats,
   type Thumbnail,
 } from '../lib/contracts';
-import { thumbnailDataUrl } from '../lib/format';
+import { formatCapturedAt, thumbnailDataUrl } from '../lib/format';
 import type { ClipboardGateway } from '../lib/gateway';
 import { PreviewPane } from './PreviewPane';
 
@@ -39,6 +39,8 @@ const makeItem = (eventId: number, overrides: Partial<HistoryItem> = {}): Histor
   preview: `Synthetic item ${eventId}`,
   byteSize: 32,
   hasThumbnail: false,
+  occurrenceCount: 1,
+  occurrences: [1_775_000_000_000 - eventId],
   ...overrides,
 });
 
@@ -752,5 +754,50 @@ describe('history actions', () => {
     expect(screen.getByRole('button', { name: 'Copy as plain text' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Pin entry' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Delete entry' })).toBeVisible();
+  });
+});
+
+describe('grouped entries', () => {
+  it('lists when a grouped entry was captured, newest first, capped by the store', () => {
+    const occurrences = [
+      1_775_000_000_000,
+      1_774_900_000_000,
+      1_774_800_000_000,
+      1_774_700_000_000,
+      1_774_600_000_000,
+      1_774_500_000_000,
+    ];
+    const item = makeItem(7, { occurrenceCount: 6, occurrences });
+    render(
+      <PreviewPane
+        preview={makePreview(7)}
+        thumbnailUrl={null}
+        thumbnailStatus="ready"
+        selectedItem={item}
+      />,
+    );
+
+    const list = screen.getByRole('list', { name: 'Captured 6 times, newest first' });
+    const stamps = within(list).getAllByText(/^\d{2} \w{3}/u);
+    expect(stamps).toHaveLength(5);
+    expect(stamps.map((stamp) => stamp.textContent)).toEqual(
+      occurrences
+        .slice(0, 5)
+        .map((capturedAtMs) => formatCapturedAt(capturedAtMs)),
+    );
+  });
+
+  it('shows no capture list when nothing is selected', () => {
+    render(
+      <PreviewPane
+        preview={makePreview(7)}
+        thumbnailUrl={null}
+        thumbnailStatus="ready"
+      />,
+    );
+
+    expect(
+      screen.queryByRole('list', { name: /Captured \d+ times/ }),
+    ).not.toBeInTheDocument();
   });
 });

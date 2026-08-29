@@ -13,7 +13,7 @@ import {
 import type { CSSProperties, MouseEventHandler } from 'react';
 
 import type { ContentKind, HistoryItem } from '../lib/contracts';
-import { fileBasename } from '../lib/format';
+import { fileBasename, formatCapturedAt } from '../lib/format';
 
 interface HistoryRowProps {
   item: HistoryItem;
@@ -42,16 +42,6 @@ const KIND_LABELS: Record<ContentKind, string> = {
   code: 'Code',
   html: 'HTML',
 };
-
-const CAPTURED_AT_FORMATTER = new Intl.DateTimeFormat('en-GB', {
-  day: '2-digit',
-  month: 'short',
-  hour: '2-digit',
-  minute: '2-digit',
-});
-
-const formatCapturedAt = (capturedAtMs: number): string =>
-  CAPTURED_AT_FORMATTER.format(capturedAtMs);
 
 export const HistoryRow = ({
   item,
@@ -93,6 +83,11 @@ export const HistoryRow = ({
       </span>
       <span className="history-row__aside">
         {item.pinned ? <Pin size={13} fill="currentColor" aria-label="Pinned" /> : null}
+        {item.occurrenceCount > 1 ? (
+          <span className="history-row__occurrences" aria-label={`Captured ${item.occurrenceCount} times`}>
+            ×{item.occurrenceCount}
+          </span>
+        ) : null}
         <time dateTime={new Date(item.capturedAtMs).toISOString()}>
           {formatCapturedAt(item.capturedAtMs)}
         </time>
