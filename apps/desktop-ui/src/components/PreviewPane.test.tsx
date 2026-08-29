@@ -139,6 +139,7 @@ const makeGateway = (
     })),
     listApps: vi.fn(async () => []),
     launchApp: vi.fn(async () => undefined),
+    getAppIcon: vi.fn(async () => null),
     ...overrides,
   };
 };

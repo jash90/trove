@@ -1,7 +1,9 @@
 import { AppWindowMac } from 'lucide-react';
 import type { CSSProperties, MouseEventHandler } from 'react';
 
+import { useAppIcon } from '../hooks/useAppIcon';
 import type { AppEntry } from '../lib/contracts';
+import { useGateway } from '../lib/gateway';
 
 interface AppRowProps {
   app: AppEntry;
@@ -13,12 +15,28 @@ interface AppRowProps {
   onActivate: (path: string) => void;
 }
 
+/// The icon slot of one application row: the application's own rendered
+/// icon when the core has sent it, the placeholder glyph until then.
+///
+/// A component of its own because the fetch is per-row — the virtualized
+/// list mounts only the rows on screen, so only those ask, and the
+/// module-wide cache in useAppIcon keeps a remount from asking again.
+const AppIconSlot = ({ path }: { path: string }): React.JSX.Element => {
+  const gateway = useGateway();
+  const { url } = useAppIcon(gateway, path);
+  if (url === null) {
+    return <AppWindowMac size={17} strokeWidth={1.8} />;
+  }
+  // Decorative on purpose: the row's accessible name is the application's
+  // name, and an icon that repeated it would be read twice.
+  return <img className="app-row__icon" src={url} alt="" />;
+};
+
 /// One launchable application in the launcher list.
 ///
 /// Deliberately the same row rhythm as a history entry — same height, same
-/// kind icon, same metadata line — so switching modes with Tab moves nothing
-/// under the eye; only the content changes. The glyph is a placeholder, not
-/// the application's own icon: rendering `.icns` files is a follow-up.
+/// icon slot, same metadata line — so the two sit in one palette as
+/// siblings rather than as two interfaces stitched together.
 export const AppRow = ({
   app,
   index,
@@ -50,7 +68,7 @@ export const AppRow = ({
       onDoubleClick={handleDoubleClick}
     >
       <span className="history-row__kind" aria-hidden="true">
-        <AppWindowMac size={17} strokeWidth={1.8} />
+        <AppIconSlot path={app.path} />
       </span>
       <span className="history-row__content">
         <span className="history-row__preview">{app.name}</span>

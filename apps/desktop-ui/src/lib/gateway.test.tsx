@@ -99,6 +99,8 @@ describe('tauriGateway', () => {
     ]);
     await tauriGateway.listApps();
     await tauriGateway.launchApp('/synthetic/Applications/Synthetic Notes.app');
+    vi.mocked(invoke).mockResolvedValueOnce(null);
+    await tauriGateway.getAppIcon('/synthetic/Applications/Synthetic Notes.app');
 
     expect(vi.mocked(invoke).mock.calls).toEqual([
       ['search_history', { request: { query: 'synthetic', limit: 80, cursor: null } }],
@@ -118,6 +120,7 @@ describe('tauriGateway', () => {
       ['get_storage_stats'],
       ['list_apps'],
       ['launch_app', { path: '/synthetic/Applications/Synthetic Notes.app' }],
+      ['get_app_icon', { path: '/synthetic/Applications/Synthetic Notes.app' }],
     ]);
     expect(vi.mocked(open).mock.calls).toEqual([
       [

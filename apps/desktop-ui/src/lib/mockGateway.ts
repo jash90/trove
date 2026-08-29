@@ -1,6 +1,7 @@
 import type { ClipboardGateway } from './gateway';
 import {
   SYNTHETIC_APPS,
+  SYNTHETIC_APP_ICON,
   SYNTHETIC_HISTORY_ITEMS,
   SYNTHETIC_IMPORT_PROGRESS,
   SYNTHETIC_SETTINGS,
@@ -126,4 +127,5 @@ export const mockGateway: ClipboardGateway = {
   // A browser preview cannot start applications; resolving rather than
   // rejecting keeps the palette's flow walkable where Tauri is absent.
   launchApp: async () => undefined,
+  getAppIcon: async () => ({ ...SYNTHETIC_APP_ICON }),
 };

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { SYNTHETIC_APPS, SYNTHETIC_HISTORY_ITEMS } from './fixtures';
+import { SYNTHETIC_APPS, SYNTHETIC_APP_ICON, SYNTHETIC_HISTORY_ITEMS } from './fixtures';
 import { mockGateway } from './mockGateway';
 
 describe('mockGateway', () => {
@@ -37,5 +37,13 @@ describe('mockGateway', () => {
     await expect(
       mockGateway.launchApp('/synthetic/Applications/Synthetic Notes.app'),
     ).resolves.toBeUndefined();
+  });
+
+  it('answers the same synthetic icon for every application', async () => {
+    const first = await mockGateway.getAppIcon('/synthetic/Applications/Synthetic Notes.app');
+    const second = await mockGateway.getAppIcon('/synthetic/Applications/Łódź Editor.app');
+
+    expect(first).toEqual(SYNTHETIC_APP_ICON);
+    expect(second).toEqual(SYNTHETIC_APP_ICON);
   });
 });

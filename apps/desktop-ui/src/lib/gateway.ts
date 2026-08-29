@@ -70,6 +70,11 @@ export interface ClipboardGateway {
   listApps(): Promise<AppEntry[]>;
   /** Starts an application by the catalog path it was listed under. */
   launchApp(path: string): Promise<void>;
+  /**
+   * The rendered icon for a catalog path, or null when there is nothing to
+   * draw — the row keeps its glyph and carries on.
+   */
+  getAppIcon(path: string): Promise<Thumbnail | null>;
 }
 
 /**
@@ -148,6 +153,7 @@ export const tauriGateway: ClipboardGateway = {
     invoke<StorageStats>('get_storage_stats').then(validateStorageStats),
   listApps: () => invoke<AppEntry[]>('list_apps').then(validateAppCatalog),
   launchApp: (path) => invoke<void>('launch_app', { path }),
+  getAppIcon: (path) => invoke<Thumbnail | null>('get_app_icon', { path }),
 };
 
 interface GatewayProviderProps {

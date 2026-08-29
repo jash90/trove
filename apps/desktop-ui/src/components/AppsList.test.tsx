@@ -1,11 +1,13 @@
 import '@testing-library/jest-dom/vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState, type KeyboardEventHandler } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useListNavigation } from '../hooks/useListNavigation';
 import type { AppEntry } from '../lib/contracts';
+import { SYNTHETIC_APP_ICON } from '../lib/fixtures';
+import { GatewayProvider, mockGateway, type ClipboardGateway } from '../lib/gateway';
 import { AppsList } from './AppsList';
 
 /// The application rows, and only those.
@@ -44,7 +46,9 @@ const KeyboardHarness = ({
   };
 
   return (
-    <>
+    // The rows fetch their icons through the gateway context, exactly as
+    // they do inside the palette; the harness supplies the synthetic one.
+    <GatewayProvider gateway={mockGateway}>
       <label htmlFor="apps-keyboard-search">Search applications</label>
       <input
         id="apps-keyboard-search"
@@ -66,7 +70,7 @@ const KeyboardHarness = ({
         onSelect={navigation.setSelectedKey}
         onActivate={onActivate}
       />
-    </>
+    </GatewayProvider>
   );
 };
 
@@ -83,12 +87,14 @@ describe('AppsList', () => {
 
   it('keeps the DOM bounded for a thousand applications', () => {
     render(
-      <AppsList
-        apps={makeApps(1_000)}
-        selectedKey={makeApps(1)[0]!.path}
-        onSelect={vi.fn()}
-        onActivate={vi.fn()}
-      />,
+      <GatewayProvider gateway={mockGateway}>
+        <AppsList
+          apps={makeApps(1_000)}
+          selectedKey={makeApps(1)[0]!.path}
+          onSelect={vi.fn()}
+          onActivate={vi.fn()}
+        />
+      </GatewayProvider>,
     );
 
     expect(appsList().getAllByRole('option').length).toBeLessThan(80);
@@ -97,12 +103,14 @@ describe('AppsList', () => {
   it('exposes listbox options with stable path identity and no nested buttons', () => {
     const apps = makeApps(3);
     render(
-      <AppsList
-        apps={apps}
-        selectedKey={apps[1]!.path}
-        onSelect={vi.fn()}
-        onActivate={vi.fn()}
-      />,
+      <GatewayProvider gateway={mockGateway}>
+        <AppsList
+          apps={apps}
+          selectedKey={apps[1]!.path}
+          onSelect={vi.fn()}
+          onActivate={vi.fn()}
+        />
+      </GatewayProvider>,
     );
 
     const listbox = screen.getByRole('listbox', { name: 'Application results' });
@@ -143,5 +151,52 @@ describe('AppsList', () => {
       'data-path',
       '/synthetic/Applications/Synthetic Application 20.app',
     );
+  });
+
+  /// A fresh path per icon test: the icon cache is module-wide, and a path
+  /// another test already answered would short-circuit the gateway mock.
+  const freshApp = (): AppEntry => ({
+    name: 'Iconed',
+    bundleId: 'com.example.iconed',
+    path: `/synthetic/Applications/${crypto.randomUUID()}/Iconed.app`,
+  });
+
+  const renderIconedList = (gateway: ClipboardGateway, apps: AppEntry[]) =>
+    render(
+      <GatewayProvider gateway={gateway}>
+        <AppsList apps={apps} selectedKey={null} onSelect={vi.fn()} onActivate={vi.fn()} />
+      </GatewayProvider>,
+    );
+
+  it('draws the rendered application icon in the row', async () => {
+    const gateway = {
+      ...mockGateway,
+      getAppIcon: vi.fn(async () => SYNTHETIC_APP_ICON),
+    } as ClipboardGateway;
+
+    renderIconedList(gateway, [freshApp()]);
+
+    const option = appsList().getByRole('option');
+    await waitFor(() => {
+      const icon = option.querySelector('img.app-row__icon');
+      expect(icon).not.toBeNull();
+      expect(icon?.getAttribute('src')).toMatch(/^data:image\/png;base64,/);
+    });
+    // Decorative: the row's accessible name is the application, not a
+    // repeated "icon of X" the screen reader would read twice.
+    expect(option.querySelector('img.app-row__icon')).toHaveAttribute('alt', '');
+  });
+
+  it('keeps the glyph when no icon arrives', async () => {
+    const gateway = {
+      ...mockGateway,
+      getAppIcon: vi.fn(async () => null),
+    } as ClipboardGateway;
+
+    renderIconedList(gateway, [freshApp()]);
+
+    await waitFor(() => expect(gateway.getAppIcon).toHaveBeenCalled());
+    // The placeholder glyph is the icon slot's occupant, not an <img>.
+    expect(appsList().getByRole('option').querySelector('img')).toBeNull();
   });
 });

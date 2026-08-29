@@ -1501,3 +1501,12 @@
   font-size: 12.5px;
   color: var(--ink);
 }
+
+/* The application's own icon, rendered by the core and sent as a data URL.
+   Sized for the 31px slot at 2x-free comfort: the slot centers it, the row
+   never resizes around it. */
+.app-row__icon {
+  display: block;
+  width: 27px;
+  height: 27px;
+}

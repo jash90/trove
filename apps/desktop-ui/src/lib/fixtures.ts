@@ -4,6 +4,7 @@ import type {
   HistoryItem,
   ImportProgress,
   StorageStats,
+  Thumbnail,
 } from './contracts';
 
 export const SYNTHETIC_HISTORY_ITEMS: HistoryItem[] = [
@@ -82,6 +83,13 @@ export const SYNTHETIC_APPS: AppEntry[] = [
   { name: 'Synthetic Terminal', bundleId: null, path: '/synthetic/Applications/Utilities/Synthetic Terminal.app' },
   { name: 'Łódź Editor', bundleId: 'pl.example.lodz-editor', path: '/synthetic/Applications/Łódź Editor.app' },
 ];
+
+/** A one-pixel transparent PNG: the stand-in icon every application shares. */
+export const SYNTHETIC_APP_ICON: Thumbnail = {
+  mimeType: 'image/png',
+  base64:
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKsMIgAAAABJRU5ErkJggg==',
+};
 
 export const SYNTHETIC_IMPORT_PROGRESS: ImportProgress = {
   runId: '0198f000-0000-7000-8000-000000000201',
