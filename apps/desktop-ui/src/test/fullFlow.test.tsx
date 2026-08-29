@@ -104,4 +104,26 @@ describe('the palette end to end', () => {
 
     expect(serious.map((violation) => violation.id)).toEqual([]);
   });
+
+  it('has no accessibility violations in the applications mode either', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<App gateway={mockGateway} />);
+    await settle();
+
+    await user.keyboard('{Tab}');
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole('listbox', { name: 'Application results' })).getAllByRole(
+          'option',
+        ).length,
+      ).toBeGreaterThan(0),
+    );
+
+    const result = await axe.run(container);
+    const serious = result.violations.filter((violation) =>
+      ['serious', 'critical'].includes(violation.impact ?? ''),
+    );
+
+    expect(serious.map((violation) => violation.id)).toEqual([]);
+  });
 });

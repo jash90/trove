@@ -1,9 +1,10 @@
 import '@testing-library/jest-dom/vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { mockGateway } from './lib/gateway';
+import { mockGateway, type ClipboardGateway } from './lib/gateway';
+import { SYNTHETIC_APPS } from './lib/fixtures';
 
 it('renders the private clipboard palette landmark', () => {
   render(<App />);
@@ -46,4 +47,148 @@ it('opens the import wizard from the keyboard, with no history selected', async 
 
   await user.keyboard('{Meta>}i{/Meta}');
   expect(await screen.findByRole('dialog', { name: 'Import history' })).toBeVisible();
+});
+
+describe('the launcher mode', () => {
+  beforeEach(() => {
+    // jsdom reports zero-sized elements, so the virtualizer would render no rows.
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(480);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const historyResults = () =>
+    within(screen.getByRole('listbox', { name: 'Clipboard history results' }));
+  const appsResults = () =>
+    within(screen.getByRole('listbox', { name: 'Application results' }));
+
+  const settleHistory = async (): Promise<void> => {
+    await waitFor(() =>
+      expect(historyResults().getAllByRole('option').length).toBeGreaterThan(0),
+    );
+  };
+  const settleApps = async (): Promise<void> => {
+    await waitFor(() =>
+      expect(appsResults().getAllByRole('option').length).toBeGreaterThan(0),
+    );
+  };
+
+  it('tab switches between history and applications and back, keeping the field focused', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await settleHistory();
+    const search = screen.getByRole('searchbox');
+
+    await user.keyboard('{Tab}');
+    await settleApps();
+    expect(screen.queryByRole('listbox', { name: 'Clipboard history results' })).toBeNull();
+    // The field is shared, not remounted: focus survives the toggle.
+    expect(search).toHaveFocus();
+
+    await user.keyboard('{Tab}');
+    await settleHistory();
+    expect(screen.queryByRole('listbox', { name: 'Application results' })).toBeNull();
+    expect(search).toHaveFocus();
+  });
+
+  it('typing in the mode filters the catalog without refetching it', async () => {
+    const user = userEvent.setup();
+    const listApps = vi.fn(async () => SYNTHETIC_APPS.map((app) => ({ ...app })));
+    render(<App gateway={{ ...mockGateway, listApps } as ClipboardGateway} />);
+
+    await settleHistory();
+    await user.keyboard('{Tab}');
+    await settleApps();
+    expect(listApps).toHaveBeenCalledOnce();
+
+    await user.type(screen.getByRole('searchbox'), 'notes');
+    await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
+    expect(appsResults().getByRole('option', { selected: true })).toHaveTextContent(
+      'Synthetic Notes',
+    );
+
+    // Every keystroke after the first narrowed a list already on the client.
+    expect(listApps).toHaveBeenCalledOnce();
+  });
+
+  it('enter launches the selected application by its catalog path', async () => {
+    const user = userEvent.setup();
+    const launchApp = vi.fn(async () => undefined);
+    render(<App gateway={{ ...mockGateway, launchApp } as ClipboardGateway} />);
+
+    await settleHistory();
+    await user.keyboard('{Tab}');
+    await settleApps();
+
+    await user.type(screen.getByRole('searchbox'), 'terminal');
+    await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
+    await user.keyboard('{Enter}');
+
+    expect(launchApp).toHaveBeenCalledWith(
+      '/synthetic/Applications/Utilities/Synthetic Terminal.app',
+    );
+  });
+
+  it('escape clears the query before leaving the mode, and never closes the palette', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await settleHistory();
+    await user.keyboard('{Tab}');
+    await settleApps();
+    await user.type(screen.getByRole('searchbox'), 'notes');
+
+    await user.keyboard('{Escape}');
+    expect(screen.getByRole('searchbox')).toHaveValue('');
+    expect(appsResults().getAllByRole('option').length).toBeGreaterThan(0);
+
+    await user.keyboard('{Escape}');
+    await settleHistory();
+    expect(screen.getByRole('application', { name: 'Clipboard history' })).toBeVisible();
+  });
+
+  it('keeps the row shortcuts of the history mode inert here', async () => {
+    const user = userEvent.setup();
+    const setPinned = vi.fn(async () => undefined);
+    const deleteEvent = vi.fn(async () => undefined);
+    render(
+      <App gateway={{ ...mockGateway, setPinned, deleteEvent } as ClipboardGateway} />,
+    );
+
+    await settleHistory();
+    await user.keyboard('{Tab}');
+    await settleApps();
+
+    await user.keyboard('{Meta>}p{/Meta}');
+    await user.keyboard('{Delete}');
+    await user.keyboard('{Meta>}c{/Meta}');
+
+    expect(setPinned).not.toHaveBeenCalled();
+    expect(deleteEvent).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('reports a failed launch without repeating the path it was given', async () => {
+    const user = userEvent.setup();
+    const launchApp = vi.fn(async () => {
+      throw new Error('/private/wherever/the/app/was.app');
+    });
+    render(<App gateway={{ ...mockGateway, launchApp } as ClipboardGateway} />);
+
+    await settleHistory();
+    await user.keyboard('{Tab}');
+    await settleApps();
+
+    await user.type(screen.getByRole('searchbox'), 'terminal');
+    await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
+    await user.keyboard('{Enter}');
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/could not be started/i);
+    expect(alert).not.toHaveTextContent('/private');
+    expect(alert).not.toHaveTextContent('.app');
+  });
 });

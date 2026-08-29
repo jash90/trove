@@ -1,29 +1,58 @@
-import { ClipboardX, LoaderCircle, TriangleAlert } from 'lucide-react';
+import { AppWindowMac, ClipboardX, LoaderCircle, TriangleAlert } from 'lucide-react';
 
 type EmptyStateKind = 'loading' | 'empty' | 'error';
+type EmptyStateSubject = 'history' | 'applications';
 
 interface EmptyStateProps {
   kind: EmptyStateKind;
+  /** Which list went quiet; the copy and the icon follow it. */
+  subject?: EmptyStateSubject;
 }
 
-const STATE_COPY: Record<EmptyStateKind, { title: string; detail: string }> = {
-  loading: {
-    title: 'Loading history…',
-    detail: 'Sorting the most recent entries.',
+const STATE_COPY: Record<EmptyStateSubject, Record<EmptyStateKind, { title: string; detail: string }>> = {
+  history: {
+    loading: {
+      title: 'Loading history…',
+      detail: 'Sorting the most recent entries.',
+    },
+    empty: {
+      title: 'The history is empty',
+      detail: 'Copied items appear here automatically.',
+    },
+    error: {
+      title: 'The history could not be loaded',
+      detail: 'Try again in a moment.',
+    },
   },
-  empty: {
-    title: 'The history is empty',
-    detail: 'Copied items appear here automatically.',
-  },
-  error: {
-    title: 'The history could not be loaded',
-    detail: 'Try again in a moment.',
+  applications: {
+    loading: {
+      title: 'Loading applications…',
+      detail: 'Reading the installed bundles.',
+    },
+    empty: {
+      title: 'No application matched',
+      detail: 'Type less, or press Tab to return to the history.',
+    },
+    error: {
+      title: 'The applications could not be loaded',
+      detail: 'Try again in a moment.',
+    },
   },
 };
 
-export const EmptyState = ({ kind }: EmptyStateProps): React.JSX.Element => {
-  const copy = STATE_COPY[kind];
-  const Icon = kind === 'loading' ? LoaderCircle : kind === 'error' ? TriangleAlert : ClipboardX;
+export const EmptyState = ({
+  kind,
+  subject = 'history',
+}: EmptyStateProps): React.JSX.Element => {
+  const copy = STATE_COPY[subject][kind];
+  const Icon =
+    kind === 'loading'
+      ? LoaderCircle
+      : kind === 'error'
+        ? TriangleAlert
+        : subject === 'applications'
+          ? AppWindowMac
+          : ClipboardX;
 
   return (
     <section
