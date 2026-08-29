@@ -135,8 +135,8 @@
 .history-column {
   min-width: 0;
   min-height: 0;
-  display: grid;
-  grid-template-rows: minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
 }
 
 .history-panel {
@@ -1482,17 +1482,9 @@
   font-size: 12px;
 }
 
-/* The launcher mode's middle: one column. The rows keep the history rhythm
-   (same classes, same height), so Tab swaps the content without moving the
-   layout — only the preview column is gone, and with it the grid's second
-   track. */
-.palette-content--apps {
-  grid-template-columns: minmax(0, 1fr);
-}
-
 /* A refused launch stays on screen until the next attempt or selection; it
-   sits above the list, where the action bar's feedback sits in the history
-   mode. */
+   sits above the sections, where the action bar's feedback sits in the
+   history's own column. */
 .apps-launch-error {
   margin: 10px 12px 0;
   padding: 7px 11px;
@@ -1500,6 +1492,47 @@
   border-radius: 8px;
   font-size: 12.5px;
   color: var(--ink);
+}
+
+/* The two sections of the palette's left column. The applications keep a
+   bounded height with their own scroll so a large catalog cannot push the
+   history out of sight; the history takes whatever is left. */
+.palette-section {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.palette-section--apps {
+  flex: 0 0 auto;
+}
+
+.palette-section--apps .palette-section__panel {
+  height: 348px;
+  min-height: 0;
+}
+
+.palette-section--history {
+  flex: 1 1 auto;
+}
+
+.palette-section--history .history-panel {
+  flex: 1;
+}
+
+.palette-section__panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.palette-section__label {
+  margin: 10px 12px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 /* The application's own icon, rendered by the core and sent as a data URL.

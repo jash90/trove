@@ -4,19 +4,15 @@ import type { ChangeEventHandler, KeyboardEventHandler, Ref } from 'react';
 import { formatCount } from '../lib/format';
 import { TypeFilter } from './TypeFilter';
 
-export type PaletteMode = 'history' | 'apps';
-
 interface PaletteHeaderProps {
-  mode: PaletteMode;
   query: string;
-  selectedId: number | null;
+  /** The option id the field should point at, in either list. */
+  activeDescendant?: string;
   resultCount: number;
-  /** True when the list is full, so more entries match than are shown. */
+  /** True when the history list is full, so more entries match than are shown. */
   resultsTruncated: boolean;
-  /** True while a newer query is on its way over results already on screen. */
+  /** True while a newer history query is on its way over results on screen. */
   refreshing: boolean;
-  /** The launcher option id the field should point at, ready-made. */
-  appsActiveDescendant?: string;
   searchInputRef?: Ref<HTMLInputElement>;
   onQueryChange: (query: string) => void;
   onKeyDown: KeyboardEventHandler<HTMLInputElement>;
@@ -26,19 +22,18 @@ interface PaletteHeaderProps {
 ///
 /// It used to carry a title, a logo, a static "listening" badge and two
 /// buttons above the search field. None of it was ever read twice, and all
-/// of it pushed the results down. What a person summons a clipboard palette for
-/// is the field and the list, so that is what the top is now.
+/// of it pushed the results down. What a person summons a palette for is
+/// the field and the list, so that is what the top is now.
 ///
-/// The field is shared by both modes: it never remounts, so focus survives
-/// the Tab toggle, and only its labels and the list they point at change.
+/// The field drives both lists at once — applications filtered on the
+/// client, history over the bridge — so it points `aria-controls` at both
+/// and `aria-activedescendant` at whichever row either list has selected.
 export const PaletteHeader = ({
-  mode,
   query,
-  selectedId,
+  activeDescendant,
   resultCount,
   resultsTruncated,
   refreshing,
-  appsActiveDescendant,
   searchInputRef,
   onQueryChange,
   onKeyDown,
@@ -46,13 +41,12 @@ export const PaletteHeader = ({
   const handleChange: ChangeEventHandler<HTMLInputElement> = (event) => {
     onQueryChange(event.currentTarget.value);
   };
-  const inAppsMode = mode === 'apps';
 
   return (
     <header className="palette-header">
       <label className="search-field" htmlFor="history-search">
         <Search className="search-field__icon" size={19} strokeWidth={1.8} aria-hidden="true" />
-        <span className="sr-only">{inAppsMode ? 'Search applications' : 'Search history'}</span>
+        <span className="sr-only">Search applications and history</span>
         <input
           ref={searchInputRef}
           id="history-search"
@@ -60,21 +54,11 @@ export const PaletteHeader = ({
           autoComplete="off"
           spellCheck={false}
           value={query}
-          placeholder={
-            inAppsMode
-              ? 'Szukaj zainstalowanej aplikacji…'
-              : 'Szukaj tekstu, aplikacji lub operatora…'
-          }
-          aria-controls={inAppsMode ? 'apps-results' : 'history-results'}
+          placeholder="Szukaj w aplikacjach i historii…"
+          aria-controls="apps-results history-results"
           aria-autocomplete="list"
-          aria-label={inAppsMode ? 'Search applications' : 'Search history'}
-          aria-activedescendant={
-            inAppsMode
-              ? appsActiveDescendant
-              : selectedId === null
-                ? undefined
-                : `history-option-${selectedId}`
-          }
+          aria-label="Search applications and history"
+          aria-activedescendant={activeDescendant}
           onChange={handleChange}
           onKeyDown={onKeyDown}
         />
@@ -91,9 +75,7 @@ export const PaletteHeader = ({
           {resultsTruncated ? '+' : ''}
         </span>
       </label>
-      {/* The type filter emits `type:` tokens the history search understands;
-          pointed at applications they would be noise on the screen. */}
-      {inAppsMode ? null : <TypeFilter query={query} onQueryChange={onQueryChange} />}
+      <TypeFilter query={query} onQueryChange={onQueryChange} />
     </header>
   );
 };

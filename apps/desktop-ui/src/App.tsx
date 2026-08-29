@@ -8,19 +8,17 @@ import {
 } from 'react';
 
 import { ActionBar } from './components/ActionBar';
-import { AppsWorkspace } from './components/AppsWorkspace';
 import { ImportWizard } from './components/ImportWizard';
-import { PaletteHeader, type PaletteMode } from './components/PaletteHeader';
+import { PaletteHeader } from './components/PaletteHeader';
 import { PaletteWorkspace } from './components/PaletteWorkspace';
 import { useAppsCatalog } from './hooks/useAppsCatalog';
 import { useHistoryActions } from './hooks/useHistoryActions';
 import { useHistorySearch } from './hooks/useHistorySearch';
-import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
 import { useListNavigation } from './hooks/useListNavigation';
 import { useSelectedPreview } from './hooks/useSelectedPreview';
 import { useLinkPreview } from './hooks/useLinkPreview';
 import { useThumbnail } from './hooks/useThumbnail';
-import { HISTORY_PAGE_SIZE } from './lib/contracts';
+import { HISTORY_PAGE_SIZE, type AppEntry, type HistoryItem } from './lib/contracts';
 import { filterApps } from './lib/appSearch';
 import {
   GatewayProvider,
@@ -56,17 +54,23 @@ const shortcutIsBlocked = (
   return target.id !== 'history-search' || TEXT_EDITING_KEYS.has(event.key);
 };
 
+/// One selectable row of either list, in the order the palette walks them:
+/// applications first — a launcher is what the palette becomes the moment
+/// it opens — then the history underneath.
+type PaletteItem = { kind: 'app'; app: AppEntry } | { kind: 'history'; item: HistoryItem };
+
+const keyOfItem = (entry: PaletteItem): string =>
+  entry.kind === 'app' ? entry.app.path : `h${entry.item.eventId}`;
+
 const ClipboardPalette = (): React.JSX.Element => {
   const gateway = useGateway();
   const { query, setQuery, status, refreshing, items } = useHistorySearch(gateway);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
   const [workspace, setWorkspace] = useState<'none' | 'import'>('none');
-  // One palette, two lists: the history this application exists for, and the
-  // installed applications it can also start. Tab moves between them because
-  // it touches nothing else — not the query, not any command's modifiers.
-  const [mode, setMode] = useState<PaletteMode>('history');
-  const catalog = useAppsCatalog(gateway, mode === 'apps');
+  // The catalog lives beside the history from the first frame: the palette
+  // is a launcher the moment it opens, not after a mode is toggled into.
+  const catalog = useAppsCatalog(gateway, true);
   const visibleApps = useMemo(() => filterApps(catalog.apps, query), [catalog.apps, query]);
   const [launchError, setLaunchError] = useState<string | null>(null);
   const focusSearch = (): void => searchInputRef.current?.focus();
@@ -79,51 +83,61 @@ const ClipboardPalette = (): React.JSX.Element => {
     onFocusSearch: focusSearch,
     onOpenPreview: () => setMobilePreviewOpen(true),
   });
-  const handleActivate = (eventId: number): void => actions.copy(eventId, 'paste');
-  const navigation = useKeyboardNavigation({
-    items: actions.visibleItems,
-    onActivate: handleActivate,
-    onEscape: () => setQuery(''),
-  });
+
   const handleLaunch = (path: string): void => {
     setLaunchError(null);
     // A refusal leaves the palette where it is — the application the user
     // asked for did not start, so there is nothing to make way for.
     void gateway.launchApp(path).catch(() => setLaunchError('The application could not be started.'));
   };
-  const appsNavigation = useListNavigation({
-    items: visibleApps,
-    keyOf: (app) => app.path,
-    onActivate: (app) => handleLaunch(app.path),
-    // Escape climbs down before it leaves: first the query, then the mode,
-    // and never the palette itself — only the shortcut and the window's close
-    // box ever hide this window.
-    onEscape: () => {
-      if (query !== '') {
-        setQuery('');
-      } else {
-        setMode('history');
-      }
-    },
-  });
-  const appsSelectedIndex = visibleApps.findIndex(
-    (app) => app.path === appsNavigation.selectedKey,
-  );
-  const appsActiveDescendant =
-    appsSelectedIndex >= 0 ? `app-option-${appsSelectedIndex}` : undefined;
 
-  const selectedItem =
-    actions.visibleItems.find((item) => item.eventId === navigation.selectedId) ?? null;
-  const preview = useSelectedPreview(gateway, navigation.selectedId);
+  const paletteItems = useMemo<PaletteItem[]>(
+    () => [
+      ...visibleApps.map((app): PaletteItem => ({ kind: 'app', app })),
+      ...actions.visibleItems.map((item): PaletteItem => ({ kind: 'history', item })),
+    ],
+    [visibleApps, actions.visibleItems],
+  );
+
+  const handleActivate = (entry: PaletteItem): void => {
+    if (entry.kind === 'app') {
+      handleLaunch(entry.app.path);
+    } else {
+      actions.copy(entry.item.eventId, 'paste');
+    }
+  };
+
+  const navigation = useListNavigation({
+    items: paletteItems,
+    keyOf: keyOfItem,
+    onActivate: handleActivate,
+    // Escape only ever clears the query: with one shared field there is no
+    // mode to back out of, and hiding the palette is the shortcut's job.
+    onEscape: () => setQuery(''),
+  });
+
+  const selected = paletteItems.find((entry) => keyOfItem(entry) === navigation.selectedKey) ?? null;
+  const selectedApp = selected?.kind === 'app' ? selected.app : null;
+  const selectedHistoryItem = selected?.kind === 'history' ? selected.item : null;
+  const selectedHistoryId = selectedHistoryItem?.eventId ?? null;
+  const selectedAppIndex = selectedApp === null ? -1 : visibleApps.findIndex((app) => app.path === selectedApp.path);
+  const activeDescendant =
+    selectedAppIndex >= 0
+      ? `app-option-${selectedAppIndex}`
+      : selectedHistoryId === null
+        ? undefined
+        : `history-option-${selectedHistoryId}`;
+
+  const preview = useSelectedPreview(gateway, selectedHistoryId);
   const thumbnail = useThumbnail(
     gateway,
-    navigation.selectedId,
+    selectedHistoryId,
     // Not gated on `hasThumbnail`: that flag is false exactly while no
     // thumbnail exists, which is when one needs rendering. The command
     // answers cheaply when there is no image to render from.
-    selectedItem?.kind === 'image',
+    selectedHistoryItem?.kind === 'image',
   );
-  const link = useLinkPreview(gateway, navigation.selectedId, selectedItem?.kind === 'link');
+  const link = useLinkPreview(gateway, selectedHistoryId, selectedHistoryItem?.kind === 'link');
 
   // Settings are their own window; the palette only asks for it.
   const openSettings = (): void => void gateway.openSettingsWindow().catch(() => undefined);
@@ -139,12 +153,12 @@ const ClipboardPalette = (): React.JSX.Element => {
   };
 
   const handleSelect = (eventId: number): void => {
-    navigation.setSelectedId(eventId);
+    navigation.setSelectedKey(`h${eventId}`);
     actions.clearFeedback();
     focusSearch();
   };
   const handleAppSelect = (path: string): void => {
-    appsNavigation.setSelectedKey(path);
+    navigation.setSelectedKey(path);
     setLaunchError(null);
     focusSearch();
   };
@@ -153,29 +167,22 @@ const ClipboardPalette = (): React.JSX.Element => {
     focusSearch();
   };
   const handleSearchKeyDown: KeyboardEventHandler<HTMLInputElement> = (event) => {
-    // Tab is the palette's, not the list's: it never reaches a navigation
-    // handler, which would only pass it through unprevented anyway.
-    if (event.key === 'Tab' || actions.deleteTargetId !== null) return;
-    if (mode === 'apps') {
-      appsNavigation.handleKeyDown(event);
-    } else {
-      navigation.handleKeyDown(event);
-    }
+    if (actions.deleteTargetId === null) navigation.handleKeyDown(event);
   };
   const handleCopy = (): void => {
-    if (navigation.selectedId !== null) actions.copy(navigation.selectedId, 'copy');
+    if (selectedHistoryId !== null) actions.copy(selectedHistoryId, 'copy');
   };
   const handlePaste = (): void => {
-    if (navigation.selectedId !== null) actions.copy(navigation.selectedId, 'paste');
+    if (selectedHistoryId !== null) actions.copy(selectedHistoryId, 'paste');
   };
   const handlePastePlainText = (): void => {
-    if (navigation.selectedId !== null) actions.copy(navigation.selectedId, 'pastePlain');
+    if (selectedHistoryId !== null) actions.copy(selectedHistoryId, 'pastePlain');
   };
   const handleTogglePin = (): void => {
-    if (selectedItem) actions.togglePin(selectedItem);
+    if (selectedHistoryItem) actions.togglePin(selectedHistoryItem);
   };
   const handleRequestDelete = (): void => {
-    if (navigation.selectedId !== null) actions.requestDelete(navigation.selectedId);
+    if (selectedHistoryId !== null) actions.requestDelete(selectedHistoryId);
   };
   const handlePaletteKeyDown: KeyboardEventHandler<HTMLElement> = (event) => {
     if (shortcutIsBlocked(event, modalOpen)) return;
@@ -193,19 +200,11 @@ const ClipboardPalette = (): React.JSX.Element => {
       openSettings();
       return;
     }
-    // One place handles Tab for the whole palette — the field's handler
-    // passes it through — and it must preventDefault, or the browser moves
-    // focus instead of the mode. Shift+Tab stays real focus movement, and
-    // Alt+Tab belongs to the operating system.
-    if (!primaryModifier && !event.shiftKey && !event.altKey && event.key === 'Tab') {
-      event.preventDefault();
-      setLaunchError(null);
-      setMode((current) => (current === 'history' ? 'apps' : 'history'));
-      return;
-    }
-    // The row shortcuts below act on a history entry; in the launcher mode
-    // there is none, and ⌘P or Delete doing nothing is the honest behavior.
-    if (mode === 'apps' || navigation.selectedId === null) return;
+    // The row shortcuts below act on a history entry; while an application
+    // holds the selection there is none, and ⌘P or Delete doing nothing is
+    // the honest behavior. Tab is deliberately absent: focus movement is
+    // the browser's to manage, and this palette has no mode to toggle.
+    if (selectedHistoryItem === null) return;
     if (primaryModifier && !event.shiftKey && key === 'c') {
       event.preventDefault();
       handleCopy();
@@ -225,10 +224,10 @@ const ClipboardPalette = (): React.JSX.Element => {
     }
   };
 
-  const actionBar = selectedItem ? (
+  const actionBar = selectedHistoryItem ? (
     <ActionBar
-      pinned={selectedItem.pinned}
-      pinPending={actions.pinPendingId === selectedItem.eventId}
+      pinned={selectedHistoryItem.pinned}
+      pinPending={actions.pinPendingId === selectedHistoryItem.eventId}
       deletePending={actions.deletePending}
       feedback={actions.feedback}
       deleteConfirmationOpen={actions.deleteTargetId !== null}
@@ -241,78 +240,65 @@ const ClipboardPalette = (): React.JSX.Element => {
     />
   ) : null;
 
-  const inAppsMode = mode === 'apps';
-
   return (
     <main
       className="palette-stage"
       role="application"
-      aria-label={inAppsMode ? 'Application launcher' : 'Clipboard history'}
+      aria-label="Clipboard palette"
       onKeyDown={handlePaletteKeyDown}
     >
       <section
         className="palette-shell"
-        aria-label={inAppsMode ? 'Application launcher palette' : 'Clipboard history palette'}
+        aria-label="Clipboard history palette"
         inert={modalOpen}
       >
         <PaletteHeader
-          mode={mode}
           query={query}
-          selectedId={navigation.selectedId}
-          resultCount={inAppsMode ? visibleApps.length : actions.visibleItems.length}
-          resultsTruncated={!inAppsMode && actions.visibleItems.length >= HISTORY_PAGE_SIZE}
-          refreshing={!inAppsMode && refreshing}
-          appsActiveDescendant={appsActiveDescendant}
+          activeDescendant={activeDescendant}
+          resultCount={visibleApps.length + actions.visibleItems.length}
+          resultsTruncated={actions.visibleItems.length >= HISTORY_PAGE_SIZE}
+          refreshing={refreshing}
           searchInputRef={searchInputRef}
           onQueryChange={handleQueryChange}
           onKeyDown={handleSearchKeyDown}
         />
-        {inAppsMode ? (
-          <AppsWorkspace
-            status={catalog.status}
-            apps={visibleApps}
-            selectedKey={appsNavigation.selectedKey}
-            launchError={launchError}
-            onSelect={handleAppSelect}
-            onActivate={handleLaunch}
-          />
-        ) : (
-          <PaletteWorkspace
-            status={status}
-            items={actions.visibleItems}
-            selectedId={navigation.selectedId}
-            preview={preview.preview}
-            previewStatus={preview.status}
-            thumbnailUrl={thumbnail.url}
-            thumbnailStatus={thumbnail.status}
-            linkPreview={link.preview}
-            mobilePreviewOpen={mobilePreviewOpen}
-            actions={actionBar}
-            onSelect={handleSelect}
-            onActivate={handleActivate}
-            onRevealSource={() => {
-              if (navigation.selectedId !== null) void gateway.revealSource(navigation.selectedId);
-            }}
-            onOpenPreview={() => setMobilePreviewOpen(true)}
-            onClosePreview={() => {
-              setMobilePreviewOpen(false);
-              focusSearch();
-            }}
-          />
-        )}
+        <PaletteWorkspace
+          appsStatus={catalog.status}
+          apps={visibleApps}
+          selectedAppPath={selectedApp?.path ?? null}
+          launchError={launchError}
+          status={status}
+          items={actions.visibleItems}
+          selectedId={selectedHistoryId}
+          preview={preview.preview}
+          previewStatus={preview.status}
+          thumbnailUrl={thumbnail.url}
+          thumbnailStatus={thumbnail.status}
+          linkPreview={link.preview}
+          mobilePreviewOpen={mobilePreviewOpen}
+          actions={actionBar}
+          onSelectApp={handleAppSelect}
+          onActivateApp={handleLaunch}
+          onSelect={handleSelect}
+          onActivate={(eventId) => actions.copy(eventId, 'paste')}
+          onRevealSource={() => {
+            if (selectedHistoryId !== null) void gateway.revealSource(selectedHistoryId);
+          }}
+          onOpenPreview={() => setMobilePreviewOpen(true)}
+          onClosePreview={() => {
+            setMobilePreviewOpen(false);
+            focusSearch();
+          }}
+        />
         {/* ActionBar owns the live region while a row is selected; this covers
             the case where the last item was just deleted and it unmounted. */}
-        {selectedItem === null && actions.feedback ? (
+        {selectedHistoryItem === null && actions.feedback ? (
           <p className="sr-only" role="status" aria-live="polite">
             {actions.feedback}
           </p>
         ) : null}
         <footer className="palette-footer">
-          <span>
-            {inAppsMode
-              ? '↵ launch · Tab history · ⌘⇧Space summon'
-              : '↵ paste · ⌘C copy · ⌘⇧V plain · Tab apps · ⌘⇧Space summon'}
-          </span>
+          <span>↵ open · ⌘C copy · ⌘⇧V plain · ⌘⇧Space summon</span>
           {/* Out of the way but still visible: a shortcut nobody was told about
               is the same as no way in. */}
           <span className="palette-footer__entries">

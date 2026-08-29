@@ -5,17 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { mockGateway, type ClipboardGateway } from './lib/gateway';
 import { SYNTHETIC_APPS } from './lib/fixtures';
-import type { AppEntry } from './lib/contracts';
 
 it('renders the private clipboard palette landmark', () => {
   render(<App />);
-  expect(screen.getByRole('application', { name: 'Clipboard history' })).toBeVisible();
+  expect(screen.getByRole('application', { name: 'Clipboard palette' })).toBeVisible();
 });
 
 it('opens the import wizard over the palette and returns focus to the search field', async () => {
   const user = userEvent.setup();
   render(<App />);
-  const search = screen.getByRole('searchbox', { name: 'Search history' });
+  const search = screen.getByRole('searchbox');
 
   await user.click(screen.getByRole('button', { name: 'Importuj archiwum' }));
   expect(screen.getByRole('dialog', { name: 'Import history' })).toBeVisible();
@@ -50,7 +49,7 @@ it('opens the import wizard from the keyboard, with no history selected', async 
   expect(await screen.findByRole('dialog', { name: 'Import history' })).toBeVisible();
 });
 
-describe('the launcher mode', () => {
+describe('the unified palette', () => {
   beforeEach(() => {
     // jsdom reports zero-sized elements, so the virtualizer would render no rows.
     vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(900);
@@ -77,37 +76,25 @@ describe('the launcher mode', () => {
     );
   };
 
-  it('tab switches between history and applications and back, keeping the field focused', async () => {
-    const user = userEvent.setup();
+  it('shows applications above the history before anything is typed', async () => {
     render(<App />);
-    await settleHistory();
-    const search = screen.getByRole('searchbox');
-
-    await user.keyboard('{Tab}');
     await settleApps();
-    expect(screen.queryByRole('listbox', { name: 'Clipboard history results' })).toBeNull();
-    // The landmark follows the mode: a screen reader entering it deserves
-    // the context the inner labels already carry.
-    expect(screen.getByRole('application', { name: 'Application launcher' })).toBeVisible();
-    // The field is shared, not remounted: focus survives the toggle.
-    expect(search).toHaveFocus();
-
-    await user.keyboard('{Tab}');
     await settleHistory();
-    expect(screen.queryByRole('listbox', { name: 'Application results' })).toBeNull();
-    expect(screen.getByRole('application', { name: 'Clipboard history' })).toBeVisible();
-    expect(search).toHaveFocus();
+
+    // A launcher from the first frame: the whole catalog, alphabetically,
+    // with the recent history underneath it.
+    expect(appsResults().getAllByRole('option').length).toBe(SYNTHETIC_APPS.length);
+    expect(screen.getByRole('heading', { name: 'Aplikacje' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Historia' })).toBeVisible();
   });
 
-  it('typing in the mode filters the catalog without refetching it', async () => {
+  it('filters applications client-side while typing once fetched', async () => {
     const user = userEvent.setup();
     const listApps = vi.fn(async () => SYNTHETIC_APPS.map((app) => ({ ...app })));
     render(<App gateway={{ ...mockGateway, listApps } as ClipboardGateway} />);
 
-    await settleHistory();
-    await user.keyboard('{Tab}');
     await settleApps();
-    expect(listApps).toHaveBeenCalledOnce();
+    await settleHistory();
 
     await user.type(screen.getByRole('searchbox'), 'notes');
     await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
@@ -119,14 +106,13 @@ describe('the launcher mode', () => {
     expect(listApps).toHaveBeenCalledOnce();
   });
 
-  it('enter launches the selected application by its catalog path', async () => {
+  it('launches the selected application with Enter', async () => {
     const user = userEvent.setup();
     const launchApp = vi.fn(async () => undefined);
     render(<App gateway={{ ...mockGateway, launchApp } as ClipboardGateway} />);
 
-    await settleHistory();
-    await user.keyboard('{Tab}');
     await settleApps();
+    await settleHistory();
 
     await user.type(screen.getByRole('searchbox'), 'terminal');
     await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
@@ -137,25 +123,48 @@ describe('the launcher mode', () => {
     );
   });
 
-  it('escape clears the query before leaving the mode, and never closes the palette', async () => {
+  it('pastes the selected history entry when no application matches', async () => {
+    const user = userEvent.setup();
+    const copyEvent = vi.fn(async () => ({ mode: 'pasted', plainText: false }));
+    render(<App gateway={{ ...mockGateway, copyEvent } as ClipboardGateway} />);
+
+    await settleApps();
+    await settleHistory();
+
+    // A query no application matches: the first selectable row is history.
+    await user.type(screen.getByRole('searchbox'), 'project note');
+    await waitFor(() =>
+      expect(screen.queryByRole('listbox', { name: 'Application results' })).toBeNull(),
+    );
+    await waitFor(() =>
+      expect(historyResults().getAllByRole('option').length).toBeGreaterThan(0),
+    );
+
+    await user.keyboard('{Enter}');
+
+    expect(copyEvent).toHaveBeenCalledWith(expect.any(Number), false, true);
+  });
+
+  it('opens the preview only for a selected history entry', async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await settleHistory();
-    await user.keyboard('{Tab}');
     await settleApps();
-    await user.type(screen.getByRole('searchbox'), 'notes');
-
-    await user.keyboard('{Escape}');
-    expect(screen.getByRole('searchbox')).toHaveValue('');
-    expect(appsResults().getAllByRole('option').length).toBeGreaterThan(0);
-
-    await user.keyboard('{Escape}');
     await settleHistory();
-    expect(screen.getByRole('application', { name: 'Clipboard history' })).toBeVisible();
+
+    // An application holds the selection by default; an application has no
+    // payload to preview, so the pane shows nothing of one.
+    await user.type(screen.getByRole('searchbox'), 'terminal');
+    await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
+    expect(screen.queryByText('Synthetic document title')).toBeNull();
+
+    await user.type(screen.getByRole('searchbox'), '{Backspace}project note');
+    await waitFor(() =>
+      expect(screen.getByText('Synthetic project note for browser preview')).toBeVisible(),
+    );
   });
 
-  it('keeps the row shortcuts of the history mode inert here', async () => {
+  it('keeps the row shortcuts of the history inert while an application is selected', async () => {
     const user = userEvent.setup();
     const setPinned = vi.fn(async () => undefined);
     const deleteEvent = vi.fn(async () => undefined);
@@ -163,9 +172,11 @@ describe('the launcher mode', () => {
       <App gateway={{ ...mockGateway, setPinned, deleteEvent } as ClipboardGateway} />,
     );
 
-    await settleHistory();
-    await user.keyboard('{Tab}');
     await settleApps();
+    await settleHistory();
+
+    await user.type(screen.getByRole('searchbox'), 'terminal');
+    await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
 
     await user.keyboard('{Meta>}p{/Meta}');
     await user.keyboard('{Delete}');
@@ -176,6 +187,37 @@ describe('the launcher mode', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
+  it('gives Tab back to the browser: focus leaves the field, nothing toggles', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await settleApps();
+    await settleHistory();
+
+    const search = screen.getByRole('searchbox');
+    expect(search).toHaveFocus();
+
+    await user.keyboard('{Tab}');
+
+    expect(search).not.toHaveFocus();
+    // Nothing about the palette changed behind the focus move.
+    expect(appsResults().getAllByRole('option').length).toBeGreaterThan(0);
+    expect(historyResults().getAllByRole('option').length).toBeGreaterThan(0);
+  });
+
+  it('clears the query with Escape and never closes the palette', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await settleApps();
+    await settleHistory();
+
+    await user.type(screen.getByRole('searchbox'), 'notes');
+    await user.keyboard('{Escape}');
+
+    expect(screen.getByRole('searchbox')).toHaveValue('');
+    expect(screen.getByRole('application', { name: 'Clipboard palette' })).toBeVisible();
+    expect(appsResults().getAllByRole('option').length).toBeGreaterThan(0);
+  });
+
   it('reports a failed launch without repeating the path it was given', async () => {
     const user = userEvent.setup();
     const launchApp = vi.fn(async () => {
@@ -183,9 +225,8 @@ describe('the launcher mode', () => {
     });
     render(<App gateway={{ ...mockGateway, launchApp } as ClipboardGateway} />);
 
-    await settleHistory();
-    await user.keyboard('{Tab}');
     await settleApps();
+    await settleHistory();
 
     await user.type(screen.getByRole('searchbox'), 'terminal');
     await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
@@ -197,34 +238,10 @@ describe('the launcher mode', () => {
     expect(alert).not.toHaveTextContent('.app');
   });
 
-  it('keeps the fetched list on screen while the catalog reloads', async () => {
-    const user = userEvent.setup();
-    // The first answer arrives; the second — the re-entry refetch — hangs,
-    // which is exactly the window a loading state used to swallow the list in.
-    const listApps = vi.fn<(typeof mockGateway)['listApps']>()
-      .mockImplementationOnce(async () => SYNTHETIC_APPS.map((app) => ({ ...app })))
-      .mockImplementationOnce(
-        () => new Promise<AppEntry[]>(() => undefined),
-      );
-    render(<App gateway={{ ...mockGateway, listApps } as ClipboardGateway} />);
-
-    await settleHistory();
-    await user.keyboard('{Tab}');
-    await settleApps();
-    expect(appsResults().getAllByRole('option').length).toBeGreaterThan(0);
-
-    await user.keyboard('{Tab}');
-    await user.keyboard('{Tab}');
-
-    // The reload is in flight and the list never left the screen, so Enter
-    // can only act on applications the user can actually see.
-    expect(appsResults().getAllByRole('option').length).toBeGreaterThan(0);
-    expect(listApps).toHaveBeenCalledTimes(2);
-  });
-
   it('leaves Tab to the dialog while one is open', async () => {
     const user = userEvent.setup();
     render(<App />);
+    await settleApps();
     await settleHistory();
 
     await user.keyboard('{Meta>}i{/Meta}');
@@ -232,10 +249,7 @@ describe('the launcher mode', () => {
 
     await user.keyboard('{Tab}');
 
-    // The guard, not the inert section, is what stops the toggle — and the
-    // dialog keeps Tab for its own controls either way.
     expect(screen.getByRole('listbox', { name: 'Clipboard history results' })).toBeInTheDocument();
-    expect(screen.queryByRole('listbox', { name: 'Application results' })).toBeNull();
     expect(screen.getByRole('dialog', { name: 'Import history' })).toBeVisible();
   });
 });

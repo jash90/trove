@@ -7,6 +7,13 @@ interface EmptyStateProps {
   kind: EmptyStateKind;
   /** Which list went quiet; the copy and the icon follow it. */
   subject?: EmptyStateSubject;
+  /**
+   * Drops the live-region semantics. Two sections share the palette now,
+   * and two live regions announcing at once is noise, not information:
+   * the applications section's placeholder states are visible but silent,
+   * leaving the announcements to whichever list the user is reading.
+   */
+  quiet?: boolean;
 }
 
 const STATE_COPY: Record<EmptyStateSubject, Record<EmptyStateKind, { title: string; detail: string }>> = {
@@ -31,7 +38,7 @@ const STATE_COPY: Record<EmptyStateSubject, Record<EmptyStateKind, { title: stri
     },
     empty: {
       title: 'No application matched',
-      detail: 'Type less, or press Tab to return to the history.',
+      detail: 'Type less to widen the results.',
     },
     error: {
       title: 'The applications could not be loaded',
@@ -43,6 +50,7 @@ const STATE_COPY: Record<EmptyStateSubject, Record<EmptyStateKind, { title: stri
 export const EmptyState = ({
   kind,
   subject = 'history',
+  quiet = false,
 }: EmptyStateProps): React.JSX.Element => {
   const copy = STATE_COPY[subject][kind];
   const Icon =
@@ -57,8 +65,8 @@ export const EmptyState = ({
   return (
     <section
       className={`empty-state empty-state--${kind}`}
-      role={kind === 'error' ? 'alert' : 'status'}
-      aria-live={kind === 'error' ? 'assertive' : 'polite'}
+      role={quiet ? undefined : kind === 'error' ? 'alert' : 'status'}
+      aria-live={quiet ? undefined : kind === 'error' ? 'assertive' : 'polite'}
     >
       <span className="empty-state__icon" aria-hidden="true">
         <Icon size={24} strokeWidth={1.6} />
