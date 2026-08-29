@@ -320,9 +320,27 @@ pub async fn set_pinned_service(
 }
 
 pub async fn delete_event_service(state: &AppState, event_id: i64) -> Result<(), String> {
+    // The list shows one row per distinct content, so removing the row the
+    // user sees removes the whole group behind it, not one occurrence.
+    let store = state.store.clone();
+    let content_id = run_blocking("history_write_failed", move || {
+        store
+            .with_reader(|connection| {
+                connection
+                    .query_row(
+                        "SELECT content_id FROM history_event WHERE event_id = ?1",
+                        [event_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+            })
+            .map_err(|error| store_error_code(&error, "history_read_failed"))
+    })
+    .await?
+    .ok_or_else(|| "history_event_not_found".to_owned())?;
     state
         .store
-        .delete_event(event_id)
+        .delete_events_for_content(content_id)
         .await
         .map_err(|error| store_error_code(&error, "history_write_failed"))
 }

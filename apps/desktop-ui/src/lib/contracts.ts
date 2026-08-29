@@ -22,6 +22,10 @@ export interface HistoryItem {
   preview: string;
   byteSize: number;
   hasThumbnail: boolean;
+  /** How many captures of this content are recorded, summed over its events. */
+  occurrenceCount: number;
+  /** When this content was captured, newest first, capped by the store. */
+  occurrences: number[];
 }
 
 export interface HistoryPage {

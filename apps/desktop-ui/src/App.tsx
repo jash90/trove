@@ -209,6 +209,7 @@ const ClipboardPalette = (): React.JSX.Element => {
           thumbnailUrl={thumbnail.url}
           thumbnailStatus={thumbnail.status}
           linkPreview={link.preview}
+          selectedItem={selectedItem}
           mobilePreviewOpen={mobilePreviewOpen}
           actions={actionBar}
           onSelect={handleSelect}

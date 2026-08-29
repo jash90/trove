@@ -918,7 +918,10 @@ fn transaction_boundary_epoch_change_discards_all_aggregate_claims() {
                 first_commit_sender.send(()).unwrap();
                 first = false;
             }
-            thread::sleep(Duration::from_millis(1));
+            // No sleep: a gap between commits is a window in which verify can
+            // legitimately finish against a quiet database, and a loaded CI
+            // runner starves this thread for exactly that long. The loop only
+            // runs for the duration of one verify.
         }
     });
     first_commit_receiver

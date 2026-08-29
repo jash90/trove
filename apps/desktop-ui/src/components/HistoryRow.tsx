@@ -13,7 +13,7 @@ import {
 import type { CSSProperties, MouseEventHandler } from 'react';
 
 import type { ContentKind, HistoryItem } from '../lib/contracts';
-import { fileBasename } from '../lib/format';
+import { fileBasename, formatCapturedAt } from '../lib/format';
 
 interface HistoryRowProps {
   item: HistoryItem;
@@ -43,16 +43,6 @@ const KIND_LABELS: Record<ContentKind, string> = {
   html: 'HTML',
 };
 
-const CAPTURED_AT_FORMATTER = new Intl.DateTimeFormat('en-GB', {
-  day: '2-digit',
-  month: 'short',
-  hour: '2-digit',
-  minute: '2-digit',
-});
-
-const formatCapturedAt = (capturedAtMs: number): string =>
-  CAPTURED_AT_FORMATTER.format(capturedAtMs);
-
 export const HistoryRow = ({
   item,
   selected,
@@ -74,7 +64,7 @@ export const HistoryRow = ({
       id={`history-option-${item.eventId}`}
       role="option"
       aria-selected={selected}
-      aria-label={`${KIND_LABELS[item.kind]}: ${displayPreview}`}
+      aria-label={`${KIND_LABELS[item.kind]}: ${displayPreview}${item.occurrenceCount > 1 ? `, captured ${item.occurrenceCount} times` : ''}`}
       data-event-id={item.eventId}
       className={`history-row${selected ? ' is-selected' : ''}${item.pinned ? ' is-pinned' : ''}`}
       style={style}
@@ -93,6 +83,11 @@ export const HistoryRow = ({
       </span>
       <span className="history-row__aside">
         {item.pinned ? <Pin size={13} fill="currentColor" aria-label="Pinned" /> : null}
+        {item.occurrenceCount > 1 ? (
+          <span className="history-row__occurrences" aria-label={`Captured ${item.occurrenceCount} times`}>
+            ×{item.occurrenceCount}
+          </span>
+        ) : null}
         <time dateTime={new Date(item.capturedAtMs).toISOString()}>
           {formatCapturedAt(item.capturedAtMs)}
         </time>
