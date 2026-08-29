@@ -6,11 +6,12 @@ import { TypeFilter } from './TypeFilter';
 
 interface PaletteHeaderProps {
   query: string;
-  selectedId: number | null;
+  /** The option id the field should point at, in either list. */
+  activeDescendant?: string;
   resultCount: number;
-  /** True when the list is full, so more entries match than are shown. */
+  /** True when the history list is full, so more entries match than are shown. */
   resultsTruncated: boolean;
-  /** True while a newer query is on its way over results already on screen. */
+  /** True while a newer history query is on its way over results on screen. */
   refreshing: boolean;
   searchInputRef?: Ref<HTMLInputElement>;
   onQueryChange: (query: string) => void;
@@ -20,12 +21,16 @@ interface PaletteHeaderProps {
 /// The whole top of the palette: one row.
 ///
 /// It used to carry a title, a logo, a static "listening" badge and two
-/// buttons above the search field. None of it was ever read twice, and all of
-/// it pushed the results down. What a person summons a clipboard palette for
-/// is the field and the list, so that is what the top is now.
+/// buttons above the search field. None of it was ever read twice, and all
+/// of it pushed the results down. What a person summons a palette for is
+/// the field and the list, so that is what the top is now.
+///
+/// The field drives both lists at once — applications filtered on the
+/// client, history over the bridge — so it points `aria-controls` at both
+/// and `aria-activedescendant` at whichever row either list has selected.
 export const PaletteHeader = ({
   query,
-  selectedId,
+  activeDescendant,
   resultCount,
   resultsTruncated,
   refreshing,
@@ -41,7 +46,7 @@ export const PaletteHeader = ({
     <header className="palette-header">
       <label className="search-field" htmlFor="history-search">
         <Search className="search-field__icon" size={19} strokeWidth={1.8} aria-hidden="true" />
-        <span className="sr-only">Search history</span>
+        <span className="sr-only">Search applications and history</span>
         <input
           ref={searchInputRef}
           id="history-search"
@@ -49,13 +54,11 @@ export const PaletteHeader = ({
           autoComplete="off"
           spellCheck={false}
           value={query}
-          placeholder="Szukaj tekstu, aplikacji lub operatora…"
-          aria-controls="history-results"
+          placeholder="Szukaj w aplikacjach i historii…"
+          aria-controls="apps-results history-results"
           aria-autocomplete="list"
-          aria-label="Search history"
-          aria-activedescendant={
-            selectedId === null ? undefined : `history-option-${selectedId}`
-          }
+          aria-label="Search applications and history"
+          aria-activedescendant={activeDescendant}
           onChange={handleChange}
           onKeyDown={onKeyDown}
         />

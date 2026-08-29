@@ -1,6 +1,7 @@
-import { useEffect, useState, type KeyboardEvent } from 'react';
+import type { KeyboardEvent } from 'react';
 
 import type { HistoryItem } from '../lib/contracts';
+import { useListNavigation } from './useListNavigation';
 
 interface UseKeyboardNavigationOptions {
   items: HistoryItem[];
@@ -14,67 +15,27 @@ interface UseKeyboardNavigationResult {
   handleKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
 }
 
+/**
+ * The history list's keyboard navigation, now a thin wrapper over the shared
+ * `useListNavigation`. The public shape is unchanged — numeric event ids in,
+ * numeric event ids out — so the palette and every existing test keep
+ * working while the launcher list moves by the same rules.
+ */
 export const useKeyboardNavigation = ({
   items,
   onActivate,
   onEscape,
 }: UseKeyboardNavigationOptions): UseKeyboardNavigationResult => {
-  const [storedSelectedId, setStoredSelectedId] = useState<number | null>(
-    items[0]?.eventId ?? null,
-  );
-  const selectedId = items.some((item) => item.eventId === storedSelectedId)
-    ? storedSelectedId
-    : (items[0]?.eventId ?? null);
-
-  // Remember only a real selection. Writing the fallback back in would erase
-  // what the user picked the moment a query narrows past it, so widening the
-  // query again would land on the first row instead of where they were.
-  useEffect(() => {
-    if (selectedId !== null && storedSelectedId !== selectedId) {
-      setStoredSelectedId(selectedId);
-    }
-  }, [selectedId, storedSelectedId]);
-
-  const handleKeyDown = (event: KeyboardEvent<HTMLElement>): void => {
-    const currentIndex = items.findIndex((item) => item.eventId === selectedId);
-    let nextIndex: number | null = null;
-
-    switch (event.key) {
-      case 'ArrowDown':
-        nextIndex = Math.min(Math.max(currentIndex, 0) + 1, items.length - 1);
-        break;
-      case 'ArrowUp':
-        nextIndex = Math.max(currentIndex - 1, 0);
-        break;
-      case 'Home':
-        nextIndex = 0;
-        break;
-      case 'End':
-        nextIndex = items.length - 1;
-        break;
-      case 'Enter':
-        if (selectedId !== null) {
-          event.preventDefault();
-          void onActivate(selectedId);
-        }
-        return;
-      case 'Escape':
-        event.preventDefault();
-        onEscape();
-        return;
-      default:
-        return;
-    }
-
-    if (nextIndex >= 0 && items[nextIndex]) {
-      event.preventDefault();
-      setStoredSelectedId(items[nextIndex].eventId);
-    }
-  };
+  const navigation = useListNavigation({
+    items,
+    keyOf: (item) => String(item.eventId),
+    onActivate: (item) => onActivate(item.eventId),
+    onEscape,
+  });
 
   return {
-    selectedId,
-    setSelectedId: setStoredSelectedId,
-    handleKeyDown,
+    selectedId: navigation.selectedKey === null ? null : Number(navigation.selectedKey),
+    setSelectedId: (eventId) => navigation.setSelectedKey(String(eventId)),
+    handleKeyDown: navigation.handleKeyDown,
   };
 };

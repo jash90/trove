@@ -126,6 +126,22 @@ export interface ExportSummary {
   withoutPayload: number;
 }
 
+export interface AppEntry {
+  name: string;
+  bundleId: string | null;
+  /** The canonical filesystem path of the `.app` directory. */
+  path: string;
+}
+
+/**
+ * Mirrors of the bounds in crates/clipboard-launcher/src/lib.rs. Keep both
+ * sides equal: a looser bound here can never fire and would hide a broken
+ * contract instead of reporting it.
+ */
+export const MAX_APP_NAME_BYTES = 256;
+export const MAX_APP_PATH_BYTES = 1_024;
+export const MAX_CATALOG_APPS = 2_000;
+
 export interface ImportAnalysis {
   analysisId: string;
   total: number;
@@ -232,6 +248,39 @@ export const validateStorageStats = (stats: StorageStats): StorageStats => {
     throw new Error('invalid_storage_stats');
   }
   return stats;
+};
+
+const isAppEntry = (entry: unknown): entry is AppEntry =>
+  typeof entry === 'object' &&
+  entry !== null &&
+  typeof (entry as AppEntry).name === 'string' &&
+  (entry as AppEntry).name.length > 0 &&
+  (entry as AppEntry).name.trim() === (entry as AppEntry).name &&
+  (entry as AppEntry).name.length <= MAX_APP_NAME_BYTES &&
+  typeof (entry as AppEntry).path === 'string' &&
+  (entry as AppEntry).path.startsWith('/') &&
+  (entry as AppEntry).path.length <= MAX_APP_PATH_BYTES &&
+  ((entry as AppEntry).bundleId === null ||
+    (typeof (entry as AppEntry).bundleId === 'string' &&
+      (entry as AppEntry).bundleId!.length > 0));
+
+/**
+ * Checks the launcher catalog at the IPC boundary. The core already bounds
+ * every field; this says so again on this side, because a contract only the
+ * sender believes in is not a contract.
+ */
+export const validateAppCatalog = (entries: AppEntry[]): AppEntry[] => {
+  if (!Array.isArray(entries) || entries.length > MAX_CATALOG_APPS) {
+    throw new Error('invalid_app_catalog');
+  }
+  const seenPaths = new Set<string>();
+  for (const entry of entries) {
+    if (!isAppEntry(entry) || seenPaths.has(entry.path)) {
+      throw new Error('invalid_app_catalog');
+    }
+    seenPaths.add(entry.path);
+  }
+  return entries;
 };
 
 export function validateImportProgress(

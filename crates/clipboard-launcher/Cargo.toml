@@ -1,0 +1,14 @@
+[package]
+name = "clipboard-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clipboard-core = { path = "../clipboard-core" }
+directories.workspace = true
+plist.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

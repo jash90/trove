@@ -644,6 +644,7 @@ dependencies = [
  "clipboard-images",
  "clipboard-import",
  "clipboard-keyvault",
+ "clipboard-launcher",
  "clipboard-link-preview",
  "clipboard-search",
  "clipboard-store",
@@ -742,6 +743,17 @@ dependencies = [
  "tokio",
  "url",
  "zeroize",
+]
+
+[[package]]
+name = "clipboard-launcher"
+version = "0.2.0"
+dependencies = [
+ "clipboard-core",
+ "directories",
+ "plist",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]
@@ -2867,11 +2879,10 @@ dependencies = [
 
 [[package]]
 name = "num-bigint-dig"
-version = "0.8.4"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc84195820f291c7697304f3cbdadd1cb7199c0efc917ff5eafd71225c136151"
+checksum = "e661dda6640fad38e827a6d4a310ff4763082116fe217f279885c97f511bb0b7"
 dependencies = [
- "byteorder",
  "lazy_static",
  "libm",
  "num-integer",
@@ -3431,6 +3442,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-graphics",
  "objc2-foundation",
+ "tempfile",
 ]
 
 [[package]]

@@ -8,6 +8,7 @@ members = [
   "crates/clipboard-images",
   "crates/clipboard-import",
   "crates/clipboard-keyvault",
+  "crates/clipboard-launcher",
   "crates/clipboard-link-preview",
   "crates/platform-macos",
   "crates/platform-linux",
@@ -49,7 +50,16 @@ directories = "6.0.0"
 encoding_rs = "0.8.35"
 # rust_backend keeps this pure Rust (miniz_oxide); no libz-sys, no C toolchain.
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
-image = { version = "0.25.10", default-features = false, features = ["gif", "png", "jpeg", "webp"] }
+# `tiff` is declared here even though arboard already turns it on transitively
+# on macOS: application icons arrive as NSImage TIFF, and relying on another
+# crate's feature set for a decoder this side calls directly is a dependency
+# that can silently break the moment that crate changes its mind.
+image = { version = "0.25.10", default-features = false, features = ["gif", "png", "jpeg", "webp", "tiff"] }
+# Bundle metadata lives in `Contents/Info.plist`, which macOS ships as XML or
+# as a binary plist depending on where the bundle sits — the reader has to take
+# both without asking. Already present transitively, so this pins the version
+# the shell already builds with rather than adding a new tree to the lockfile.
+plist = "1.10.0"
 # HTTPS through the system trust store: on macOS that is Security.framework,
 # so a corporate root or a user-added certificate behaves here exactly as it
 # does everywhere else on the machine. The alternative bundles its own crypto

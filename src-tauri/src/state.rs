@@ -1,18 +1,117 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use clipboard_import::ImportService;
+use clipboard_launcher::AppBundle;
 use clipboard_store::{StoreConfig, StoreHandle};
+use serde::Serialize;
 use tauri::Manager;
+
+/// How long a launcher catalog stays answerable without a rescan. Scanning a
+/// few hundred plists costs tens of milliseconds the palette should not pay
+/// on every entry; five minutes bounds how long a freshly installed
+/// application can stay invisible.
+pub const LAUNCHER_CACHE_TTL_MS: i64 = 5 * 60 * 1000;
+
+/// One rendered application icon, in the shape the bridge carries images.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppIconDto {
+    pub mime_type: String,
+    pub base64: String,
+}
+
+/// The application catalog and the roots it was scanned from.
+///
+/// `now_ms` is a parameter of [`LauncherState::catalog`], not a wall-clock
+/// read inside it: staleness is a fact a test can state directly instead of
+/// one it has to sleep and hope for.
+#[derive(Clone)]
+pub struct LauncherState {
+    roots: Arc<[PathBuf]>,
+    cached: Arc<Mutex<Option<CachedCatalog>>>,
+    /// Rendered icons, remembered per canonical path. An icon is a fact
+    /// about a bundle that changes only with the bundle, so it outlives the
+    /// catalog's TTL; the map grows with the distinct applications actually
+    /// shown, which the virtualized list keeps to a handful at a time.
+    icons: Arc<Mutex<HashMap<String, AppIconDto>>>,
+}
+
+struct CachedCatalog {
+    scanned_at_ms: i64,
+    catalog: Vec<AppBundle>,
+}
+
+impl LauncherState {
+    pub fn scanning(roots: Vec<PathBuf>) -> Self {
+        Self {
+            roots: Arc::from(roots),
+            cached: Arc::new(Mutex::new(None)),
+            icons: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// The roots launch validation accepts, the same ones the scan walked.
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
+    /// Returns the catalog, rescanning only when the cached copy has aged
+    /// out. The scan is blocking filesystem work; callers wrap it in
+    /// `spawn_blocking` at the command edge.
+    pub fn catalog(&self, now_ms: i64) -> Vec<AppBundle> {
+        let mut cached = self
+            .cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = cached
+            .as_ref()
+            .filter(|entry| now_ms.saturating_sub(entry.scanned_at_ms) < LAUNCHER_CACHE_TTL_MS)
+        {
+            return entry.catalog.clone();
+        }
+        let catalog = clipboard_launcher::scan_applications(&self.roots);
+        *cached = Some(CachedCatalog {
+            scanned_at_ms: now_ms,
+            catalog: catalog.clone(),
+        });
+        catalog
+    }
+
+    /// Returns the rendered icon for a catalog path, remembered after the
+    /// first answer. Validation refusals are the caller's to report — they
+    /// say the path was never listed, which no cache should paper over.
+    pub fn icon(
+        &self,
+        canonical: &str,
+        render: impl FnOnce() -> Option<AppIconDto>,
+    ) -> Option<AppIconDto> {
+        let mut icons = self
+            .icons
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(icon) = icons.get(canonical) {
+            return Some(icon.clone());
+        }
+        let rendered = render()?;
+        icons.insert(canonical.to_owned(), rendered.clone());
+        Some(rendered)
+    }
+}
 
 pub struct AppState {
     pub store: StoreHandle,
     pub importer: ImportService,
     /// Guards the one network path in the application against asking twice at
-    /// once and against asking a host that has stopped answering. Shared
+    /// once and against a host that has stopped answering. Shared
     /// mutable state behind a lock rather than globals, so tests can hold a
     /// coordinator of their own.
     pub previews: Mutex<crate::links::FetchCoordinator>,
+    /// The launcher's application catalog. Scanned lazily and cached with a
+    /// TTL, because the palette is hidden most of the time and a startup
+    /// scan would cost every launch for a window nobody opened.
+    pub launcher: LauncherState,
 }
 
 impl AppState {
@@ -26,6 +125,7 @@ impl AppState {
             store,
             importer,
             previews: Mutex::new(crate::links::FetchCoordinator::default()),
+            launcher: LauncherState::scanning(clipboard_launcher::default_scan_roots()),
         })
     }
 }

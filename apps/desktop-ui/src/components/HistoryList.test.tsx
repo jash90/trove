@@ -85,6 +85,9 @@ const KeyboardHarness = ({ items, onActivate }: KeyboardHarnessProps): React.JSX
 const makeGateway = (search: ClipboardGateway['search']): ClipboardGateway =>
   ({
     search,
+    // The catalog is fetched from the first frame now; these suites care
+    // about the history, so the launcher answers with nothing.
+    listApps: vi.fn(async () => []),
     preview: vi.fn(async (eventId: number) => ({
       eventId,
       kind: 'text',
@@ -278,7 +281,7 @@ describe('clipboard palette states', () => {
     const search = vi.fn<ClipboardGateway['search']>(async () => page);
     render(<App gateway={makeGateway(search)} />);
 
-    expect(screen.getByRole('searchbox', { name: 'Search history' })).toHaveFocus();
+    expect(screen.getByRole('searchbox', { name: 'Search applications and history' })).toHaveFocus();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150);
@@ -311,7 +314,7 @@ describe('clipboard palette states', () => {
     const selectedRow = historyList().getByRole('option', {
       name: /Synthetic clipboard item 2/,
     });
-    const search = screen.getByRole('searchbox', { name: 'Search history' });
+    const search = screen.getByRole('searchbox', { name: 'Search applications and history' });
 
     await user.click(selectedRow);
 
@@ -331,7 +334,7 @@ describe('clipboard palette states', () => {
     };
     render(<App gateway={makeGateway(async () => page)} />);
     await screen.findByRole('listbox', { name: 'Clipboard history results' });
-    const search = screen.getByRole('searchbox', { name: 'Search history' });
+    const search = screen.getByRole('searchbox', { name: 'Search applications and history' });
 
     await user.selectOptions(screen.getByRole('combobox', { name: 'Filtr typu' }), 'Images');
 

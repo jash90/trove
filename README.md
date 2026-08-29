@@ -19,6 +19,7 @@ requests at all.
 | React palette, previews, actions, import wizard, settings | done |
 | Global shortcut, clipboard capture, tray, pasting | done |
 | Retention and blob reclamation | done |
+| Application launcher (unified search, application icons) | done |
 | Windows and Linux adapters | implemented, **unverified** |
 
 ## Support matrix
@@ -89,6 +90,37 @@ as the indicator: if that is what it says, the application is recording.
 If the shortcut is already taken by another application, registration fails and
 the palette still works from its own window. Changing the shortcut in settings
 is saved, but takes effect after a restart.
+
+## Launching applications
+
+The palette is a launcher from the moment it opens: applications and clipboard
+history answer one search field together. Applications occupy the top section
+— the whole catalog, alphabetically, each row with the application's own icon,
+its bundle identifier when it declares one, and the folder it lives in — and
+the history follows underneath. Typing narrows both: the applications filter
+on the client as you type, the history searches as it always did. `Enter`
+opens what is selected (an application starts and the palette hides; a
+history entry pastes), and `Escape` clears the query — nothing else, because
+with one field there is no mode to back out of and hiding the palette remains
+the global shortcut's job.
+
+The catalog is scanned lazily (never at startup), cached for five minutes, and
+covers `/Applications`, `/System/Applications`, `~/Applications`,
+`/System/Library/CoreServices` and `/Applications/Setapp` when present — two
+directory levels deep, so `/Applications/Utilities` is included. Bundles that
+mark themselves `LSUIElement` or `LSBackgroundOnly` (in either the boolean or
+the string form plists ship) are skipped: they are the faceless helpers, not
+applications anyone launches by name. Icons are asked for one row at a time,
+rendered by the core through NSWorkspace into a small PNG, and remembered for
+the session; a bundle with no icon to draw keeps the placeholder glyph.
+
+Starting one is deliberately narrow: the path arriving from the interface must
+canonicalize to an `.app` directory under a root this application scanned, and
+only then does the shell spawn `/usr/bin/open -a` with that single path as an
+argument vector — no shell, no new plugin, no capability grant, the same
+discipline `reveal_source` already follows. A refusal answers with a stable
+code (`launch_invalid`, `app_not_found`, `app_not_launchable`,
+`app_outside_roots`) and never repeats the path it refused.
 
 ## Quality gates
 

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { SYNTHETIC_HISTORY_ITEMS } from './fixtures';
+import { SYNTHETIC_APPS, SYNTHETIC_APP_ICON, SYNTHETIC_HISTORY_ITEMS } from './fixtures';
 import { mockGateway } from './mockGateway';
 
 describe('mockGateway', () => {
@@ -20,5 +20,30 @@ describe('mockGateway', () => {
     expect(page.items.every((item) => item.sourceAppName?.startsWith('Synthetic') ?? true)).toBe(
       true,
     );
+  });
+
+  it('returns the deterministic synthetic application catalog as copies', async () => {
+    const first = await mockGateway.listApps();
+    const second = await mockGateway.listApps();
+
+    expect(first).toEqual(SYNTHETIC_APPS);
+    // Copies, not the fixture objects: a consumer mutating its answer must not
+    // bend the next one.
+    expect(first[0]).not.toBe(SYNTHETIC_APPS[0]);
+    expect(first[0]).not.toBe(second[0]);
+  });
+
+  it('launches nothing in the browser preview but keeps the promise', async () => {
+    await expect(
+      mockGateway.launchApp('/synthetic/Applications/Synthetic Notes.app'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('answers the same synthetic icon for every application', async () => {
+    const first = await mockGateway.getAppIcon('/synthetic/Applications/Synthetic Notes.app');
+    const second = await mockGateway.getAppIcon('/synthetic/Applications/Łódź Editor.app');
+
+    expect(first).toEqual(SYNTHETIC_APP_ICON);
+    expect(second).toEqual(SYNTHETIC_APP_ICON);
   });
 });

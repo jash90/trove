@@ -20,6 +20,7 @@ clipboard-search = { path = "../crates/clipboard-search" }
 clipboard-images = { path = "../crates/clipboard-images" }
 clipboard-import = { path = "../crates/clipboard-import" }
 clipboard-keyvault = { path = "../crates/clipboard-keyvault" }
+clipboard-launcher = { path = "../crates/clipboard-launcher" }
 clipboard-link-preview = { path = "../crates/clipboard-link-preview" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
