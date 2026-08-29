@@ -17,7 +17,7 @@ Apart from that, the application makes no network requests at all.
 | React palette, previews, actions, import wizard, settings | done |
 | Global shortcut, clipboard capture, tray, pasting | done |
 | Retention and blob reclamation | done |
-| Application launcher (palette applications mode) | done |
+| Application launcher (unified search, application icons) | done |
 | Windows and Linux adapters | implemented, **unverified** |
 
 ## Support matrix
@@ -91,19 +91,26 @@ is saved, but takes effect after a restart.
 
 ## Launching applications
 
-`Tab` switches the palette between the history and the installed applications;
-typing filters the list as you go, and `Enter` starts the selected application
-and hides the palette. `Escape` climbs down first — it clears the query before
-it returns to the history — and never closes the palette. The rows show the
-application's name, its bundle identifier when it declares one, and the folder
-it lives in; real `.icns` icons are a follow-up.
+The palette is a launcher from the moment it opens: applications and clipboard
+history answer one search field together. Applications occupy the top section
+— the whole catalog, alphabetically, each row with the application's own icon,
+its bundle identifier when it declares one, and the folder it lives in — and
+the history follows underneath. Typing narrows both: the applications filter
+on the client as you type, the history searches as it always did. `Enter`
+opens what is selected (an application starts and the palette hides; a
+history entry pastes), and `Escape` clears the query — nothing else, because
+with one field there is no mode to back out of and hiding the palette remains
+the global shortcut's job.
 
 The catalog is scanned lazily (never at startup), cached for five minutes, and
 covers `/Applications`, `/System/Applications`, `~/Applications`,
 `/System/Library/CoreServices` and `/Applications/Setapp` when present — two
 directory levels deep, so `/Applications/Utilities` is included. Bundles that
-mark themselves `LSUIElement` or `LSBackgroundOnly` are skipped: they are the
-faceless helpers, not applications anyone launches by name.
+mark themselves `LSUIElement` or `LSBackgroundOnly` (in either the boolean or
+the string form plists ship) are skipped: they are the faceless helpers, not
+applications anyone launches by name. Icons are asked for one row at a time,
+rendered by the core through NSWorkspace into a small PNG, and remembered for
+the session; a bundle with no icon to draw keeps the placeholder glyph.
 
 Starting one is deliberately narrow: the path arriving from the interface must
 canonicalize to an `.app` directory under a root this application scanned, and
