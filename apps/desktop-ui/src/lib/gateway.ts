@@ -5,9 +5,11 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import { createContext, createElement, useContext, type ReactNode } from 'react';
 
 import {
+  validateAppCatalog,
   validateImportAnalysis,
   validateImportProgress,
   validateStorageStats,
+  type AppEntry,
   type AppSettings,
   type CopyResult,
   type ExportSummary,
@@ -61,6 +63,18 @@ export interface ClipboardGateway {
   setAutostartEnabled(enabled: boolean): Promise<void>;
   saveSettings(settings: AppSettings): Promise<AppSettings>;
   getStorageStats(): Promise<StorageStats>;
+  /**
+   * The whole launchable catalog at once. The palette filters as the user
+   * types, so there is no per-keystroke round trip to design here.
+   */
+  listApps(): Promise<AppEntry[]>;
+  /** Starts an application by the catalog path it was listed under. */
+  launchApp(path: string): Promise<void>;
+  /**
+   * The rendered icon for a catalog path, or null when there is nothing to
+   * draw — the row keeps its glyph and carries on.
+   */
+  getAppIcon(path: string): Promise<Thumbnail | null>;
 }
 
 /**
@@ -137,6 +151,9 @@ export const tauriGateway: ClipboardGateway = {
   saveSettings: (settings) => invoke<AppSettings>('save_settings', { settings }),
   getStorageStats: () =>
     invoke<StorageStats>('get_storage_stats').then(validateStorageStats),
+  listApps: () => invoke<AppEntry[]>('list_apps').then(validateAppCatalog),
+  launchApp: (path) => invoke<void>('launch_app', { path }),
+  getAppIcon: (path) => invoke<Thumbnail | null>('get_app_icon', { path }),
 };
 
 interface GatewayProviderProps {

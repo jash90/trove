@@ -612,6 +612,7 @@ dependencies = [
  "clipboard-core",
  "clipboard-images",
  "clipboard-import",
+ "clipboard-launcher",
  "clipboard-link-preview",
  "clipboard-search",
  "clipboard-store",
@@ -691,6 +692,17 @@ dependencies = [
  "tempfile",
  "tokio",
  "zstd",
+]
+
+[[package]]
+name = "clipboard-launcher"
+version = "0.2.0"
+dependencies = [
+ "clipboard-core",
+ "directories",
+ "plist",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]
@@ -3260,6 +3272,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-graphics",
  "objc2-foundation",
+ "tempfile",
 ]
 
 [[package]]

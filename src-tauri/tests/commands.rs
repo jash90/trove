@@ -1,6 +1,6 @@
 use clipboard_history_app::{
     commands::{self, AppSettingsDto},
-    state::AppState,
+    state::{AppState, LAUNCHER_CACHE_TTL_MS, LauncherState},
 };
 use clipboard_search::SearchRequest;
 use clipboard_store::{StoreConfig, StoreHandle};
@@ -525,6 +525,9 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "get_storage_stats",
             "get_thumbnail",
             "reveal_source",
+            "list_apps",
+            "launch_app",
+            "get_app_icon",
             "open_settings_window",
             "export_history",
             "get_link_preview",
@@ -596,6 +599,194 @@ async fn command_boundary_preserves_the_stable_private_storage_error() {
 
     assert_eq!(error, "private_storage_unavailable");
     fs::set_permissions(&blob_root, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+/// A throwaway `.app` under a throwaway root, with a handwritten XML plist —
+/// the same shape the launcher crate's own fixtures build, kept here so these
+/// command tests never depend on what is installed on the machine.
+fn make_synthetic_app(
+    root: &std::path::Path,
+    dir_name: &str,
+    bundle_name: &str,
+) -> std::path::PathBuf {
+    let contents = root.join(dir_name).join("Contents");
+    fs::create_dir_all(&contents).unwrap();
+    let info = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\
+         <plist version=\"1.0\"><dict><key>CFBundleName</key><string>{bundle_name}</string></dict></plist>"
+    );
+    fs::write(contents.join("Info.plist"), info).unwrap();
+    root.join(dir_name)
+}
+
+#[tokio::test]
+async fn list_apps_returns_a_cached_camel_case_catalog_from_the_injected_roots() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = AppState::open_data_dir(directory.path()).unwrap();
+    let apps_root = tempfile::tempdir().unwrap();
+    make_synthetic_app(apps_root.path(), "Synthetic.app", "Synthetic");
+    state.launcher = LauncherState::scanning(vec![apps_root.path().to_path_buf()]);
+
+    let catalog = commands::list_apps_service(&state, 1_000).await.unwrap();
+
+    assert_eq!(catalog.len(), 1);
+    let json = serde_json::to_value(&catalog).unwrap();
+    assert_eq!(json[0]["name"], "Synthetic");
+    assert!(json[0].get("bundleId").is_some());
+    assert!(json[0].get("bundle_id").is_none());
+}
+
+#[tokio::test]
+async fn the_launcher_catalog_is_rescanned_only_after_the_ttl_expires() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = AppState::open_data_dir(directory.path()).unwrap();
+    let apps_root = tempfile::tempdir().unwrap();
+    make_synthetic_app(apps_root.path(), "Early.app", "Early");
+    state.launcher = LauncherState::scanning(vec![apps_root.path().to_path_buf()]);
+
+    let first = commands::list_apps_service(&state, 1_000).await.unwrap();
+    assert_eq!(first.len(), 1);
+
+    // Installed after the scan: invisible until the cache ages out, so an
+    // open palette does not pay for a directory walk on every keystroke.
+    make_synthetic_app(apps_root.path(), "Late.app", "Late");
+    let still_cached = commands::list_apps_service(&state, 1_500).await.unwrap();
+    assert_eq!(still_cached.len(), 1);
+
+    let refreshed = commands::list_apps_service(&state, 1_000 + LAUNCHER_CACHE_TTL_MS + 1)
+        .await
+        .unwrap();
+    assert_eq!(refreshed.len(), 2);
+}
+
+#[tokio::test]
+async fn launch_app_refuses_paths_the_scanner_did_not_find() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = AppState::open_data_dir(directory.path()).unwrap();
+    let apps_root = tempfile::tempdir().unwrap();
+    make_synthetic_app(apps_root.path(), "Inside.app", "Inside");
+    fs::write(apps_root.path().join("File.app"), "not a bundle").unwrap();
+    state.launcher = LauncherState::scanning(vec![apps_root.path().to_path_buf()]);
+    let outside_root = tempfile::tempdir().unwrap();
+    make_synthetic_app(outside_root.path(), "Outside.app", "Outside");
+
+    let too_long = "a".repeat(2_048);
+    let missing = apps_root
+        .path()
+        .join("Missing.app")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let file_path = apps_root
+        .path()
+        .join("File.app")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let outside = outside_root
+        .path()
+        .join("Outside.app")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let cases: &[(&str, &str)] = &[
+        ("", "launch_invalid"),
+        ("relative/No.app", "launch_invalid"),
+        (too_long.as_str(), "launch_invalid"),
+        (missing.as_str(), "app_not_found"),
+        (file_path.as_str(), "app_not_launchable"),
+        (outside.as_str(), "app_outside_roots"),
+    ];
+    for (candidate, expected) in cases {
+        let error = commands::launch_app_service(&state, candidate.to_string())
+            .await
+            .unwrap_err();
+        // A stable code, and never the refused path played back. (The empty
+        // candidate is contained in everything; there is nothing to leak.)
+        assert_eq!(error, *expected);
+        if !candidate.is_empty() {
+            assert!(!error.contains(candidate));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn get_app_icon_returns_a_decodable_png_for_a_scanned_bundle() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = AppState::open_data_dir(directory.path()).unwrap();
+    let apps_root = tempfile::tempdir().unwrap();
+    make_synthetic_app(apps_root.path(), "Iconed.app", "Iconed");
+    state.launcher = LauncherState::scanning(vec![apps_root.path().to_path_buf()]);
+    let path = apps_root
+        .path()
+        .join("Iconed.app")
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    let icon = commands::get_app_icon_service(&state, path.clone())
+        .await
+        .unwrap()
+        .expect("a scanned bundle owes an icon, the generic one at worst");
+
+    assert_eq!(icon.mime_type, "image/png");
+    let raw = base64_decode_prefix(&icon.base64);
+    // A PNG announces itself in eight fixed bytes.
+    assert_eq!(&raw[..8], b"\x89PNG\r\n\x1a\n", "the icon is not a PNG");
+
+    // The same path asked again answers from the cache: the same bytes,
+    // no second round through NSWorkspace and the resizer.
+    let again = commands::get_app_icon_service(&state, path)
+        .await
+        .unwrap()
+        .expect("the cached icon must still be there");
+    assert_eq!(again.base64, icon.base64);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn get_app_icon_refuses_paths_the_scanner_did_not_find() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = AppState::open_data_dir(directory.path()).unwrap();
+    let apps_root = tempfile::tempdir().unwrap();
+    make_synthetic_app(apps_root.path(), "Inside.app", "Inside");
+    state.launcher = LauncherState::scanning(vec![apps_root.path().to_path_buf()]);
+    let outside_root = tempfile::tempdir().unwrap();
+    make_synthetic_app(outside_root.path(), "Outside.app", "Outside");
+
+    let missing = apps_root
+        .path()
+        .join("Missing.app")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let outside = outside_root
+        .path()
+        .join("Outside.app")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let cases: &[(&str, &str)] = &[
+        (missing.as_str(), "app_not_found"),
+        (outside.as_str(), "app_outside_roots"),
+    ];
+    for (candidate, expected) in cases {
+        let error = commands::get_app_icon_service(&state, candidate.to_string())
+            .await
+            .unwrap_err();
+        assert_eq!(error, *expected);
+        assert!(!error.contains(candidate));
+    }
+}
+
+/// Decodes just enough base64 to check a magic prefix.
+fn base64_decode_prefix(value: &str) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(value.as_bytes())
+        .unwrap()
 }
 
 #[tokio::test]
@@ -715,6 +906,7 @@ async fn importer_commands_keep_analysis_owner_scoped_and_start_only_by_analysis
         store: state.store.clone(),
         importer: clipboard_import::ImportService::new(state.store.clone()).unwrap(),
         previews: std::sync::Mutex::new(clipboard_history_app::links::FetchCoordinator::default()),
+        launcher: state.launcher.clone(),
     };
     let error = commands::start_import_service(&foreign, &analysis.analysis_id.to_string())
         .await

@@ -3,6 +3,7 @@ use std::{collections::HashSet, path::PathBuf};
 use base64::Engine;
 use clipboard_core::ContentFlags;
 use clipboard_import::{ImportAnalysis, ImportError, ImportProgress, ImportRunHandle};
+use clipboard_launcher::AppBundle;
 use clipboard_search::{HistoryPage, SearchError, SearchRequest, SearchStoreExt};
 use clipboard_store::{CasError, StoreError, StoreHandle};
 use rusqlite::OptionalExtension;
@@ -12,6 +13,8 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use uuid::Uuid;
 
 use crate::state::AppState;
+
+use crate::state::AppIconDto;
 
 const APP_SETTINGS_KEY: &str = "app";
 const DEFAULT_HOTKEY: &str = "CommandOrControl+Shift+V";
@@ -41,6 +44,9 @@ macro_rules! clipboard_history_command_registry {
             get_storage_stats => $crate::commands::get_storage_stats,
             get_thumbnail => $crate::commands::get_thumbnail,
             reveal_source => $crate::commands::reveal_source,
+            list_apps => $crate::commands::list_apps,
+            launch_app => $crate::commands::launch_app,
+            get_app_icon => $crate::commands::get_app_icon,
             open_settings_window => $crate::commands::open_settings_window,
             export_history => $crate::commands::export_history,
             get_link_preview => $crate::commands::get_link_preview,
@@ -338,6 +344,135 @@ pub async fn get_preview(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn reveal_source(state: tauri::State<'_, AppState>, event_id: i64) -> Result<(), String> {
     reveal_source_service(state.inner(), event_id).await
+}
+
+/// The application catalog for the palette's launcher mode. Returns the whole
+/// list at once — a few hundred entries, tens of kilobytes — because the
+/// palette filters as the user types, and an IPC round trip per keystroke
+/// would reintroduce exactly the latency the history list debounces away.
+pub async fn list_apps_service(state: &AppState, now_ms: i64) -> Result<Vec<AppBundle>, String> {
+    let launcher = state.launcher.clone();
+    run_blocking("apps_unavailable", move || Ok(launcher.catalog(now_ms))).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn list_apps(state: tauri::State<'_, AppState>) -> Result<Vec<AppBundle>, String> {
+    list_apps_service(state.inner(), current_time_ms()).await
+}
+
+pub async fn launch_app_service(state: &AppState, path: String) -> Result<(), String> {
+    let roots = state.launcher.roots().to_vec();
+    run_blocking("apps_unavailable", move || {
+        // The string arrives from the webview; the scanner's own validation
+        // decides whether it names a bundle this application ever listed.
+        let canonical = clipboard_launcher::validate_launch_path(&path, &roots)
+            .map_err(|error| error.code().to_owned())?;
+        launch_application(&canonical)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn launch_app<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
+    launch_app_service(state.inner(), path).await?;
+    // The application the user picked is starting; leaving the palette in
+    // front of it would put a window between them and what they asked for.
+    // Hidden, not closed — closing is the Quit item's job and only its.
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    Ok(())
+}
+
+/// The side an application icon is rendered to. Double the ~31 CSS pixels
+/// the row slot shows, so a retina screen gets real pixels instead of a
+/// stretched guess.
+const APP_ICON_DIMENSION: u32 = 64;
+
+/// Renders one application's icon as a small PNG, or `None` when there is
+/// nothing to draw. Validation refusals surface as the launcher's stable
+/// codes — an icon request for a path the scanner never listed is a
+/// question about a path, not about an icon.
+pub async fn get_app_icon_service(
+    state: &AppState,
+    path: String,
+) -> Result<Option<AppIconDto>, String> {
+    let launcher = state.launcher.clone();
+    let roots = state.launcher.roots().to_vec();
+    run_blocking("icon_unavailable", move || {
+        let canonical = clipboard_launcher::validate_launch_path(&path, &roots)
+            .map_err(|error| error.code().to_owned())?;
+        let canonical = canonical.to_str().ok_or("launch_invalid")?.to_owned();
+        // No icon to draw is an answer, not a failure — the row falls back
+        // to its glyph and carries on.
+        let Some(icon) = launcher.icon(&canonical, || render_app_icon(&canonical)) else {
+            return Ok(None);
+        };
+        Ok(Some(icon))
+    })
+    .await
+}
+
+fn render_app_icon(canonical: &str) -> Option<AppIconDto> {
+    #[cfg(target_os = "macos")]
+    {
+        let tiff = platform_macos::application_icon_tiff(canonical)?;
+        // The same bounded bytes→PNG road thumbnails take: icon TIFFs of
+        // 1024px artwork can be megabytes, and the row needs 64 of them.
+        let png = clipboard_images::make_thumbnail(&tiff, APP_ICON_DIMENSION).ok()?;
+        let base64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        Some(AppIconDto {
+            mime_type: "image/png".to_owned(),
+            base64,
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // No workspace to ask; the row falls back to its glyph rather than
+        // pretending every application shares one picture.
+        let _ = canonical;
+        None
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_app_icon(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<Option<AppIconDto>, String> {
+    get_app_icon_service(state.inner(), path).await
+}
+
+/// Starts an application bundle. The validated path is passed as a single
+/// argument, never through a shell, exactly like revealing a source — a
+/// crafted webview message cannot turn this into command execution, because
+/// by the time it runs the path has already been proven to be a bundle
+/// directory under a scanned root.
+fn launch_application(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/usr/bin/open")
+            .arg("-a")
+            .arg(path)
+            .status()
+            .map_err(|_| "launch_failed".to_owned())
+            .and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err("launch_failed".to_owned())
+                }
+            })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Err("launch_unsupported".to_owned())
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]

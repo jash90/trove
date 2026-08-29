@@ -137,6 +137,9 @@ const makeGateway = (
       databaseBytes: 1,
       blobBytes: 0,
     })),
+    listApps: vi.fn(async () => []),
+    launchApp: vi.fn(async () => undefined),
+    getAppIcon: vi.fn(async () => null),
     ...overrides,
   };
 };
@@ -631,7 +634,7 @@ describe('history actions', () => {
     const user = userEvent.setup();
     render(<App gateway={gateway} />);
     await settleInitialSearch();
-    const search = screen.getByRole('searchbox', { name: 'Search history' });
+    const search = screen.getByRole('searchbox', { name: 'Search applications and history' });
     expect(search).toHaveFocus();
 
     await user.keyboard('{Enter}');
@@ -735,7 +738,7 @@ describe('history actions', () => {
 
     const settingsInput = document.createElement('input');
     settingsInput.setAttribute('aria-label', 'Settings field');
-    screen.getByRole('application', { name: 'Clipboard history' }).append(settingsInput);
+    screen.getByRole('application', { name: 'Clipboard palette' }).append(settingsInput);
     settingsInput.focus();
     await user.keyboard('{Meta>}c{/Meta}{Meta>}p{/Meta}{Delete}');
 
