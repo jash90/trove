@@ -1,4 +1,10 @@
-import type { AppSettings, HistoryItem, ImportProgress, StorageStats } from './contracts';
+import type {
+  AppEntry,
+  AppSettings,
+  HistoryItem,
+  ImportProgress,
+  StorageStats,
+} from './contracts';
 
 export const SYNTHETIC_HISTORY_ITEMS: HistoryItem[] = [
   {
@@ -63,6 +69,19 @@ export const SYNTHETIC_STORAGE_STATS: StorageStats = {
   databaseBytes: 49_152,
   blobBytes: 24_576,
 };
+
+/**
+ * The launcher's browser-preview catalog: alphabetical, diacritics included,
+ * small enough to read at a glance and varied enough to filter against —
+ * a prefix match, a word-start match, a bundle-id-only match.
+ */
+export const SYNTHETIC_APPS: AppEntry[] = [
+  { name: 'Finder', bundleId: 'com.apple.finder', path: '/synthetic/System/Library/CoreServices/Finder.app' },
+  { name: 'Synthetic Browser', bundleId: 'com.example.browser', path: '/synthetic/Applications/Synthetic Browser.app' },
+  { name: 'Synthetic Notes', bundleId: 'com.example.notes', path: '/synthetic/Applications/Synthetic Notes.app' },
+  { name: 'Synthetic Terminal', bundleId: null, path: '/synthetic/Applications/Utilities/Synthetic Terminal.app' },
+  { name: 'Łódź Editor', bundleId: 'pl.example.lodz-editor', path: '/synthetic/Applications/Łódź Editor.app' },
+];
 
 export const SYNTHETIC_IMPORT_PROGRESS: ImportProgress = {
   runId: '0198f000-0000-7000-8000-000000000201',

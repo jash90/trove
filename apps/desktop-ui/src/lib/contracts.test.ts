@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  validateAppCatalog,
   validateImportAnalysis,
   validateImportProgress,
   validateImportSummary,
   validateStorageStats,
+  type AppEntry,
   type ImportProgress,
 } from './contracts';
 
@@ -228,5 +230,54 @@ describe('validateStorageStats', () => {
         ...overrides,
       }),
     ).toThrow('invalid_storage_stats');
+  });
+});
+
+describe('validateAppCatalog', () => {
+  const catalog: AppEntry[] = [
+    { name: 'Synthetic Notes', bundleId: 'com.example.notes', path: '/synthetic/Applications/Synthetic Notes.app' },
+    { name: 'Stem Only', bundleId: null, path: '/synthetic/Applications/Stem Only.app' },
+  ];
+
+  it('accepts a catalog that honors the Rust bounds', () => {
+    expect(validateAppCatalog(catalog)).toBe(catalog);
+  });
+
+  it.each([
+    ['an empty name', [{ name: '', bundleId: null, path: '/synthetic/Applications/A.app' }]],
+    ['a padded name', [{ name: ' Padded', bundleId: null, path: '/synthetic/Applications/A.app' }]],
+    [
+      'an oversized name',
+      [{ name: 'x'.repeat(300), bundleId: null, path: '/synthetic/Applications/A.app' }],
+    ],
+    ['a relative path', [{ name: 'A', bundleId: null, path: 'Applications/A.app' }]],
+    [
+      'an oversized path',
+      [{ name: 'A', bundleId: null, path: `/${'a'.repeat(2_000)}/A.app` }],
+    ],
+    [
+      'duplicate paths',
+      [
+        { name: 'A', bundleId: null, path: '/synthetic/Applications/A.app' },
+        { name: 'A Again', bundleId: null, path: '/synthetic/Applications/A.app' },
+      ],
+    ],
+    ['an empty bundle id', [{ name: 'A', bundleId: '', path: '/synthetic/Applications/A.app' }]],
+    ['a non-string name', [{ name: 7, bundleId: null, path: '/synthetic/Applications/A.app' }]],
+  ])('rejects %s', (_label, entries) => {
+    expect(() => validateAppCatalog(entries as AppEntry[])).toThrow('invalid_app_catalog');
+  });
+
+  it('rejects a catalog past the Rust cap', () => {
+    const flooded = Array.from(
+      { length: 2_001 },
+      (_, index): AppEntry => ({
+        name: `App ${index}`,
+        bundleId: null,
+        path: `/synthetic/Applications/App ${index}.app`,
+      }),
+    );
+
+    expect(() => validateAppCatalog(flooded)).toThrow('invalid_app_catalog');
   });
 });

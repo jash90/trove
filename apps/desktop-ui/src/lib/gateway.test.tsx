@@ -94,6 +94,11 @@ describe('tauriGateway', () => {
       blobBytes: 0,
     });
     await tauriGateway.getStorageStats();
+    vi.mocked(invoke).mockResolvedValueOnce([
+      { name: 'Synthetic Notes', bundleId: 'com.example.notes', path: '/synthetic/Applications/Synthetic Notes.app' },
+    ]);
+    await tauriGateway.listApps();
+    await tauriGateway.launchApp('/synthetic/Applications/Synthetic Notes.app');
 
     expect(vi.mocked(invoke).mock.calls).toEqual([
       ['search_history', { request: { query: 'synthetic', limit: 80, cursor: null } }],
@@ -111,6 +116,8 @@ describe('tauriGateway', () => {
       ['get_settings'],
       ['save_settings', { settings }],
       ['get_storage_stats'],
+      ['list_apps'],
+      ['launch_app', { path: '/synthetic/Applications/Synthetic Notes.app' }],
     ]);
     expect(vi.mocked(open).mock.calls).toEqual([
       [
@@ -141,6 +148,14 @@ describe('tauriGateway', () => {
 
     expect(gateways).toHaveLength(2);
     expect(Object.keys(mockGateway).sort()).toEqual(Object.keys(tauriGateway).sort());
+  });
+
+  it('rejects a malformed application catalog at the IPC boundary', async () => {
+    vi.mocked(invoke).mockResolvedValue([
+      { name: 'Relative Path', bundleId: null, path: 'Applications/Relative.app' },
+    ]);
+
+    await expect(tauriGateway.listApps()).rejects.toThrow('invalid_app_catalog');
   });
 
   it('rejects an inconsistent import status at the IPC boundary', async () => {

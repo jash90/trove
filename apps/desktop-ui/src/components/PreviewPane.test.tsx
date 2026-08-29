@@ -137,6 +137,8 @@ const makeGateway = (
       databaseBytes: 1,
       blobBytes: 0,
     })),
+    listApps: vi.fn(async () => []),
+    launchApp: vi.fn(async () => undefined),
     ...overrides,
   };
 };
