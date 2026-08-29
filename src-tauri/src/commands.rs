@@ -334,7 +334,7 @@ pub async fn delete_event_service(state: &AppState, event_id: i64) -> Result<(),
                     )
                     .optional()
             })
-            .map_err(|error| store_error_code(&error, "history_write_failed"))
+            .map_err(|error| store_error_code(&error, "history_read_failed"))
     })
     .await?
     .ok_or_else(|| "history_event_not_found".to_owned())?;

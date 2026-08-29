@@ -298,7 +298,7 @@ fn recent_search(
             Ok((convert_item(raw)?, content_id))
         })
         .collect::<Result<Vec<_>, SearchError>>()?;
-    let mut items = attach_group_data(pairs, grouped.1)?;
+    let mut items = attach_group_data(pairs, grouped.1);
     let has_more = items.len() > limit as usize;
     if has_more {
         items.truncate(limit as usize);
@@ -383,7 +383,7 @@ fn ranked_search(
         .take(limit as usize)
         .map(|candidate| (candidate.item, candidate.content_id))
         .collect::<Vec<_>>();
-    let items = attach_group_data(pairs, fills)?;
+    let items = attach_group_data(pairs, fills);
     Ok(HistoryPage {
         items,
         next_cursor: None,
@@ -554,24 +554,22 @@ fn occurrence_fills(
 
 /// Stamps each converted row with its group's data.
 ///
-/// A content with a representative row but no occurrence rows cannot exist
-/// under one reader lease; hitting that branch means the store lied, which is
-/// an invalid-data failure rather than a silent half-filled item.
+/// The page query and the fill query are two snapshots on an autocommit WAL
+/// reader, so a group deleted in between simply has no fill. It is dropped
+/// from the page rather than failing it: a vanished group is not invalid
+/// data, and the next request will not see it either.
 fn attach_group_data(
     pairs: Vec<(HistoryItem, i64)>,
     mut fills: HashMap<i64, OccurrenceFill>,
-) -> Result<Vec<HistoryItem>, SearchError> {
+) -> Vec<HistoryItem> {
     pairs
         .into_iter()
-        .map(|(mut item, content_id)| {
-            let fill = fills
-                .remove(&content_id)
-                .ok_or(SearchError::InvalidStoreData)?;
+        .filter_map(|(mut item, content_id)| {
+            let fill = fills.remove(&content_id)?;
             item.pinned = fill.pinned;
-            item.occurrence_count =
-                u64::try_from(fill.occurrence_count).map_err(|_| SearchError::InvalidStoreData)?;
+            item.occurrence_count = u64::try_from(fill.occurrence_count).ok()?;
             item.occurrences = fill.occurrences;
-            Ok(item)
+            Some(item)
         })
         .collect()
 }
@@ -603,6 +601,42 @@ mod sql_plan_tests {
     use rusqlite::params;
 
     use super::{MAX_RANKED_CANDIDATES, RANKED_SEARCH_SQL};
+
+    #[test]
+    fn a_group_deleted_between_the_two_reads_is_dropped_not_fatal() {
+        use super::{HistoryItem, attach_group_data, occurrence_fills};
+        use std::collections::HashMap;
+
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = StoreHandle::open(StoreConfig::new(directory.path().join("search.sqlite")))
+            .expect("synthetic store");
+        let (kept, vanished) = store
+            .with_reader(|connection| {
+                let content_ids = [1_i64, 2];
+                let fills = occurrence_fills(connection, &content_ids)?;
+                Ok((fills.contains_key(&1), fills.contains_key(&2)))
+            })
+            .unwrap();
+        // Neither content exists; the fill map holds nothing for either. The
+        // one that exists in the page but not in the fills is a group deleted
+        // between the two snapshots, and it leaves the page quietly.
+        assert!(!kept && !vanished);
+        let item = |event_id: i64| HistoryItem {
+            event_id,
+            global_id: uuid::Uuid::nil(),
+            kind: clipboard_core::ContentKind::Text,
+            captured_at_ms: 1_000,
+            source_app_name: None,
+            pinned: false,
+            preview: String::new(),
+            byte_size: 0,
+            has_thumbnail: false,
+            occurrence_count: 0,
+            occurrences: Vec::new(),
+        };
+        let page = attach_group_data(vec![(item(1), 1), (item(2), 2)], HashMap::new());
+        assert!(page.is_empty());
+    }
 
     #[test]
     fn ranked_sql_materializes_one_bounded_snapshot_and_one_usage_aggregation() {

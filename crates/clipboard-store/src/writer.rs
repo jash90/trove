@@ -1966,10 +1966,22 @@ fn store_thumbnail(
 
 fn set_pinned(connection: &mut Connection, event_id: i64, pinned: bool) -> Result<(), StoreError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let updated = transaction.execute(
-        "UPDATE history_event SET pinned = ?1 WHERE event_id = ?2",
-        params![i64::from(pinned), event_id],
-    )?;
+    let updated = if pinned {
+        transaction.execute(
+            "UPDATE history_event SET pinned = ?1 WHERE event_id = ?2",
+            params![i64::from(pinned), event_id],
+        )?
+    } else {
+        // Unpinning clears the whole group. The list shows one row per
+        // content, and a pinned older occurrence would otherwise keep the row
+        // pinned — and surviving retention — with no way to unpin it from the
+        // interface that shows it.
+        transaction.execute(
+            "UPDATE history_event SET pinned = 0
+             WHERE content_id = (SELECT content_id FROM history_event WHERE event_id = ?1)",
+            [event_id],
+        )?
+    };
     if updated == 0 {
         return Err(StoreError::HistoryEventNotFound);
     }
@@ -2306,11 +2318,23 @@ fn prune_occurrence_events(
     // Same rule as the in-ingest prune, stated as a count so it can be batched:
     // a row goes when it is unpinned and five newer occurrences of its content
     // exist. The order keeps the sweep moving oldest-first across groups.
+    //
+    // Candidates are narrowed to over-cap contents first, through a
+    // covering-index aggregate. A converged database — the steady state, since
+    // ingest prunes inline — costs one index scan to answer "nothing
+    // qualifies", not a correlated probe per row: the sweep runs every fifteen
+    // minutes on the writer queue capture shares, and a full-table probe per
+    // row is exactly the unbounded pass the queue must never sit behind.
     let deleted = transaction.execute(
         "DELETE FROM history_event
          WHERE event_id IN (
+           WITH over_cap AS (
+             SELECT content_id FROM history_event
+             GROUP BY content_id HAVING count(*) > ?2
+           )
            SELECT candidate.event_id
            FROM history_event candidate
+           JOIN over_cap ON over_cap.content_id = candidate.content_id
            WHERE candidate.pinned = 0
              AND (SELECT count(*) FROM history_event newer
                   WHERE newer.content_id = candidate.content_id
@@ -2325,8 +2349,13 @@ fn prune_occurrence_events(
         ],
     )?;
     let more_remaining = transaction.query_row(
-        "SELECT EXISTS(
+        "WITH over_cap AS (
+           SELECT content_id FROM history_event
+           GROUP BY content_id HAVING count(*) > ?1
+         )
+         SELECT EXISTS(
            SELECT 1 FROM history_event candidate
+           JOIN over_cap ON over_cap.content_id = candidate.content_id
            WHERE candidate.pinned = 0
              AND (SELECT count(*) FROM history_event newer
                   WHERE newer.content_id = candidate.content_id

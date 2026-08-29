@@ -2438,6 +2438,42 @@ async fn deleting_a_grouped_entry_removes_every_occurrence_of_its_content() {
 }
 
 #[tokio::test]
+async fn unpinning_clears_every_occurrence_of_the_group() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = StoreHandle::open(StoreConfig::in_data_dir(directory.path())).unwrap();
+
+    // The oldest occurrence pinned first, then a newer capture takes over the
+    // row the interface shows. Unpinning that row must clear the group: a
+    // pinned member the interface cannot reach would keep the entry pinned —
+    // and exempt from retention — forever.
+    let pinned = store
+        .ingest(text_capture("grupa do odpięcia", 1_000))
+        .await
+        .unwrap();
+    store.set_pinned(pinned.event_id, true).await.unwrap();
+    let representative = store
+        .ingest(text_capture("grupa do odpięcia", 2_000))
+        .await
+        .unwrap();
+
+    store
+        .set_pinned(representative.event_id, false)
+        .await
+        .unwrap();
+
+    let pinned_rows = store
+        .with_reader(|connection| {
+            connection.query_row(
+                "SELECT count(*) FROM history_event WHERE content_id = ?1 AND pinned = 1",
+                [pinned.content_id],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(pinned_rows, 0);
+}
+
+#[tokio::test]
 async fn imported_duplicates_respect_the_occurrence_cap() {
     let directory = tempfile::tempdir().unwrap();
     let store =
