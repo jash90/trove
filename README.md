@@ -17,6 +17,7 @@ Apart from that, the application makes no network requests at all.
 | React palette, previews, actions, import wizard, settings | done |
 | Global shortcut, clipboard capture, tray, pasting | done |
 | Retention and blob reclamation | done |
+| Application launcher (palette applications mode) | done |
 | Windows and Linux adapters | implemented, **unverified** |
 
 ## Support matrix
@@ -87,6 +88,30 @@ as the indicator: if that is what it says, the application is recording.
 If the shortcut is already taken by another application, registration fails and
 the palette still works from its own window. Changing the shortcut in settings
 is saved, but takes effect after a restart.
+
+## Launching applications
+
+`Tab` switches the palette between the history and the installed applications;
+typing filters the list as you go, and `Enter` starts the selected application
+and hides the palette. `Escape` climbs down first — it clears the query before
+it returns to the history — and never closes the palette. The rows show the
+application's name, its bundle identifier when it declares one, and the folder
+it lives in; real `.icns` icons are a follow-up.
+
+The catalog is scanned lazily (never at startup), cached for five minutes, and
+covers `/Applications`, `/System/Applications`, `~/Applications`,
+`/System/Library/CoreServices` and `/Applications/Setapp` when present — two
+directory levels deep, so `/Applications/Utilities` is included. Bundles that
+mark themselves `LSUIElement` or `LSBackgroundOnly` are skipped: they are the
+faceless helpers, not applications anyone launches by name.
+
+Starting one is deliberately narrow: the path arriving from the interface must
+canonicalize to an `.app` directory under a root this application scanned, and
+only then does the shell spawn `/usr/bin/open -a` with that single path as an
+argument vector — no shell, no new plugin, no capability grant, the same
+discipline `reveal_source` already follows. A refusal answers with a stable
+code (`launch_invalid`, `app_not_found`, `app_not_launchable`,
+`app_outside_roots`) and never repeats the path it refused.
 
 ## Quality gates
 
