@@ -247,7 +247,7 @@ const ClipboardPalette = (): React.JSX.Element => {
     <main
       className="palette-stage"
       role="application"
-      aria-label="Clipboard history"
+      aria-label={inAppsMode ? 'Application launcher' : 'Clipboard history'}
       onKeyDown={handlePaletteKeyDown}
     >
       <section

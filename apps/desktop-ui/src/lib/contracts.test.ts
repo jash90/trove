@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  MAX_APP_NAME_BYTES,
+  MAX_APP_PATH_BYTES,
+  MAX_CATALOG_APPS,
   validateAppCatalog,
   validateImportAnalysis,
   validateImportProgress,
@@ -279,5 +282,50 @@ describe('validateAppCatalog', () => {
     );
 
     expect(() => validateAppCatalog(flooded)).toThrow('invalid_app_catalog');
+  });
+
+  it('accepts entries and catalogs exactly at the Rust bounds', () => {
+    // Exact boundary, not a value comfortably below it: the probes elsewhere
+    // in this suite sit above the bounds, so they would stay green while
+    // the two sides of the bridge drifted apart. This is the pin.
+    const exact: AppEntry[] = [
+      {
+        name: 'a'.repeat(MAX_APP_NAME_BYTES),
+        bundleId: null,
+        // '/' + fill + '/' + 'A.app' must add up to exactly the path bound.
+        path: `/${'b'.repeat(MAX_APP_PATH_BYTES - 7)}/A.app`,
+      },
+    ];
+    expect(validateAppCatalog(exact)).toBe(exact);
+
+    const full = Array.from(
+      { length: MAX_CATALOG_APPS },
+      (_, index): AppEntry => ({
+        name: 'A',
+        bundleId: null,
+        path: `/synthetic/Applications/App ${index}.app`,
+      }),
+    );
+    expect(validateAppCatalog(full)).toBe(full);
+  });
+
+  it('rejects one byte past each Rust bound', () => {
+    const longName: AppEntry[] = [
+      { name: 'a'.repeat(MAX_APP_NAME_BYTES + 1), bundleId: null, path: '/synthetic/Applications/A.app' },
+    ];
+    const longPath: AppEntry[] = [
+      { name: 'A', bundleId: null, path: `/${'b'.repeat(MAX_APP_PATH_BYTES - 6)}/A.app` },
+    ];
+
+    expect(() => validateAppCatalog(longName)).toThrow('invalid_app_catalog');
+    expect(() => validateAppCatalog(longPath)).toThrow('invalid_app_catalog');
+  });
+
+  it('pins the mirrored bound values themselves', () => {
+    // The same assertion lives in crates/clipboard-launcher. A change must
+    // update both tests, not silently drift one side of the bridge.
+    expect(MAX_APP_NAME_BYTES).toBe(256);
+    expect(MAX_APP_PATH_BYTES).toBe(1_024);
+    expect(MAX_CATALOG_APPS).toBe(2_000);
   });
 });

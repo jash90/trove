@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { mockGateway, type ClipboardGateway } from './lib/gateway';
 import { SYNTHETIC_APPS } from './lib/fixtures';
+import type { AppEntry } from './lib/contracts';
 
 it('renders the private clipboard palette landmark', () => {
   render(<App />);
@@ -85,12 +86,16 @@ describe('the launcher mode', () => {
     await user.keyboard('{Tab}');
     await settleApps();
     expect(screen.queryByRole('listbox', { name: 'Clipboard history results' })).toBeNull();
+    // The landmark follows the mode: a screen reader entering it deserves
+    // the context the inner labels already carry.
+    expect(screen.getByRole('application', { name: 'Application launcher' })).toBeVisible();
     // The field is shared, not remounted: focus survives the toggle.
     expect(search).toHaveFocus();
 
     await user.keyboard('{Tab}');
     await settleHistory();
     expect(screen.queryByRole('listbox', { name: 'Application results' })).toBeNull();
+    expect(screen.getByRole('application', { name: 'Clipboard history' })).toBeVisible();
     expect(search).toHaveFocus();
   });
 
@@ -190,5 +195,47 @@ describe('the launcher mode', () => {
     expect(alert).toHaveTextContent(/could not be started/i);
     expect(alert).not.toHaveTextContent('/private');
     expect(alert).not.toHaveTextContent('.app');
+  });
+
+  it('keeps the fetched list on screen while the catalog reloads', async () => {
+    const user = userEvent.setup();
+    // The first answer arrives; the second — the re-entry refetch — hangs,
+    // which is exactly the window a loading state used to swallow the list in.
+    const listApps = vi.fn<(typeof mockGateway)['listApps']>()
+      .mockImplementationOnce(async () => SYNTHETIC_APPS.map((app) => ({ ...app })))
+      .mockImplementationOnce(
+        () => new Promise<AppEntry[]>(() => undefined),
+      );
+    render(<App gateway={{ ...mockGateway, listApps } as ClipboardGateway} />);
+
+    await settleHistory();
+    await user.keyboard('{Tab}');
+    await settleApps();
+    expect(appsResults().getAllByRole('option').length).toBeGreaterThan(0);
+
+    await user.keyboard('{Tab}');
+    await user.keyboard('{Tab}');
+
+    // The reload is in flight and the list never left the screen, so Enter
+    // can only act on applications the user can actually see.
+    expect(appsResults().getAllByRole('option').length).toBeGreaterThan(0);
+    expect(listApps).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves Tab to the dialog while one is open', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await settleHistory();
+
+    await user.keyboard('{Meta>}i{/Meta}');
+    expect(await screen.findByRole('dialog', { name: 'Import history' })).toBeVisible();
+
+    await user.keyboard('{Tab}');
+
+    // The guard, not the inert section, is what stops the toggle — and the
+    // dialog keeps Tab for its own controls either way.
+    expect(screen.getByRole('listbox', { name: 'Clipboard history results' })).toBeInTheDocument();
+    expect(screen.queryByRole('listbox', { name: 'Application results' })).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'Import history' })).toBeVisible();
   });
 });

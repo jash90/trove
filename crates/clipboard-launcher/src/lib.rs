@@ -39,6 +39,12 @@ pub const MAX_APP_PATH_BYTES: usize = 1_024;
 /// wade into vendor folder trees nobody launches from.
 pub const SCAN_DEPTH: usize = 2;
 
+/// Upper bound on an `Info.plist` worth reading. Real ones sit in kilobytes;
+/// a "plist" past this is a payload wearing metadata's name, and the crate
+/// treats bundle content as untrusted everywhere else — skipping the bundle
+/// beats materializing the file into the clipboard process.
+pub const MAX_INFO_PLIST_BYTES: u64 = 4 * 1024 * 1024;
+
 /// One launchable application, in the shape the palette receives it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -191,21 +197,43 @@ fn read_bundle(root: &Path, path: &Path, name: &str) -> Option<AppBundle> {
         return None;
     }
 
-    let info = read_info_plist(path);
+    let plist_path = path.join("Contents").join("Info.plist");
+    // Same discipline as every other bound in this crate: the plist is
+    // bundle content, and bundle content is data, not something to be
+    // trusted with the process's memory. A plist past the bound makes the
+    // whole bundle unlistable — without reading it there is no honest way
+    // to know it is not an agent, and listing by stem alone would put a
+    // name in front of Enter that nothing vouches for.
+    let plist_oversized = fs::metadata(&plist_path)
+        .map(|metadata| metadata.len() > MAX_INFO_PLIST_BYTES)
+        .unwrap_or(false);
+    if plist_oversized {
+        return None;
+    }
+    let info = read_info_plist(&plist_path);
     // Faceless helpers: `LSUIElement` agents and `LSBackgroundOnly` daemons
     // have no Dock presence and no icon to show. Without this check one
-    // system root alone adds hundreds of them.
-    if plist_bool(&info, "LSUIElement") == Some(true)
-        || plist_bool(&info, "LSBackgroundOnly") == Some(true)
-    {
+    // system root alone adds hundreds of them. The flag is read in both the
+    // boolean form and the string form plists do ship, because a filter that
+    // only understands one spelling is a filter some agents walk through.
+    if plist_agent_flag(&info, "LSUIElement") || plist_agent_flag(&info, "LSBackgroundOnly") {
         return None;
     }
 
-    let display_name = plist_string(&info, "CFBundleDisplayName")
-        .or_else(|| plist_string(&info, "CFBundleName"))
-        // The file stem is a name of last resort — the bundle directory says
-        // what it is even when its metadata does not.
-        .unwrap_or_else(|| name.strip_suffix(".app").unwrap_or(name).to_owned());
+    // The name the bridge validates is trimmed and non-empty, so the name
+    // this side emits must be too — one malformed bundle must cost itself a
+    // listing, never the whole catalog. A blank candidate falls through to
+    // the next one, and the file stem is the name of last resort: the
+    // bundle directory says what it is even when its metadata does not.
+    let stem = name.strip_suffix(".app").unwrap_or(name).trim().to_owned();
+    let display_name = non_blank_plist_string(&info, "CFBundleDisplayName")
+        .or_else(|| non_blank_plist_string(&info, "CFBundleName"))
+        .unwrap_or(stem);
+    if display_name.is_empty() {
+        // Not even the directory name says anything: there is no honest way
+        // to list this bundle, so it is not listed.
+        return None;
+    }
     let bundle_id = plist_string(&info, "CFBundleIdentifier")
         .map(|id| truncate_on_char_boundary(&id, MAX_APP_NAME_BYTES))
         .filter(|id| !id.is_empty());
@@ -219,8 +247,8 @@ fn read_bundle(root: &Path, path: &Path, name: &str) -> Option<AppBundle> {
 
 /// A missing or unreadable `Info.plist` is a bundle state, not a scan error:
 /// the stem still names it and the catalog still lists it.
-fn read_info_plist(path: &Path) -> Option<plist::Value> {
-    let file = fs::File::open(path.join("Contents").join("Info.plist")).ok()?;
+fn read_info_plist(plist_path: &Path) -> Option<plist::Value> {
+    let file = fs::File::open(plist_path).ok()?;
     plist::Value::from_reader(file).ok()
 }
 
@@ -232,11 +260,28 @@ fn plist_string(info: &Option<plist::Value>, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn plist_bool(info: &Option<plist::Value>, key: &str) -> Option<bool> {
+/// A plist string that is present but blank is not a name: trimming happens
+/// per candidate so an empty `CFBundleDisplayName` cannot shadow a real
+/// `CFBundleName` underneath it.
+fn non_blank_plist_string(info: &Option<plist::Value>, key: &str) -> Option<String> {
+    plist_string(info, key)
+        .map(|candidate| candidate.trim().to_owned())
+        .filter(|candidate| !candidate.is_empty())
+}
+
+/// Reads one `LS*` flag the way Launch Services effectively does: booleans
+/// first, and the string spellings (`true`, `yes`, any case) plists really
+/// do ship. A flag that is absent or false — in either form — is not set.
+fn plist_agent_flag(info: &Option<plist::Value>, key: &str) -> bool {
     info.as_ref()
         .and_then(plist::Value::as_dictionary)
         .and_then(|dictionary| dictionary.get(key))
-        .and_then(plist::Value::as_boolean)
+        .is_some_and(|value| {
+            value.as_boolean() == Some(true)
+                || value.as_string().is_some_and(|text| {
+                    matches!(text.trim().to_ascii_lowercase().as_str(), "true" | "yes")
+                })
+        })
 }
 
 fn truncate_on_char_boundary(value: &str, max_bytes: usize) -> String {
@@ -293,12 +338,25 @@ pub fn validate_launch_path(
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_on_char_boundary;
+    use super::{
+        MAX_APP_NAME_BYTES, MAX_APP_PATH_BYTES, MAX_CATALOG_APPS, truncate_on_char_boundary,
+    };
 
     #[test]
     fn truncation_lands_on_a_character_boundary() {
         // `ał` is four bytes; a two-byte cap would otherwise split the `ł`.
         assert_eq!(truncate_on_char_boundary("ał", 2), "a");
         assert_eq!(truncate_on_char_boundary("short", 8), "short");
+    }
+
+    #[test]
+    fn the_bounds_are_the_contract_the_bridge_validates() {
+        // These numbers are mirrored in apps/desktop-ui/src/lib/contracts.ts
+        // and asserted there in the same breath. A change on either side
+        // must be a decision that updates both tests, not a silent drift
+        // that only surfaces as a rejected catalog.
+        assert_eq!(MAX_APP_NAME_BYTES, 256);
+        assert_eq!(MAX_APP_PATH_BYTES, 1_024);
+        assert_eq!(MAX_CATALOG_APPS, 2_000);
     }
 }

@@ -17,6 +17,12 @@ interface AppsWorkspaceProps {
 /// An application has no payload to preview and nothing to pin or delete, so
 /// the space those occupy in the history mode is simply the list here — the
 /// row rhythm carries the visual continuity instead of a second column.
+///
+/// The list is also what stays on screen while the catalog reloads: swapping
+/// it for a loading state on every mode entry would both flash and leave
+/// Enter steering at a list nobody can see. The placeholder states appear
+/// only when there is nothing to show instead — the same deal the history
+/// list gives its `refreshing` flag.
 export const AppsWorkspace = ({
   status,
   apps,
@@ -33,12 +39,16 @@ export const AppsWorkspace = ({
     ) : null}
     <div className="history-column">
       <div className="history-panel">
-        {status === 'loading' ? <EmptyState kind="loading" subject="applications" /> : null}
-        {status === 'error' ? <EmptyState kind="error" subject="applications" /> : null}
+        {apps.length === 0 && status === 'loading' ? (
+          <EmptyState kind="loading" subject="applications" />
+        ) : null}
+        {apps.length === 0 && status === 'error' ? (
+          <EmptyState kind="error" subject="applications" />
+        ) : null}
         {status === 'ready' && apps.length === 0 ? (
           <EmptyState kind="empty" subject="applications" />
         ) : null}
-        {status === 'ready' && apps.length > 0 ? (
+        {apps.length > 0 ? (
           <AppsList
             apps={apps}
             selectedKey={selectedKey}

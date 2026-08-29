@@ -27,6 +27,8 @@ struct AppSpec<'a> {
     ui_element: bool,
     /// `LSBackgroundOnly` — daemons that never show a face at all.
     background_only: bool,
+    /// The same flags, written the way some hand-edited plists ship them.
+    flags_as_strings: bool,
     /// `/System/Applications` ships binary plists; the reader must not care.
     binary_plist: bool,
     /// Write no `Info.plist` at all.
@@ -42,6 +44,7 @@ impl Default for AppSpec<'_> {
             bundle_id: None,
             ui_element: false,
             background_only: false,
+            flags_as_strings: false,
             binary_plist: false,
             without_plist: false,
         }
@@ -64,11 +67,18 @@ fn make_app(root: &Path, spec: &AppSpec<'_>) -> PathBuf {
     if let Some(id) = spec.bundle_id {
         info.insert("CFBundleIdentifier".into(), id.into());
     }
+    let flag = |set: bool| {
+        if set && spec.flags_as_strings {
+            plist::Value::from("true")
+        } else {
+            plist::Value::from(set)
+        }
+    };
     if spec.ui_element {
-        info.insert("LSUIElement".into(), true.into());
+        info.insert("LSUIElement".into(), flag(true));
     }
     if spec.background_only {
-        info.insert("LSBackgroundOnly".into(), true.into());
+        info.insert("LSBackgroundOnly".into(), flag(true));
     }
     let value = plist::Value::Dictionary(info);
     let file = fs::File::create(contents.join("Info.plist")).unwrap();
@@ -289,6 +299,157 @@ fn scan_skips_ui_element_and_background_only_agents() {
 
     let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
     assert_eq!(names, vec!["Visible"]);
+}
+
+#[test]
+fn scan_skips_agents_whose_flags_ship_as_strings() {
+    let root = TempDir::new().unwrap();
+    // Hand-edited plists spell the flag as text; a filter that only
+    // understands booleans would let these two flood the list.
+    make_app(
+        root.path(),
+        &AppSpec {
+            dir_name: "StringAgent.app",
+            bundle_name: Some("String Agent"),
+            ui_element: true,
+            flags_as_strings: true,
+            ..AppSpec::default()
+        },
+    );
+    make_app(
+        root.path(),
+        &AppSpec {
+            dir_name: "StringDaemon.app",
+            bundle_name: Some("String Daemon"),
+            background_only: true,
+            flags_as_strings: true,
+            ..AppSpec::default()
+        },
+    );
+    make_app(
+        root.path(),
+        &AppSpec {
+            dir_name: "PlainFalse.app",
+            bundle_name: Some("Plain False"),
+            // A false flag — in either spelling — must not hide the bundle.
+            ui_element: false,
+            flags_as_strings: true,
+            ..AppSpec::default()
+        },
+    );
+
+    let catalog = scan_applications(&[root.path().to_path_buf()]);
+
+    let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
+    assert_eq!(names, vec!["Plain False"]);
+}
+
+#[test]
+fn scan_falls_through_blank_names_to_the_next_candidate() {
+    let root = TempDir::new().unwrap();
+    // An empty display name must not win over a real bundle name, and must
+    // not survive to the bridge: the validator there rejects one malformed
+    // entry by refusing the whole catalog, so this side never emits one.
+    make_app(
+        root.path(),
+        &AppSpec {
+            dir_name: "EmptyDisplay.app",
+            display_name: Some(""),
+            bundle_name: Some("Real Bundle Name"),
+            ..AppSpec::default()
+        },
+    );
+    make_app(
+        root.path(),
+        &AppSpec {
+            dir_name: "BlankDisplay.app",
+            display_name: Some("   "),
+            bundle_name: Some("   "),
+            ..AppSpec::default()
+        },
+    );
+    make_app(
+        root.path(),
+        &AppSpec {
+            dir_name: " Pad.app",
+            without_plist: true,
+            ..AppSpec::default()
+        },
+    );
+
+    let catalog = scan_applications(&[root.path().to_path_buf()]);
+
+    let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
+    assert!(names.contains(&"Real Bundle Name"));
+    // Whitespace-only metadata falls back to the directory stem, trimmed.
+    assert!(names.contains(&"BlankDisplay"));
+    assert!(names.contains(&"Pad"));
+    assert_eq!(catalog.len(), 3);
+}
+
+#[test]
+fn scan_skips_bundles_with_an_oversized_info_plist() {
+    let root = TempDir::new().unwrap();
+    let app = make_app(
+        root.path(),
+        &AppSpec {
+            dir_name: "Huge.app",
+            bundle_name: Some("Huge"),
+            ..AppSpec::default()
+        },
+    );
+    // A "plist" measured in megabytes is a payload, not metadata; reading it
+    // would hand the file's size to the process's memory.
+    let junk = fs::File::create(app.join("Contents").join("Info.plist")).unwrap();
+    junk.set_len(4 * 1024 * 1024 + 1).unwrap();
+    drop(junk);
+    make_app(
+        root.path(),
+        &AppSpec {
+            dir_name: "Small.app",
+            bundle_name: Some("Small"),
+            ..AppSpec::default()
+        },
+    );
+
+    let catalog = scan_applications(&[root.path().to_path_buf()]);
+
+    let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
+    assert_eq!(names, vec!["Small"]);
+}
+
+#[test]
+fn scan_does_not_follow_directory_symlinks_or_loop_on_cycles() {
+    let root = TempDir::new().unwrap();
+    let elsewhere = TempDir::new().unwrap();
+    make_app(
+        elsewhere.path(),
+        &AppSpec {
+            dir_name: "Linked.app",
+            bundle_name: Some("Linked"),
+            ..AppSpec::default()
+        },
+    );
+    // A directory symlink inside a root is not a subdirectory of it, and
+    // following it would both loop (a -> b -> a) and quietly change what
+    // the catalog covers. Neither happens: the walk stays on real
+    // directories and terminates.
+    symlink(elsewhere.path(), root.path().join("LinkedTools")).unwrap();
+    symlink(root.path().join("LoopB"), root.path().join("LoopA")).unwrap();
+    symlink(root.path().join("LoopA"), root.path().join("LoopB")).unwrap();
+    make_app(
+        root.path(),
+        &AppSpec {
+            dir_name: "Direct.app",
+            bundle_name: Some("Direct"),
+            ..AppSpec::default()
+        },
+    );
+
+    let catalog = scan_applications(&[root.path().to_path_buf()]);
+
+    let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
+    assert_eq!(names, vec!["Direct"]);
 }
 
 #[test]
