@@ -580,7 +580,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 <button
                   type="button"
                   onClick={() => void testVaultConnection()}
-                  disabled={vaultBusy}
+                  disabled={vaultBusy || pending}
                 >
                   {vaultBusy ? 'Talking to the vault…' : 'Test connection'}
                 </button>
@@ -609,7 +609,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                         <button
                           type="button"
                           aria-label={`Copy ${secret.slug}`}
-                          disabled={vaultBusy}
+                          disabled={vaultBusy || pending}
                           onClick={() => void copyVaultSecret(secret.slug)}
                         >
                           Copy
