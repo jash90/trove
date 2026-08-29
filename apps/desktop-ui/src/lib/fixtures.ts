@@ -55,7 +55,14 @@ export const SYNTHETIC_SETTINGS: AppSettings = {
   retentionDays: null,
   denylistedApps: ['com.apple.Passwords', 'com.apple.keychainaccess'],
   linkPreviews: true,
+  keyvault: { url: null, token: null, privateJwk: null },
 };
+
+/** Metadata the vault would list for a configured token — never values. */
+export const SYNTHETIC_KEYVAULT_SECRETS = [
+  { slug: 'openai', name: 'OpenAI', category: 'ai' },
+  { slug: 'github', name: 'GitHub', category: null },
+];
 
 export const SYNTHETIC_STORAGE_STATS: StorageStats = {
   contentCount: 4,

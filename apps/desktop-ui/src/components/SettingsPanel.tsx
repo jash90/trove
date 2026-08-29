@@ -1,9 +1,10 @@
-import { Download, Globe, KeyRound, Power, ShieldBan, Timer, X } from 'lucide-react';
+import { Download, Globe, KeyRound, Power, ShieldBan, Timer, Vault, X } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEventHandler, type KeyboardEventHandler } from 'react';
 
 import type {
   AppSettings,
   ExportSummary as ExportSummaryContract,
+  KeyvaultSecret,
   StorageStats as StorageStatsContract,
 } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
@@ -112,6 +113,35 @@ const EXPORT_ERROR =
 const RETENTION_ERROR = 'Give a whole number of days from 1 to 3650.';
 const HOTKEY_ERROR = 'A shortcut needs a modifier and one letter, digit or function key.';
 const DENYLIST_ERROR = 'The exclusion list holds an invalid entry, or is too long.';
+const KEYVAULT_SAVE_FIRST =
+  'Save the vault address, token and private key first — the pane reads what is saved.';
+
+/** One plain sentence per vault denial. Codes only reach here; never values. */
+export const keyvaultErrorMessage = (code: string): string => {
+  switch (code) {
+    case 'keyvault_not_configured':
+      return KEYVAULT_SAVE_FIRST;
+    case 'keyvault_invalid_config':
+    case 'keyvault_invalid_url':
+    case 'keyvault_invalid_token':
+    case 'keyvault_invalid_private_key':
+      return 'The saved vault configuration is incomplete or malformed — check all three fields.';
+    case 'keyvault_unauthorized':
+      return 'The token was refused — create a new one in the vault.';
+    case 'keyvault_agent_access_disabled':
+      return 'The vault will not hand this secret to agents — enable agent access for it there.';
+    case 'keyvault_not_found':
+      return 'No such secret inside this token’s scope.';
+    case 'keyvault_rate_limited':
+      return 'The vault allows one read a second — try again in a moment.';
+    case 'keyvault_decrypt_failed':
+      return 'The private key does not match the one the vault seals to.';
+    case 'keyvault_transport_failed':
+      return 'The vault could not be reached. Check the address and the connection.';
+    default:
+      return 'The vault answered with something this pane could not read.';
+  }
+};
 
 export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.JSX.Element => {
   const [persisted, setPersisted] = useState<AppSettings | null>(null);
@@ -123,6 +153,13 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [denylist, setDenylist] = useState('');
   const [stats, setStats] = useState<StorageStatsContract | null>(null);
   const [linkPreviews, setLinkPreviews] = useState(true);
+  const [vaultUrl, setVaultUrl] = useState('');
+  const [vaultToken, setVaultToken] = useState('');
+  const [vaultJwk, setVaultJwk] = useState('');
+  const [vaultSecrets, setVaultSecrets] = useState<KeyvaultSecret[] | null>(null);
+  const [vaultBusy, setVaultBusy] = useState(false);
+  const [vaultError, setVaultError] = useState<string | null>(null);
+  const [vaultCopiedSlug, setVaultCopiedSlug] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportSummary, setExportSummary] = useState<ExportSummaryContract | null>(null);
   const [storageStatus, setStorageStatus] = useState<StorageStatus>('loading');
@@ -152,6 +189,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setRetentionDays(settings.retentionDays === null ? '' : String(settings.retentionDays));
       setDenylist(settings.denylistedApps.join('\n'));
       setLinkPreviews(settings.linkPreviews);
+      setVaultUrl(settings.keyvault.url ?? '');
+      setVaultToken(settings.keyvault.token ?? '');
+      setVaultJwk(settings.keyvault.privateJwk ?? '');
     })();
     return () => {
       cancelled = true;
@@ -222,6 +262,13 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       retentionDays: nextRetention,
       denylistedApps: nextDenylist,
       linkPreviews,
+      // The vault connection is all three fields or none; the core rejects a
+      // half-configured row, so blank fields travel as absent ones.
+      keyvault: {
+        url: vaultUrl.trim() || null,
+        token: vaultToken.trim() || null,
+        privateJwk: vaultJwk.trim() || null,
+      },
     };
 
     void (async () => {
@@ -253,6 +300,38 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setNativeAutostart(await gateway.isAutostartEnabled().catch(() => null));
       setPending(false);
     })();
+  };
+
+  /// Asks the vault what this token may read. Metadata only: what comes back
+  /// is slugs and names, and a refusal arrives as a code this pane translates.
+  const testVaultConnection = async (): Promise<void> => {
+    if (vaultBusy) return;
+    setVaultBusy(true);
+    setVaultError(null);
+    setVaultCopiedSlug(null);
+    try {
+      setVaultSecrets(await gateway.keyvaultList());
+    } catch (error) {
+      setVaultSecrets(null);
+      setVaultError(keyvaultErrorMessage(error instanceof Error ? error.message : ''));
+    }
+    setVaultBusy(false);
+  };
+
+  /// Puts one secret on the clipboard. The value never enters this window:
+  /// the result says it worked, and that is all there is to show.
+  const copyVaultSecret = async (slug: string): Promise<void> => {
+    if (vaultBusy) return;
+    setVaultBusy(true);
+    setVaultError(null);
+    setVaultCopiedSlug(null);
+    try {
+      await gateway.keyvaultCopySecret(slug);
+      setVaultCopiedSlug(slug);
+    } catch (error) {
+      setVaultError(keyvaultErrorMessage(error instanceof Error ? error.message : ''));
+    }
+    setVaultBusy(false);
   };
 
   /// Writes the whole history somewhere the user picks.
@@ -444,6 +523,95 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 is remembered, so the same page is asked once. Local and private
                 addresses are never queried.
               </p>
+            </section>
+
+            <section className="workflow-section" aria-labelledby="settings-keyvault-title">
+              <h2 id="settings-keyvault-title">
+                <Vault size={15} aria-hidden="true" />
+                Keyvault
+              </h2>
+              <label className="settings-field" htmlFor="settings-keyvault-url">
+                <span>Vault address</span>
+                <input
+                  id="settings-keyvault-url"
+                  type="url"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="https://your-vault.convex.site"
+                  value={vaultUrl}
+                  onChange={(event) => setVaultUrl(event.currentTarget.value)}
+                />
+              </label>
+              <label className="settings-field" htmlFor="settings-keyvault-token">
+                <span>Agent token</span>
+                <input
+                  id="settings-keyvault-token"
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={vaultToken}
+                  onChange={(event) => setVaultToken(event.currentTarget.value)}
+                />
+              </label>
+              <label className="settings-field" htmlFor="settings-keyvault-jwk">
+                <span>Private key (JWK)</span>
+                <textarea
+                  id="settings-keyvault-jwk"
+                  rows={3}
+                  spellCheck={false}
+                  value={vaultJwk}
+                  onChange={(event) => setVaultJwk(event.currentTarget.value)}
+                />
+              </label>
+              <p className="settings-help">
+                All three fields or none — the connection takes effect when the settings are
+                saved. The vault answers with sealed envelopes; this device’s private key opens
+                them, and a copied key goes to the clipboard without ever being recorded in the
+                history or shown here.
+              </p>
+              <div className="workflow-actions workflow-actions--start">
+                <button
+                  type="button"
+                  onClick={() => void testVaultConnection()}
+                  disabled={vaultBusy}
+                >
+                  {vaultBusy ? 'Talking to the vault…' : 'Test connection'}
+                </button>
+              </div>
+              {vaultError ? (
+                <p className="workflow-alert" role="alert">
+                  {vaultError}
+                </p>
+              ) : null}
+              {vaultCopiedSlug !== null ? (
+                <p className="workflow-status" role="status">
+                  {vaultCopiedSlug} is on the clipboard. Paste it where it is needed.
+                </p>
+              ) : null}
+              {vaultSecrets !== null ? (
+                vaultSecrets.length === 0 ? (
+                  <p className="workflow-status" role="status">
+                    The token can read no secrets.
+                  </p>
+                ) : (
+                  <ul className="settings-keyvault-list" aria-label="Vault secrets">
+                    {vaultSecrets.map((secret) => (
+                      <li key={secret.slug}>
+                        <span>{secret.name}</span>
+                        <span className="settings-keyvault-slug">{secret.slug}</span>
+                        <button
+                          type="button"
+                          aria-label={`Copy ${secret.slug}`}
+                          disabled={vaultBusy}
+                          onClick={() => void copyVaultSecret(secret.slug)}
+                        >
+                          Copy
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )
+              ) : null}
             </section>
 
             <section className="workflow-section" aria-labelledby="settings-export-title">

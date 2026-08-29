@@ -2,12 +2,17 @@ import type { ClipboardGateway } from './gateway';
 import {
   SYNTHETIC_HISTORY_ITEMS,
   SYNTHETIC_IMPORT_PROGRESS,
+  SYNTHETIC_KEYVAULT_SECRETS,
   SYNTHETIC_SETTINGS,
   SYNTHETIC_STORAGE_STATS,
 } from './fixtures';
 
 let historyItems = SYNTHETIC_HISTORY_ITEMS.map((item) => ({ ...item }));
-let settings = { ...SYNTHETIC_SETTINGS, denylistedApps: [...SYNTHETIC_SETTINGS.denylistedApps] };
+let settings = {
+  ...SYNTHETIC_SETTINGS,
+  denylistedApps: [...SYNTHETIC_SETTINGS.denylistedApps],
+  keyvault: { ...SYNTHETIC_SETTINGS.keyvault },
+};
 let autostartEnabled = SYNTHETIC_SETTINGS.autostart;
 
 export const mockGateway: ClipboardGateway = {
@@ -104,19 +109,36 @@ export const mockGateway: ClipboardGateway = {
   },
   chooseExportDirectory: async () => 'synthetic://clipboard-export',
   exportHistory: async () => ({ records: 4, images: 1, withoutPayload: 1 }),
+  // The browser preview has no vault behind it; the settings pane still gets
+  // a list to show, and copies that went nowhere but never fail.
+  keyvaultList: async () =>
+    SYNTHETIC_KEYVAULT_SECRETS.map((secret) => ({ ...secret })),
+  keyvaultCopySecret: async () => undefined,
   // The browser preview has no core behind it, so nothing ever changes.
   onHistoryChanged: () => () => undefined,
   onLinkPreviewReady: () => () => undefined,
   getThumbnail: async (eventId) =>
     eventId === 103 ? { mimeType: 'image/png', base64: 'c3ludGhldGlj' } : null,
-  getSettings: async () => ({ ...settings, denylistedApps: [...settings.denylistedApps] }),
+  getSettings: async () => ({
+    ...settings,
+    denylistedApps: [...settings.denylistedApps],
+    keyvault: { ...settings.keyvault },
+  }),
   isAutostartEnabled: async () => autostartEnabled,
   setAutostartEnabled: async (enabled) => {
     autostartEnabled = enabled;
   },
   saveSettings: async (nextSettings) => {
-    settings = { ...nextSettings, denylistedApps: [...nextSettings.denylistedApps] };
-    return { ...settings, denylistedApps: [...settings.denylistedApps] };
+    settings = {
+      ...nextSettings,
+      denylistedApps: [...nextSettings.denylistedApps],
+      keyvault: { ...nextSettings.keyvault },
+    };
+    return {
+      ...settings,
+      denylistedApps: [...settings.denylistedApps],
+      keyvault: { ...settings.keyvault },
+    };
   },
   getStorageStats: async () => ({ ...SYNTHETIC_STORAGE_STATS }),
 };

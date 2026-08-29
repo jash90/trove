@@ -60,6 +60,13 @@ export interface Thumbnail {
   base64: string;
 }
 
+/** The keyvault connection: all three fields, or all null. */
+export interface KeyvaultSettings {
+  url: string | null;
+  token: string | null;
+  privateJwk: string | null;
+}
+
 export interface AppSettings {
   schemaVersion: 1;
   hotkey: string;
@@ -67,6 +74,14 @@ export interface AppSettings {
   retentionDays: number | null;
   denylistedApps: string[];
   linkPreviews: boolean;
+  keyvault: KeyvaultSettings;
+}
+
+/** One secret's metadata — everything the vault says without opening it. */
+export interface KeyvaultSecret {
+  slug: string;
+  name: string;
+  category?: string | null;
 }
 
 export interface StorageStats {

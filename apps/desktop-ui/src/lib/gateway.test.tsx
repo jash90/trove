@@ -36,6 +36,7 @@ const settings: AppSettings = {
   retentionDays: null,
   denylistedApps: [],
   linkPreviews: true,
+  keyvault: { url: null, token: null, privateJwk: null },
 };
 
 const progress: ImportProgress = {

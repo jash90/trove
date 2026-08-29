@@ -7,6 +7,7 @@ use clipboard_store::{StoreConfig, StoreHandle};
 use serde_json::json;
 use std::{
     fs,
+    future::Future,
     sync::{
         Arc, Barrier,
         atomic::{AtomicBool, Ordering},
@@ -349,6 +350,7 @@ async fn settings_use_valid_defaults_and_persist_one_versioned_json_object() {
         retention_days: Some(365),
         denylisted_apps: vec!["com.example.synthetic".to_owned()],
         link_previews: false,
+        keyvault: Default::default(),
     };
     let saved = commands::save_settings_service(&state, requested.clone())
         .await
@@ -528,6 +530,8 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "open_settings_window",
             "export_history",
             "get_link_preview",
+            "keyvault_list",
+            "keyvault_copy_secret",
         ]
     );
 
@@ -1424,4 +1428,235 @@ async fn link_preview_fetches_stores_and_renders_a_real_page() {
     assert!(rendered.icon_base64.is_some());
     assert!(rendered.image_base64.is_some());
     assert_eq!(rendered.image_mime.as_deref(), Some("image/png"));
+}
+
+// --------------------------------------------------------------- keyvault --
+
+/// A transport that answers from a script, so the command layer is tested
+/// without the network — the same discipline the keyvault crate keeps.
+struct CannedVault {
+    responses: Vec<Result<clipboard_keyvault::SecretResponse, clipboard_keyvault::KeyvaultError>>,
+}
+
+impl CannedVault {
+    fn with(
+        responses: Vec<
+            Result<clipboard_keyvault::SecretResponse, clipboard_keyvault::KeyvaultError>,
+        >,
+    ) -> Self {
+        Self { responses }
+    }
+
+    fn json(
+        status: u16,
+        body: &str,
+    ) -> Result<clipboard_keyvault::SecretResponse, clipboard_keyvault::KeyvaultError> {
+        Ok(clipboard_keyvault::SecretResponse {
+            status,
+            body: body.to_owned(),
+        })
+    }
+}
+
+impl clipboard_keyvault::SecretTransport for CannedVault {
+    #[allow(clippy::manual_async_fn)]
+    fn get(
+        &self,
+        path: &str,
+    ) -> impl Future<
+        Output = Result<clipboard_keyvault::SecretResponse, clipboard_keyvault::KeyvaultError>,
+    > + Send {
+        let _ = path;
+        async move { self.responses[0].clone() }
+    }
+}
+
+fn jwk_json_for(key: &rsa::RsaPrivateKey) -> String {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+
+    let encode = |value: &rsa::BigUint| URL_SAFE_NO_PAD.encode(value.to_bytes_be());
+    serde_json::json!({
+        "kty": "RSA",
+        "n": encode(key.n()),
+        "e": encode(key.e()),
+        "d": encode(key.d()),
+        "p": encode(&key.primes()[0]),
+        "q": encode(&key.primes()[1]),
+    })
+    .to_string()
+}
+
+fn valid_jwk_json() -> String {
+    let mut rng = rsa::rand_core::OsRng;
+    jwk_json_for(&rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap())
+}
+
+fn vault_settings() -> AppSettingsDto {
+    let mut settings = AppSettingsDto::default();
+    settings.keyvault.url = Some("https://trustworthy-eagle-783.convex.site".to_owned());
+    settings.keyvault.token = Some("kv_AbCdEf0123456789-_".to_owned());
+    settings.keyvault.private_jwk = Some(valid_jwk_json());
+    settings
+}
+
+#[tokio::test]
+async fn keyvault_settings_default_off_and_old_rows_still_parse() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+
+    // A row written before the keyvault section existed.
+    let legacy_row = serde_json::json!({
+        "schemaVersion": 1,
+        "hotkey": "CommandOrControl+Shift+Space",
+        "autostart": false,
+        "retentionDays": null,
+        "denylistedApps": [],
+        "linkPreviews": true
+    })
+    .to_string();
+    state.store.save_setting("app", &legacy_row).await.unwrap();
+
+    let settings = commands::get_settings_service(&state).await.unwrap();
+    assert_eq!(settings.keyvault.url, None);
+    assert_eq!(settings.keyvault.token, None);
+    assert_eq!(settings.keyvault.private_jwk, None);
+}
+
+#[tokio::test]
+async fn keyvault_settings_validate_all_or_nothing_through_the_crate_rules() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+
+    let mut partial = vault_settings();
+    partial.keyvault.private_jwk = None;
+    assert_eq!(
+        commands::save_settings_service(&state, partial)
+            .await
+            .unwrap_err(),
+        "invalid_settings"
+    );
+
+    let mut broken_url = vault_settings();
+    broken_url.keyvault.url = Some("http://vault.example.com".to_owned());
+    assert_eq!(
+        commands::save_settings_service(&state, broken_url)
+            .await
+            .unwrap_err(),
+        "invalid_settings"
+    );
+
+    let complete = vault_settings();
+    let saved = commands::save_settings_service(&state, complete)
+        .await
+        .unwrap();
+    let reloaded = commands::get_settings_service(&state).await.unwrap();
+    assert_eq!(saved, reloaded);
+}
+
+#[tokio::test]
+async fn keyvault_commands_refuse_before_anything_is_configured() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+
+    let error = clipboard_history_app::keyvault::list_service(&state)
+        .await
+        .unwrap_err();
+    assert_eq!(error, "keyvault_not_configured");
+}
+
+#[tokio::test]
+async fn copying_a_key_opens_it_suppresses_capture_and_never_returns_it() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use rsa::rand_core::{OsRng, RngCore};
+    use rsa::{Oaep, RsaPrivateKey};
+    use sha2::Sha256;
+
+    let mut rng = OsRng;
+    let holder = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+
+    // Seal exactly the way the vault's browser does.
+    let mut aes_key = [0u8; 32];
+    rng.fill_bytes(&mut aes_key);
+    let mut iv = [0u8; 12];
+    rng.fill_bytes(&mut iv);
+    let wrapped = holder
+        .to_public_key()
+        .encrypt(&mut rng, Oaep::new::<Sha256>(), &aes_key)
+        .unwrap();
+    use aes_gcm::aead::{Aead, KeyInit};
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(&aes_key).unwrap();
+    let sealed = cipher
+        .encrypt((&iv).into(), b"sklejka-klucz".as_ref())
+        .unwrap();
+    let envelope_body = serde_json::json!({
+        "slug": "openai",
+        "name": "OpenAI",
+        "ciphertext": serde_json::json!({
+            "v": 1,
+            "encKey": STANDARD.encode(wrapped),
+            "iv": STANDARD.encode(iv),
+            "ct": STANDARD.encode(sealed),
+        })
+        .to_string(),
+    })
+    .to_string();
+
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    // The real application manages a MonitorControl alongside the state; the
+    // copy path arms it, so the test app needs one too.
+    let app = tauri::test::mock_builder()
+        .manage(state)
+        .manage(clipboard_history_app::monitor::MonitorControl::new())
+        .invoke_handler(commands::invoke_handler())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+
+    let config = clipboard_keyvault::KeyvaultConfig {
+        base_url: "https://trustworthy-eagle-783.convex.site".to_owned(),
+        token: "kv_AbCdEf0123456789-_".to_owned(),
+        private_jwk: jwk_json_for(&holder),
+    };
+
+    let outcome = clipboard_history_app::keyvault::copy_secret_service(
+        app.handle(),
+        CannedVault::with(vec![CannedVault::json(200, &envelope_body)]),
+        &config,
+        "openai",
+    )
+    .await;
+
+    // The mock app registers no clipboard plugin, so the last step of a
+    // successful copy reports clipboard_unavailable. Anything keyvault_* here
+    // would mean the envelope or the key failed to open; reaching the
+    // clipboard means the plaintext existed in between and was consumed.
+    assert_eq!(outcome.unwrap_err(), "clipboard_unavailable");
+
+    // Arming happened before the write: the monitor must not record a fetched
+    // key as a fresh capture, which would put it in the history this
+    // application exists to keep private.
+    assert!(
+        app.state::<clipboard_history_app::monitor::MonitorControl>()
+            .suppression_deadline_active(clipboard_history_app::commands::current_time_ms())
+    );
+
+    // Nothing in this command's result or the store carries the key: the
+    // store never saw a capture for it at all.
+    let stats = commands::get_storage_stats_service(&app.state::<AppState>())
+        .await
+        .unwrap();
+    assert_eq!(stats.event_count, 0);
+}
+
+#[test]
+fn the_vault_read_throttle_spaces_requests() {
+    assert_eq!(clipboard_history_app::keyvault::throttle(10_000), Ok(()));
+    assert_eq!(
+        clipboard_history_app::keyvault::throttle(10_500),
+        Err("keyvault_rate_limited".to_owned())
+    );
+    assert_eq!(clipboard_history_app::keyvault::throttle(20_000), Ok(()));
 }

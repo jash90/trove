@@ -4,9 +4,11 @@ A local clipboard history manager. Rust core, Tauri 2 shell, React interface.
 The history, its index and its blobs never leave this device, and fonts and
 every other asset are bundled locally.
 
-**One deliberate exception:** the preview of a link entry fetches the page's
-title and icon. It can be turned off in settings — see "Link previews" below.
-Apart from that, the application makes no network requests at all.
+**Two deliberate exceptions:** the preview of a link entry fetches the page's
+title and icon (turnable off in settings — see "Link previews" below), and the
+optional keyvault pane reads your own secret vault when you configure it —
+see "Keyvault" below. Apart from those, the application makes no network
+requests at all.
 
 ## Status
 
@@ -279,11 +281,36 @@ certificate store. On macOS that is Security.framework, on Windows schannel;
 **on Linux it needs the OpenSSL headers at build time** — the one place this
 choice makes building harder on a target we do not verify anyway.
 
+## Keyvault
+
+Settings can point the application at a personally-run keyvault: the REST base
+address of its deployment, an agent token created there, and the device-side
+private JWK that opens what the vault seals. All three fields or none — a
+half-configured vault is rejected at save time. Unconfigured, the pane does
+nothing and the application stays off the network.
+
+What the vault returns are sealed envelopes, not values: the token only
+authenticates, and only this device's private key can open an answer. Copying a
+secret decrypts it inside the core process and puts it straight on the
+clipboard — arming the same self-write suppression the palette uses, so a
+fetched key is never recorded into the history — and the interface learns only
+whether it worked. Denials arrive as codes (unauthorized, out of scope, rate
+limited, agent access disabled) and are shown as fixed sentences; reads are
+spaced to respect the vault's per-token rate limit.
+
+Said plainly: the token and the private JWK are stored as this application's
+settings, which is a plaintext row in the local database — the same trust
+boundary the database itself sits on. Treat a data-directory compromise as a
+vault-token compromise and revoke the token there if that happens.
+
 ## Privacy
 
 - Clipboard content, queries and paths never reach the logs. Logs hold operation
   identifiers, counters, times and error codes. That applies to the addresses
   fetched for link previews too.
+- A keyvault secret's value exists only between the decrypt and the clipboard
+  write: it never enters the interface, a log line, an error message, or the
+  history. The vault token and private key are never echoed anywhere either.
 - The interface neither opens the database nor reads arbitrary files; it talks
   to the core through a narrow set of typed commands.
 - Imported HTML and code are displayed as text, never as markup.
