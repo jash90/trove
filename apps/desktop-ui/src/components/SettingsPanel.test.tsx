@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -33,7 +33,13 @@ const persistedSettings: AppSettings = {
   retentionDays: 30,
   denylistedApps: ['com.acme.private'],
   linkPreviews: true,
+  keyvault: { url: null, token: null, privateJwk: null },
 };
+
+const vaultSecrets = [
+  { slug: 'openai', name: 'OpenAI', category: 'ai' as const },
+  { slug: 'github', name: 'GitHub', category: null },
+];
 
 const storageStats: StorageStats = {
   contentCount: 4,
@@ -71,6 +77,8 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
     isAutostartEnabled: vi.fn(async () => false),
     setAutostartEnabled: vi.fn(async () => undefined),
     getStorageStats: vi.fn(async () => storageStats),
+    keyvaultList: vi.fn(async () => vaultSecrets.map((secret) => ({ ...secret }))),
+    keyvaultCopySecret: vi.fn(async () => undefined),
     ...overrides,
   }) as ClipboardGateway;
 
@@ -343,5 +351,70 @@ describe('Settings page and storage semantics', () => {
 
     expect(await screen.findByText('Storage figures are unavailable.')).toBeVisible();
     expect(screen.queryByText(`${Number.MAX_SAFE_INTEGER} B`)).not.toBeInTheDocument();
+  });
+});
+
+describe('keyvault section', () => {
+  it('saves the vault configuration and never echoes the token back', async () => {
+    const gateway = makeGateway();
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    await userEvent.type(screen.getByLabelText(/Vault address/u), 'https://vault.example.invalid');
+    await userEvent.type(screen.getByLabelText(/Agent token/u), 'kv_synthetic-token');
+    fireEvent.change(screen.getByLabelText(/Private key \(JWK\)/u), {
+      target: { value: '{"kty":"RSA"}' },
+    });
+    fireEvent.submit(screen.getByRole('button', { name: 'Save settings' }).closest('form')!);
+
+    await waitFor(() => {
+      expect(gateway.saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          keyvault: {
+            url: 'https://vault.example.invalid',
+            token: 'kv_synthetic-token',
+            privateJwk: '{"kty":"RSA"}',
+          },
+        }),
+      );
+    });
+  });
+
+  it('tests the connection by listing metadata, and copies without showing a value', async () => {
+    const gateway = makeGateway();
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+
+    const list = await screen.findByRole('list', { name: 'Vault secrets' });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2);
+
+    await userEvent.click(within(list).getByRole('button', { name: 'Copy openai' }));
+
+    await waitFor(() => {
+      expect(gateway.keyvaultCopySecret).toHaveBeenCalledWith('openai');
+    });
+    expect(
+      screen.getByText('openai is on the clipboard. Paste it where it is needed.'),
+    ).toBeVisible();
+  });
+
+  it('surfaces a vault denial as a plain sentence', async () => {
+    // The core rejects with the bare code string, not an Error — the mock
+    // matches that shape so the mapper is exercised the way production runs.
+    const gateway = makeGateway({
+      keyvaultList: vi.fn(async () => {
+        throw 'keyvault_unauthorized';
+      }),
+    });
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+
+    expect(
+      await screen.findByText('The token was refused — create a new one in the vault.'),
+    ).toBeVisible();
   });
 });

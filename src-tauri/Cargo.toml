@@ -19,6 +19,7 @@ clipboard-store = { path = "../crates/clipboard-store" }
 clipboard-search = { path = "../crates/clipboard-search" }
 clipboard-images = { path = "../crates/clipboard-images" }
 clipboard-import = { path = "../crates/clipboard-import" }
+clipboard-keyvault = { path = "../crates/clipboard-keyvault" }
 clipboard-link-preview = { path = "../crates/clipboard-link-preview" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -32,6 +33,10 @@ uuid.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+aes-gcm.workspace = true
+base64.workspace = true
 image.workspace = true
+rsa.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 tauri = { version = "2.11.5", features = ["test"] }

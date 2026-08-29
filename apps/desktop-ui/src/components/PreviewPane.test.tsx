@@ -79,6 +79,7 @@ const settings: AppSettings = {
   retentionDays: 30,
   denylistedApps: [],
   linkPreviews: true,
+  keyvault: { url: null, token: null, privateJwk: null },
 };
 
 const importProgress: ImportProgress = {
@@ -139,6 +140,8 @@ const makeGateway = (
       databaseBytes: 1,
       blobBytes: 0,
     })),
+    keyvaultList: vi.fn(async () => []),
+    keyvaultCopySecret: vi.fn(async () => undefined),
     ...overrides,
   };
 };
