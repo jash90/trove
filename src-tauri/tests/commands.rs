@@ -2085,12 +2085,53 @@ fn every_vault_refusal_has_words_in_the_settings_pane() {
         "the error codes were not found where this test looks for them"
     );
 
-    let unmapped: Vec<&&str> = codes
-        .iter()
-        .filter(|code| !pane.contains(**code))
-        .collect();
+    let unmapped: Vec<&&str> = codes.iter().filter(|code| !pane.contains(**code)).collect();
     assert!(
         unmapped.is_empty(),
         "these refusals would reach someone as the catch-all sentence: {unmapped:?}"
     );
+}
+
+#[tokio::test]
+async fn pairing_clears_the_overrides_that_would_shadow_it() {
+    isolate_device_identity();
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+
+    // The state a pairing lands in: a URL and token from an earlier configuration, still in the
+    // row. They are not inert — config_from lays overrides over the device identity, so a
+    // revoked token here shadows the working one pairing just wrote and the vault answers 401.
+    let mut stale = AppSettingsDto::default();
+    stale.keyvault.url = Some("https://trustworthy-eagle-783.convex.site".to_owned());
+    stale.keyvault.token = Some("kv_AbCdEf0123456789-_".to_owned());
+    stale.hotkey = "CommandOrControl+Shift+K".to_owned();
+    commands::save_settings_service(&state, stale)
+        .await
+        .unwrap();
+
+    clipboard_history_app::keyvault::clear_settings_overrides(&state)
+        .await
+        .unwrap();
+
+    let settings = commands::get_settings_service(&state).await.unwrap();
+    assert_eq!(settings.keyvault.url, None);
+    assert_eq!(settings.keyvault.token, None);
+    // Only the vault overrides go. Clearing is not a reset, and someone's hotkey is not this
+    // function's business.
+    assert_eq!(settings.hotkey, "CommandOrControl+Shift+K");
+}
+
+#[tokio::test]
+async fn clearing_overrides_that_are_not_there_writes_nothing() {
+    isolate_device_identity();
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+
+    // The ordinary case — a fresh install pairing for the first time. Writing the row anyway
+    // would touch settings on every pairing for no reason.
+    let before = state.store.get_setting("app").unwrap();
+    clipboard_history_app::keyvault::clear_settings_overrides(&state)
+        .await
+        .unwrap();
+    assert_eq!(state.store.get_setting("app").unwrap(), before);
 }

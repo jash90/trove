@@ -663,6 +663,12 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                   onChange={(event) => setVaultToken(event.currentTarget.value)}
                 />
               </label>
+              {vaultToken.trim() || vaultUrl.trim() ? (
+                <p className="workflow-alert" role="status">
+                  These override the paired device identity — the vault is contacted with what is
+                  typed here, not with what connecting set up. Clear them to use the pairing.
+                </p>
+              ) : null}
               <p className="settings-help">
                 <strong>Connect</strong> pairs this device: it generates a key here, sends only
                 the public half, and the browser hands back a token of its own — nothing is

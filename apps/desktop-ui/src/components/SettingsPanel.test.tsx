@@ -400,6 +400,22 @@ describe('keyvault section', () => {
     });
   });
 
+  it('says plainly when a leftover override is what the vault is being asked with', async () => {
+    const gateway = makeGateway();
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    // Nothing typed: the pairing is in charge and there is nothing to warn about.
+    expect(screen.queryByText(/override the paired device identity/u)).not.toBeInTheDocument();
+
+    // A token left over from an earlier configuration silently outranks a working pairing and
+    // the vault answers 401. The pane used to show a filled field and a refusal without ever
+    // connecting the two, which is exactly how that went unnoticed.
+    await userEvent.type(screen.getByLabelText(/Agent token/u), 'kv_stale0123456789');
+
+    expect(await screen.findByText(/override the paired device identity/u)).toBeVisible();
+  });
+
   it('refuses to connect without an address rather than opening a browser at nothing', async () => {
     const gateway = makeGateway();
     render(<SettingsPanel gateway={gateway} />);

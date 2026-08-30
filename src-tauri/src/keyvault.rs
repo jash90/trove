@@ -222,7 +222,7 @@ pub async fn pair_start_service(base_url: String) -> Result<String, String> {
 ///
 /// The interface calls this on a timer, so every answer other than "pending" also clears the
 /// slot: a pairing that expired or was collected by someone else must not be polled forever.
-pub async fn pair_poll_service() -> Result<PairingStatusDto, String> {
+pub async fn pair_poll_service(state: &AppState) -> Result<PairingStatusDto, String> {
     // The lock is released before the request. Holding it across an await would block the
     // interface's next call on the network, and a cancel would have nothing to take.
     let Some((base_url, code, private_jwk)) = ({
@@ -249,6 +249,9 @@ pub async fn pair_poll_service() -> Result<PairingStatusDto, String> {
                 &token,
             )
             .map_err(|error| error.to_string())?;
+            // Only after the identity is safely on disk: clearing first would leave an install
+            // with neither the old configuration nor the new one if the write failed.
+            clear_settings_overrides(state).await?;
             pair_cancel_service();
             Ok(PairingStatusDto::of("paired"))
         }
@@ -267,7 +270,39 @@ pub async fn pair_poll_service() -> Result<PairingStatusDto, String> {
     }
 }
 
-/// Forgets the pairing in flight, and with it this device's unsaved key.
+/// Drops the URL and token overrides once a pairing has replaced them.
+///
+/// A pairing is an act of configuration, so whatever was configured before it is stale by
+/// definition — and a stale token override is not inert: `config_from` lays overrides over the
+/// device identity, so a revoked one shadows the working token pairing just installed and the
+/// vault answers 401. That is the bug this exists to prevent, and it is invisible from the
+/// interface, which shows filled fields and a refusal without connecting the two.
+///
+/// An override set *after* pairing still wins. The rule is unchanged — the last thing configured
+/// wins — except that pairing now counts as configuring.
+pub async fn clear_settings_overrides(state: &AppState) -> Result<(), String> {
+    let store = state.store.clone();
+    let settings = crate::commands::run_blocking("settings_unavailable", move || {
+        crate::commands::get_settings_blocking(&store)
+    })
+    .await?;
+
+    // Nothing to clear is the common case, and writing the row anyway would touch settings on
+    // every pairing for no reason.
+    if settings.keyvault.url.is_none() && settings.keyvault.token.is_none() {
+        return Ok(());
+    }
+
+    let mut cleared = settings;
+    cleared.keyvault.url = None;
+    cleared.keyvault.token = None;
+    // Through the ordinary save so there is one way into this row, with its validation and the
+    // side effects that hang off it.
+    crate::commands::save_settings_service(state, cleared).await?;
+    Ok(())
+}
+
+/// Forgets the pairing in flight, and with it this device's unsaved key./// Forgets the pairing in flight, and with it this device's unsaved key.
 pub fn pair_cancel_service() {
     let mut slot = pending()
         .lock()

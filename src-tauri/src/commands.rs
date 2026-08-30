@@ -1175,8 +1175,10 @@ pub async fn keyvault_pair_start(url: String) -> Result<String, String> {
 
 /// Asks whether the browser has approved yet. Called on a timer by the interface.
 #[tauri::command]
-pub async fn keyvault_pair_poll() -> Result<crate::keyvault::PairingStatusDto, String> {
-    crate::keyvault::pair_poll_service().await
+pub async fn keyvault_pair_poll(
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::keyvault::PairingStatusDto, String> {
+    crate::keyvault::pair_poll_service(state.inner()).await
 }
 
 /// Abandons a pairing in flight, discarding the key generated for it.
