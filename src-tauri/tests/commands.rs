@@ -2053,3 +2053,44 @@ async fn a_cryptex_firmlink_application_catalogues_and_answers_an_icon() {
         "the icon ships at the row's size"
     );
 }
+
+/// Every refusal the vault crate can name must have words in the settings pane.
+///
+/// This exists because it did not, and the gap was invisible: an unmapped code falls through to
+/// "the vault answered with something this pane could not read", which is true of every failure
+/// and useful for none. A shipped pairing bug hid behind that sentence until the code was traced
+/// by hand. Adding a variant is now the moment you are told to write its sentence.
+#[test]
+fn every_vault_refusal_has_words_in_the_settings_pane() {
+    let errors = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../crates/clipboard-keyvault/src/lib.rs"
+    ))
+    .expect("the vault crate is a workspace member");
+    let pane = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../apps/desktop-ui/src/components/SettingsPanel.tsx"
+    ))
+    .expect("the settings pane is in this repository");
+
+    let codes: Vec<&str> = errors
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("#[error(\"")?;
+            rest.strip_suffix("\")]")
+        })
+        .collect();
+    assert!(
+        codes.len() > 10,
+        "the error codes were not found where this test looks for them"
+    );
+
+    let unmapped: Vec<&&str> = codes
+        .iter()
+        .filter(|code| !pane.contains(**code))
+        .collect();
+    assert!(
+        unmapped.is_empty(),
+        "these refusals would reach someone as the catch-all sentence: {unmapped:?}"
+    );
+}

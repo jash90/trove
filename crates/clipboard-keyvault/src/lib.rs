@@ -59,6 +59,10 @@ pub enum KeyvaultError {
     /// send someone to approve a pairing.
     #[error("keyvault_pairing_page_unknown")]
     PairingPageUnknown,
+    /// The approved pairing handed back something that is not a complete identity. Distinct from
+    /// a bad response in general because it points at the vault's own page, not at the network.
+    #[error("keyvault_pairing_payload_invalid")]
+    PairingPayloadInvalid,
     #[error("keyvault_invalid_slug")]
     InvalidSlug,
     #[error("keyvault_unauthorized")]

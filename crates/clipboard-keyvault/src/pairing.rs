@@ -220,16 +220,20 @@ fn open_payload(payload: &str, private_jwk: &str) -> Result<PairingOutcome, Keyv
     let envelope = parse_envelope(payload)?;
     let key = parse_private_jwk(private_jwk)?;
     let plaintext = decrypt_envelope(&key, &envelope)?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(plaintext.as_str()).map_err(|_| KeyvaultError::BadResponse)?;
+    // Every refusal below is PairingPayloadInvalid rather than BadResponse: the envelope opened,
+    // so the network and the key are both fine and the fault is in what the vault's page put
+    // inside. Saying that plainly is the difference between looking at a deployment's
+    // configuration and looking at a connection.
+    let parsed: serde_json::Value = serde_json::from_str(plaintext.as_str())
+        .map_err(|_| KeyvaultError::PairingPayloadInvalid)?;
     let url = parsed
         .get("url")
         .and_then(|v| v.as_str())
-        .ok_or(KeyvaultError::BadResponse)?;
+        .ok_or(KeyvaultError::PairingPayloadInvalid)?;
     let token = parsed
         .get("token")
         .and_then(|v| v.as_str())
-        .ok_or(KeyvaultError::BadResponse)?;
+        .ok_or(KeyvaultError::PairingPayloadInvalid)?;
     // The vault's word for its own address is authoritative, but it is still a value from the
     // network heading for a config file, so it passes the same rules a typed one would.
     crate::validate_base_url(url)?;

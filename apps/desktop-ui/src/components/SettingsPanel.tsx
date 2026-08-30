@@ -167,6 +167,18 @@ export const keyvaultErrorMessage = (code: string): string => {
       return 'The vault allows one read a second — try again in a moment.';
     case 'keyvault_decrypt_failed':
       return 'The private key does not match the one the vault seals to.';
+    case 'keyvault_pairing_payload_invalid':
+      return 'Connecting got as far as the vault answering, but what it sent back was not a complete identity. The vault deployment is misconfigured.';
+    case 'keyvault_device_identity_missing':
+      return 'This device has no vault identity yet. Use Connect to pair it.';
+    case 'keyvault_bad_response':
+      return 'The vault replied in a shape this version does not understand.';
+    case 'keyvault_invalid_slug':
+      return 'That secret name is not one the vault can hold.';
+    case 'keyvault_envelope_invalid':
+    case 'keyvault_envelope_unsupported_version':
+    case 'keyvault_envelope_too_large':
+      return 'The sealed answer from the vault was not one this version can open.';
     case 'keyvault_transport_failed':
       return 'The vault could not be reached. Check the address and the connection.';
     default:
