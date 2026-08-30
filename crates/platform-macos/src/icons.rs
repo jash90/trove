@@ -3,7 +3,13 @@
 #[cfg(target_os = "macos")]
 use objc2_app_kit::NSBitmapImageRep;
 
-/// The PNG bytes of the icon macOS shows for `path`, rendered at `target_px`.
+/// The smallest side an icon is drawn at. Asking for less gets this: the
+/// artwork holds no representation below it and AppKit will not invent one.
+#[cfg(target_os = "macos")]
+const SMALLEST_ICON_PX: usize = 16;
+
+/// The PNG bytes of the icon macOS shows for `path`, rendered at `target_px`
+/// — or at [`SMALLEST_ICON_PX`] when less than that is asked for.
 ///
 /// NSWorkspace answers every path — a real bundle gets its own artwork, a
 /// synthetic or vanished one gets the generic application icon — so the
@@ -30,9 +36,11 @@ pub fn application_icon_png(path: &str, target_px: usize) -> Option<Vec<u8>> {
 
     // The rectangle is in points and the reference context is absent, so
     // there is no backing scale factor to multiply it by: one point is one
-    // pixel, and the bitmap arrives at exactly this side. Sixteen is the
-    // floor because below it an icon has stopped being an icon.
-    let side = target_px.max(16) as f64;
+    // pixel, and the bitmap arrives at exactly this side. The floor is
+    // sixteen because AppKit's own is: an icon carries nothing smaller, and
+    // a rectangle below it comes back at sixteen anyway. Saying so here
+    // keeps the promise this function makes true.
+    let side = target_px.max(SMALLEST_ICON_PX) as f64;
     let mut proposed = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(side, side));
 
     // SAFETY: `proposed` is a live local for the whole call, so the pointer

@@ -58,3 +58,20 @@ fn application_icon_png_honours_a_smaller_target() {
         "the target size is a contract, not a suggestion"
     );
 }
+
+/// Sixteen is where the contract stops being the caller's to set: an icon
+/// carries no representation below it, and AppKit answers a smaller
+/// rectangle with sixteen pixels rather than inventing eight. The floor is
+/// documented rather than discovered, so it is pinned here too.
+#[cfg(target_os = "macos")]
+#[test]
+fn application_icon_png_floors_a_target_below_the_smallest_icon() {
+    let bytes = icon_of_a_synthetic_bundle(8);
+
+    let decoded = image::load_from_memory(&bytes).expect("a PNG a browser can decode");
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (16, 16),
+        "the floor the documentation promises is not the one the code keeps"
+    );
+}
