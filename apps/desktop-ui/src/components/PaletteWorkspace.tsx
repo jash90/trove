@@ -1,24 +1,22 @@
 import { PanelRightOpen } from 'lucide-react';
 
-import type { AppEntry, HistoryItem, LinkPreview as LinkPreviewContract, Preview } from '../lib/contracts';
+import type { HistoryItem, LinkPreview as LinkPreviewContract, Preview } from '../lib/contracts';
+import type { PaletteItem } from '../lib/paletteItems';
 import type { PreviewStatus } from './PreviewPane';
 import type { ThumbnailStatus } from './ImagePreview';
-import { AppsList } from './AppsList';
 import { EmptyState } from './EmptyState';
-import { HistoryList } from './HistoryList';
+import { PaletteList } from './PaletteList';
 import { PreviewPane } from './PreviewPane';
 
 interface PaletteWorkspaceProps {
   appsStatus: 'loading' | 'ready' | 'error';
-  apps: AppEntry[];
-  /** Which application row the shared keyboard selection sits on, if any. */
-  selectedAppPath: string | null;
+  status: 'loading' | 'ready' | 'error';
+  /** The single result list: applications and history, already ordered. */
+  items: PaletteItem[];
+  /** The shared keyboard selection, whatever kind of row it sits on. */
+  selectedKey: string | null;
   /** Set when a launch was refused; cleared by the next attempt or selection. */
   launchError: string | null;
-  status: 'loading' | 'ready' | 'error';
-  items: HistoryItem[];
-  /** Which history row the shared keyboard selection sits on, if any. */
-  selectedId: number | null;
   preview: Preview | null;
   previewStatus: PreviewStatus;
   thumbnailUrl: string | null;
@@ -27,31 +25,26 @@ interface PaletteWorkspaceProps {
   selectedItem: HistoryItem | null;
   mobilePreviewOpen: boolean;
   actions: React.ReactNode;
-  onSelectApp: (path: string) => void;
-  onActivateApp: (path: string) => void;
-  onSelect: (eventId: number) => void;
-  onActivate: (eventId: number) => void;
+  onSelect: (entry: PaletteItem) => void;
+  onActivate: (entry: PaletteItem) => void;
   onOpenPreview: () => void;
   onClosePreview: () => void;
   onRevealSource: () => void;
 }
 
-/// The palette's middle: applications above, history underneath, the
-/// preview column beside both.
+/// The palette's middle: one list of applications and clipboard history,
+/// the preview column beside it.
 ///
-/// One field drives the two lists and one keyboard selection moves through
-/// them as a single sequence — applications first, because a launcher is
-/// what the palette becomes the moment it opens. The applications section
-/// keeps its own bounded height with its own scroll, so a large catalog
-/// cannot push the history out of sight; the history takes the rest.
+/// One field drives the list and one keyboard selection moves through it.
+/// Rows already on screen win over state changes — swapping the list for a
+/// loading state would both flash and leave Enter steering at rows nobody
+/// can see — so the states speak only when there is nothing to show.
 export const PaletteWorkspace = ({
   appsStatus,
-  apps,
-  selectedAppPath,
-  launchError,
   status,
   items,
-  selectedId,
+  selectedKey,
+  launchError,
   preview,
   previewStatus,
   thumbnailUrl,
@@ -60,8 +53,6 @@ export const PaletteWorkspace = ({
   selectedItem,
   mobilePreviewOpen,
   actions,
-  onSelectApp,
-  onActivateApp,
   onSelect,
   onActivate,
   onOpenPreview,
@@ -88,51 +79,35 @@ export const PaletteWorkspace = ({
           {launchError}
         </p>
       ) : null}
-      <section className="palette-section palette-section--apps" aria-label="Aplikacje">
-        <h2 className="palette-section__label">Aplikacje</h2>
-        <div className="palette-section__panel">
-          {/* Quiet on purpose: the history announces, the applications are
-              visible — two live regions at once is noise, not information. */}
-          {appsStatus === 'loading' && apps.length === 0 ? (
-            <EmptyState kind="loading" subject="applications" quiet />
-          ) : null}
-          {appsStatus === 'error' && apps.length === 0 ? (
-            <EmptyState kind="error" subject="applications" quiet />
-          ) : null}
-          {appsStatus === 'ready' && apps.length === 0 ? (
-            <EmptyState kind="empty" subject="applications" quiet />
-          ) : null}
-          {/* The list is also what stays on screen while the catalog
-              reloads: swapping it for a loading state would both flash and
-              leave Enter steering at rows nobody can see. */}
-          {apps.length > 0 ? (
-            <AppsList
-              apps={apps}
-              selectedKey={selectedAppPath}
-              onSelect={onSelectApp}
-              onActivate={onActivateApp}
-            />
-          ) : null}
-        </div>
-      </section>
-      <section className="palette-section palette-section--history" aria-label="Historia">
-        <h2 className="palette-section__label">Historia</h2>
-        <div className="history-panel">
-          {/* `loading` now means there is nothing to show yet, so this replaces
-              the list once, on first open — never again mid-typing. */}
-          {status === 'loading' ? <EmptyState kind="loading" /> : null}
-          {status === 'error' ? <EmptyState kind="error" /> : null}
-          {status === 'ready' && items.length === 0 ? <EmptyState kind="empty" /> : null}
-          {status === 'ready' && items.length > 0 ? (
-            <HistoryList
-              items={items}
-              selectedId={selectedId}
-              onSelect={onSelect}
-              onActivate={onActivate}
-            />
-          ) : null}
-        </div>
-      </section>
+      <div className="history-panel">
+        {/* The history announces; the applications are visible — the states
+            below speak only when neither side put a row on screen. */}
+        {status === 'error' && appsStatus !== 'ready' ? <EmptyState kind="error" /> : null}
+        {status === 'error' && appsStatus === 'ready' && items.length === 0 ? (
+          <EmptyState kind="error" />
+        ) : null}
+        {status === 'loading' && items.length === 0 ? <EmptyState kind="loading" /> : null}
+        {status === 'ready' && appsStatus === 'ready' && items.length === 0 ? (
+          <EmptyState kind="empty" />
+        ) : null}
+        {/* The history has answered and has nothing; the catalog has not.
+            Without these two the panel says nothing at all — and a catalog
+            that failed to load fails silently. */}
+        {status === 'ready' && appsStatus === 'loading' && items.length === 0 ? (
+          <EmptyState kind="loading" subject="applications" />
+        ) : null}
+        {status === 'ready' && appsStatus === 'error' && items.length === 0 ? (
+          <EmptyState kind="error" subject="applications" />
+        ) : null}
+        {items.length > 0 ? (
+          <PaletteList
+            items={items}
+            selectedKey={selectedKey}
+            onSelect={onSelect}
+            onActivate={onActivate}
+          />
+        ) : null}
+      </div>
     </div>
     <div className={`preview-column${mobilePreviewOpen ? ' is-mobile-open' : ''}`}>
       <PreviewPane

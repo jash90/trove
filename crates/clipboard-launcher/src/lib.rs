@@ -90,6 +90,13 @@ pub fn default_scan_roots() -> Vec<PathBuf> {
         // root from flooding the list — but Finder lives here, and a launcher
         // that cannot find Finder has a hole in it.
         PathBuf::from("/System/Library/CoreServices"),
+        // The cryptex: modern macOS ships some applications (Safari is the
+        // notable one) as a firmlink in `/Applications` whose canonical path
+        // resolves here, outside every other root. Without this root the
+        // catalog refuses them — and a launcher that cannot list Safari has
+        // a hole the same size. Harmless where the path does not exist: the
+        // scan canonicalizes each root and drops the ones that do not.
+        PathBuf::from("/System/Volumes/Preboot/Cryptexes/App/System/Applications"),
     ];
     if let Some(base) = directories::BaseDirs::new() {
         roots.push(base.home_dir().join("Applications"));

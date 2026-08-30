@@ -3438,6 +3438,7 @@ name = "platform-macos"
 version = "0.3.0"
 dependencies = [
  "clipboard-core",
+ "image",
  "objc2",
  "objc2-app-kit",
  "objc2-core-graphics",

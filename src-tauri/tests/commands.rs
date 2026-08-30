@@ -797,6 +797,12 @@ async fn get_app_icon_returns_a_decodable_png_for_a_scanned_bundle() {
     let raw = base64_decode_prefix(&icon.base64);
     // A PNG announces itself in eight fixed bytes.
     assert_eq!(&raw[..8], b"\x89PNG\r\n\x1a\n", "the icon is not a PNG");
+    let decoded = image::load_from_memory(&raw).expect("a decodable PNG");
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (64, 64),
+        "the icon ships at the row's size, not the artwork's"
+    );
 
     // The same path asked again answers from the cache: the same bytes,
     // no second round through NSWorkspace and the resizer.
@@ -1935,4 +1941,43 @@ fn keyvault_settings_debug_redacts_the_token_and_the_key() {
     assert!(rendered.contains("<redacted>"));
     // The address is not a secret; a Debug with nothing in it is useless.
     assert!(rendered.contains("trustworthy-eagle-783"));
+}
+/// An application whose `/Applications` entry is a firmlink into the cryptex
+/// — Safari is the notable one — canonicalizes outside the everyday roots.
+/// It must still catalogue, launch-validate, and answer an icon; gated on the
+/// bundle existing, so machines without it (and they are rare) skip quietly
+/// rather than fail loudly about hardware they never had.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_cryptex_firmlink_application_catalogues_and_answers_an_icon() {
+    const SAFARI: &str = "/Applications/Safari.app";
+    if !std::path::Path::new(SAFARI).exists() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+
+    let catalog = state.launcher.catalog(0);
+    assert!(
+        catalog.iter().any(|app| app.name == "Safari"),
+        "the cryptex firmlink must list Safari with the everyday roots"
+    );
+    assert!(
+        clipboard_launcher::validate_launch_path(SAFARI, state.launcher.roots()).is_ok(),
+        "launch validation must accept the firmlink"
+    );
+
+    let icon = commands::get_app_icon_service(&state, SAFARI.to_owned())
+        .await
+        .unwrap()
+        .expect("Safari owes an icon like any other bundle");
+    assert_eq!(icon.mime_type, "image/png");
+    let raw = base64_decode_prefix(&icon.base64);
+    assert_eq!(&raw[..8], b"\x89PNG\r\n\x1a\n", "the icon is not a PNG");
+    let decoded = image::load_from_memory(&raw).expect("a decodable PNG");
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (64, 64),
+        "the icon ships at the row's size"
+    );
 }

@@ -10,7 +10,7 @@ pub mod markers;
 pub mod paste;
 pub mod pasteboard;
 
-pub use icons::application_icon_tiff;
+pub use icons::application_icon_png;
 pub use markers::{MarkerPolicy, classify_types};
 pub use paste::{PasteReadiness, is_trusted, post_paste_to, readiness};
 pub use pasteboard::{MAX_CAPTURED_PAYLOAD_BYTES, PollOutcome, snapshot_from_types};

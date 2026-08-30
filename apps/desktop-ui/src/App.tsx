@@ -18,8 +18,9 @@ import { useListNavigation } from './hooks/useListNavigation';
 import { useSelectedPreview } from './hooks/useSelectedPreview';
 import { useLinkPreview } from './hooks/useLinkPreview';
 import { useThumbnail } from './hooks/useThumbnail';
-import { HISTORY_PAGE_SIZE, type AppEntry, type HistoryItem } from './lib/contracts';
+import { HISTORY_PAGE_SIZE } from './lib/contracts';
 import { filterApps } from './lib/appSearch';
+import { buildPaletteItems, keyOfItem, type PaletteItem } from './lib/paletteItems';
 import {
   GatewayProvider,
   useGateway,
@@ -54,14 +55,6 @@ const shortcutIsBlocked = (
   return target.id !== 'history-search' || TEXT_EDITING_KEYS.has(event.key);
 };
 
-/// One selectable row of either list, in the order the palette walks them:
-/// applications first — a launcher is what the palette becomes the moment
-/// it opens — then the history underneath.
-type PaletteItem = { kind: 'app'; app: AppEntry } | { kind: 'history'; item: HistoryItem };
-
-const keyOfItem = (entry: PaletteItem): string =>
-  entry.kind === 'app' ? entry.app.path : `h${entry.item.eventId}`;
-
 const ClipboardPalette = (): React.JSX.Element => {
   const gateway = useGateway();
   const { query, setQuery, status, refreshing, items } = useHistorySearch(gateway);
@@ -92,11 +85,8 @@ const ClipboardPalette = (): React.JSX.Element => {
   };
 
   const paletteItems = useMemo<PaletteItem[]>(
-    () => [
-      ...visibleApps.map((app): PaletteItem => ({ kind: 'app', app })),
-      ...actions.visibleItems.map((item): PaletteItem => ({ kind: 'history', item })),
-    ],
-    [visibleApps, actions.visibleItems],
+    () => buildPaletteItems(visibleApps, actions.visibleItems, query),
+    [visibleApps, actions.visibleItems, query],
   );
 
   const handleActivate = (entry: PaletteItem): void => {
@@ -117,15 +107,14 @@ const ClipboardPalette = (): React.JSX.Element => {
   });
 
   const selected = paletteItems.find((entry) => keyOfItem(entry) === navigation.selectedKey) ?? null;
-  const selectedApp = selected?.kind === 'app' ? selected.app : null;
   const selectedHistoryItem = selected?.kind === 'history' ? selected.item : null;
   const selectedHistoryId = selectedHistoryItem?.eventId ?? null;
-  const selectedAppIndex = selectedApp === null ? -1 : visibleApps.findIndex((app) => app.path === selectedApp.path);
+  const selectedIndex = selected === null ? -1 : paletteItems.indexOf(selected);
   const activeDescendant =
-    selectedAppIndex >= 0
-      ? `app-option-${selectedAppIndex}`
-      : selectedHistoryId === null
-        ? undefined
+    selected === null
+      ? undefined
+      : selected.kind === 'app'
+        ? `app-option-${selectedIndex}`
         : `history-option-${selectedHistoryId}`;
 
   const preview = useSelectedPreview(gateway, selectedHistoryId);
@@ -152,14 +141,14 @@ const ClipboardPalette = (): React.JSX.Element => {
     queueMicrotask(focusSearch);
   };
 
-  const handleSelect = (eventId: number): void => {
-    navigation.setSelectedKey(`h${eventId}`);
-    actions.clearFeedback();
-    focusSearch();
-  };
-  const handleAppSelect = (path: string): void => {
-    navigation.setSelectedKey(path);
+  const handleSelectItem = (entry: PaletteItem): void => {
+    navigation.setSelectedKey(keyOfItem(entry));
+    // A refusal to launch is about the row that refused, so moving off it
+    // clears the alert whichever kind of row the user moved to — the history
+    // is one list with the applications now, not a place the launcher's
+    // error can follow the user into.
     setLaunchError(null);
+    if (entry.kind !== 'app') actions.clearFeedback();
     focusSearch();
   };
   const handleQueryChange = (nextQuery: string): void => {
@@ -264,12 +253,10 @@ const ClipboardPalette = (): React.JSX.Element => {
         />
         <PaletteWorkspace
           appsStatus={catalog.status}
-          apps={visibleApps}
-          selectedAppPath={selectedApp?.path ?? null}
-          launchError={launchError}
           status={status}
-          items={actions.visibleItems}
-          selectedId={selectedHistoryId}
+          items={paletteItems}
+          selectedKey={navigation.selectedKey}
+          launchError={launchError}
           preview={preview.preview}
           previewStatus={preview.status}
           thumbnailUrl={thumbnail.url}
@@ -278,10 +265,8 @@ const ClipboardPalette = (): React.JSX.Element => {
           selectedItem={selectedHistoryItem}
           mobilePreviewOpen={mobilePreviewOpen}
           actions={actionBar}
-          onSelectApp={handleAppSelect}
-          onActivateApp={handleLaunch}
-          onSelect={handleSelect}
-          onActivate={(eventId) => actions.copy(eventId, 'paste')}
+          onSelect={handleSelectItem}
+          onActivate={handleActivate}
           onRevealSource={() => {
             if (selectedHistoryId !== null) void gateway.revealSource(selectedHistoryId);
           }}

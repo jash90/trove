@@ -501,10 +501,15 @@ pub async fn get_app_icon_service(
 fn render_app_icon(canonical: &str) -> Option<AppIconDto> {
     #[cfg(target_os = "macos")]
     {
-        let tiff = platform_macos::application_icon_tiff(canonical)?;
-        // The same bounded bytes→PNG road thumbnails take: icon TIFFs of
-        // 1024px artwork can be megabytes, and the row needs 64 of them.
-        let png = clipboard_images::make_thumbnail(&tiff, APP_ICON_DIMENSION).ok()?;
+        // AppKit rasterises the icon at the row's size and hands back a PNG;
+        // the resize below decodes that PNG — bytes we just encoded — never
+        // Apple's icon-services artwork, which no third-party decoder should
+        // be trusted to read back. It is a near-identity pass on an image
+        // already at the target, kept because the DTO's shape is ours to
+        // guarantee rather than AppKit's to promise.
+        let apple_png =
+            platform_macos::application_icon_png(canonical, APP_ICON_DIMENSION as usize)?;
+        let png = clipboard_images::make_thumbnail(&apple_png, APP_ICON_DIMENSION).ok()?;
         let base64 = base64::engine::general_purpose::STANDARD.encode(&png);
         Some(AppIconDto {
             mime_type: "image/png".to_owned(),
