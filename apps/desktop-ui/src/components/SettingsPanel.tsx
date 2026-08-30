@@ -126,6 +126,8 @@ export const vaultErrorCode = (error: unknown): string =>
 /** One plain sentence per vault denial. Codes only reach here; never values. */
 export const keyvaultErrorMessage = (code: string): string => {
   switch (code) {
+    case 'keyvault_device_identity_invalid':
+      return 'The device vault identity at ~/.config/keyvault/agent.json could not be read.';
     case 'keyvault_not_configured':
       return KEYVAULT_SAVE_FIRST;
     case 'keyvault_invalid_config':
@@ -162,7 +164,6 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [linkPreviews, setLinkPreviews] = useState(true);
   const [vaultUrl, setVaultUrl] = useState('');
   const [vaultToken, setVaultToken] = useState('');
-  const [vaultJwk, setVaultJwk] = useState('');
   const [vaultSecrets, setVaultSecrets] = useState<KeyvaultSecret[] | null>(null);
   const [vaultBusy, setVaultBusy] = useState(false);
   const [vaultError, setVaultError] = useState<string | null>(null);
@@ -198,7 +199,6 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setLinkPreviews(settings.linkPreviews);
       setVaultUrl(settings.keyvault.url ?? '');
       setVaultToken(settings.keyvault.token ?? '');
-      setVaultJwk(settings.keyvault.privateJwk ?? '');
     })();
     return () => {
       cancelled = true;
@@ -269,12 +269,12 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       retentionDays: nextRetention,
       denylistedApps: nextDenylist,
       linkPreviews,
-      // The vault connection is all three fields or none; the core rejects a
-      // half-configured row, so blank fields travel as absent ones.
+      // Overrides over the device identity file, each independent of the
+      // other. A blank field travels as an absent one, meaning "use the
+      // device's value". The private key is never sent: it is not ours to hold.
       keyvault: {
         url: vaultUrl.trim() || null,
         token: vaultToken.trim() || null,
-        privateJwk: vaultJwk.trim() || null,
       },
     };
 
@@ -560,20 +560,12 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                   onChange={(event) => setVaultToken(event.currentTarget.value)}
                 />
               </label>
-              <label className="settings-field" htmlFor="settings-keyvault-jwk">
-                <span>Private key (JWK)</span>
-                <textarea
-                  id="settings-keyvault-jwk"
-                  rows={3}
-                  spellCheck={false}
-                  value={vaultJwk}
-                  onChange={(event) => setVaultJwk(event.currentTarget.value)}
-                />
-              </label>
               <p className="settings-help">
-                All three fields or none — the connection takes effect when the settings are
-                saved. The vault answers with sealed envelopes; this device’s private key opens
-                them, and a copied key goes to the clipboard without ever being recorded in the
+                Both fields are optional: leave them blank and this application uses the
+                device’s shared vault identity at <code>~/.config/keyvault/agent.json</code>,
+                which is also where the private key lives — it is never stored here. Fill one in
+                only to point this install at a different vault. The vault answers with sealed
+                envelopes; a copied key goes to the clipboard without ever being recorded in the
                 history or shown here.
               </p>
               <div className="workflow-actions workflow-actions--start">

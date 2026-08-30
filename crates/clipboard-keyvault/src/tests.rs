@@ -291,3 +291,122 @@ async fn a_slug_that_cannot_exist_costs_no_round_trip() {
         );
     }
 }
+
+// ------------------------------------------------------- device identity --
+
+/// The identity file as a device would hold it, with `tokens` naming two
+/// consumers so the per-consumer lookup has something to get wrong.
+fn agent_file(jwk: &str) -> String {
+    json!({
+        "url": BASE,
+        "privateJwk": serde_json::from_str::<serde_json::Value>(jwk).unwrap(),
+        "tokens": { "mcp": "kv_mcpToken0123456789", "clipboard-history": TOKEN },
+    })
+    .to_string()
+}
+
+#[test]
+fn the_identity_file_gives_each_consumer_its_own_token() {
+    let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+    let raw = agent_file(&jwk_for(&key));
+
+    let ours = crate::device::parse(&raw, crate::device::CONSUMER).unwrap();
+    assert_eq!(ours.token, TOKEN);
+    assert_eq!(ours.base_url, BASE);
+
+    // The same file, read by the other consumer, yields the other token — the
+    // point of the map: revoking one does not take the other down.
+    let theirs = crate::device::parse(&raw, "mcp").unwrap();
+    assert_eq!(theirs.token, "kv_mcpToken0123456789");
+    assert_eq!(theirs.private_jwk, ours.private_jwk);
+}
+
+#[test]
+fn a_consumer_the_file_does_not_name_is_unconfigured_not_malformed() {
+    let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+    let raw = agent_file(&jwk_for(&key));
+    // `.err()` rather than `unwrap_err()`: KeyvaultConfig refuses Debug on
+    // purpose, and a test is not a reason to give it one.
+    assert_eq!(
+        crate::device::parse(&raw, "some-other-app").err(),
+        Some(KeyvaultError::DeviceIdentityMissing)
+    );
+}
+
+#[test]
+fn a_single_consumer_device_may_write_one_bare_token() {
+    let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+    let raw = json!({
+        "url": BASE,
+        "privateJwk": serde_json::from_str::<serde_json::Value>(&jwk_for(&key)).unwrap(),
+        "token": TOKEN,
+    })
+    .to_string();
+    assert_eq!(
+        crate::device::parse(&raw, crate::device::CONSUMER)
+            .unwrap()
+            .token,
+        TOKEN
+    );
+}
+
+#[test]
+fn a_consumers_own_token_wins_over_the_bare_one() {
+    let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+    let raw = json!({
+        "url": BASE,
+        "privateJwk": serde_json::from_str::<serde_json::Value>(&jwk_for(&key)).unwrap(),
+        "token": "kv_shorthandFallback0",
+        "tokens": { "clipboard-history": TOKEN },
+    })
+    .to_string();
+    assert_eq!(
+        crate::device::parse(&raw, crate::device::CONSUMER)
+            .unwrap()
+            .token,
+        TOKEN
+    );
+}
+
+#[test]
+fn the_key_is_accepted_as_an_object_or_as_the_string_the_environment_held() {
+    let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+    let jwk = jwk_for(&key);
+
+    let as_object = crate::device::parse(&agent_file(&jwk), crate::device::CONSUMER).unwrap();
+    let as_string = crate::device::parse(
+        &json!({ "url": BASE, "private_jwk": jwk, "token": TOKEN }).to_string(),
+        crate::device::CONSUMER,
+    )
+    .unwrap();
+
+    // Both open the same key, whatever the spelling on disk.
+    parse_private_jwk(&as_object.private_jwk).unwrap();
+    parse_private_jwk(&as_string.private_jwk).unwrap();
+}
+
+#[test]
+fn a_broken_identity_file_is_named_as_broken_rather_than_missing() {
+    let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+    let jwk = jwk_for(&key);
+
+    for raw in [
+        "{ not json".to_owned(),
+        // A url that is neither https nor loopback: the config rules still run.
+        json!({ "url": "http://vault.example.com", "privateJwk":
+                serde_json::from_str::<serde_json::Value>(&jwk).unwrap(), "token": TOKEN })
+        .to_string(),
+        // No key at all.
+        json!({ "url": BASE, "token": TOKEN }).to_string(),
+        // No url.
+        json!({ "privateJwk": serde_json::from_str::<serde_json::Value>(&jwk).unwrap(),
+                "token": TOKEN })
+        .to_string(),
+    ] {
+        let error = crate::device::parse(&raw, crate::device::CONSUMER).err();
+        assert!(
+            error.is_some() && error != Some(KeyvaultError::DeviceIdentityMissing),
+            "a malformed file must not read as an absent one: {raw}"
+        );
+    }
+}

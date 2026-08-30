@@ -328,11 +328,30 @@ choice makes building harder on a target we do not verify anyway.
 
 ## Keyvault
 
-Settings can point the application at a personally-run keyvault: the REST base
-address of its deployment, an agent token created there, and the device-side
-private JWK that opens what the vault seals. All three fields or none — a
-half-configured vault is rejected at save time. Unconfigured, the pane does
-nothing and the application stays off the network.
+The application reads a personally-run keyvault through the device's shared
+agent identity at `~/.config/keyvault/agent.json` (mode 600) — one file, read by
+every consumer on the machine, holding the vault address, the device-side
+private JWK that opens what the vault seals, and a token per consumer:
+
+```json
+{
+  "url": "https://<deployment>.convex.site",
+  "privateJwk": { "kty": "RSA", "n": "...", "e": "...", "d": "...", "p": "...", "q": "..." },
+  "tokens": { "mcp": "kv_...", "clipboard-history": "kv_..." }
+}
+```
+
+The key is shared because a second copy is a second thing to rotate, and the
+copy you forget does not announce itself — it fails as a decrypt error against
+every re-sealed envelope, naming the envelope when the fault was the key. Tokens
+are *not* shared for the opposite reason: one per consumer means one can be
+revoked without taking the others down. A consumer the file does not name is
+simply unconfigured. Set `KEYVAULT_AGENT_FILE` to put the identity elsewhere.
+
+The settings pane offers only overrides — a vault address and a token, both
+optional, for pointing one install at a different deployment. There is no field
+for the private key, deliberately: it is not this application's to hold.
+Unconfigured, the pane does nothing and the application stays off the network.
 
 What the vault returns are sealed envelopes, not values: the token only
 authenticates, and only this device's private key can open an answer. Copying a
@@ -343,10 +362,13 @@ whether it worked. Denials arrive as codes (unauthorized, out of scope, rate
 limited, agent access disabled) and are shown as fixed sentences; reads are
 spaced to respect the vault's per-token rate limit.
 
-Said plainly: the token and the private JWK are stored as this application's
-settings, which is a plaintext row in the local database — the same trust
+Said plainly: no key is stored by this application. The identity file is a
+mode-600 file in your home directory, and if you set a token override it lands
+in the settings row — a plaintext row in the local database, the same trust
 boundary the database itself sits on. Treat a data-directory compromise as a
-vault-token compromise and revoke the token there if that happens.
+compromise of any token stored there and revoke it in the vault; the private key
+is not in the database to lose. A row written by an older version, which did
+keep the key there, is cleared the first time settings are saved.
 
 ## Privacy
 

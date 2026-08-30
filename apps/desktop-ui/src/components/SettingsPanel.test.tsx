@@ -355,16 +355,18 @@ describe('Settings page and storage semantics', () => {
 });
 
 describe('keyvault section', () => {
-  it('saves the vault configuration and never echoes the token back', async () => {
+  it('saves the overrides and never asks for a private key', async () => {
     const gateway = makeGateway();
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
 
+    // The key belongs to the device identity file. There is deliberately no
+    // field for it here, and this is the assertion that keeps one from coming
+    // back: a second copy of the key is what the identity file exists to stop.
+    expect(screen.queryByLabelText(/Private key/u)).not.toBeInTheDocument();
+
     await userEvent.type(screen.getByLabelText(/Vault address/u), 'https://vault.example.invalid');
     await userEvent.type(screen.getByLabelText(/Agent token/u), 'kv_synthetic-token');
-    fireEvent.change(screen.getByLabelText(/Private key \(JWK\)/u), {
-      target: { value: '{"kty":"RSA"}' },
-    });
     fireEvent.submit(screen.getByRole('button', { name: 'Save settings' }).closest('form')!);
 
     await waitFor(() => {
@@ -373,9 +375,24 @@ describe('keyvault section', () => {
           keyvault: {
             url: 'https://vault.example.invalid',
             token: 'kv_synthetic-token',
-            privateJwk: '{"kty":"RSA"}',
           },
         }),
+      );
+    });
+  });
+
+  it('leaves both overrides absent when the fields are untouched', async () => {
+    const gateway = makeGateway();
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    fireEvent.submit(screen.getByRole('button', { name: 'Save settings' }).closest('form')!);
+
+    // Blank means "use the device identity", which travels as null rather than
+    // as an empty string the core would have to special-case.
+    await waitFor(() => {
+      expect(gateway.saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ keyvault: { url: null, token: null } }),
       );
     });
   });
