@@ -6,7 +6,7 @@ import type { AppEntry } from './contracts';
  * normalized on the Rust side only for ordering, and a user typing "lodz" on
  * any keyboard must find "Łódź" here without another round trip.
  */
-const normalizeForSearch = (value: string): string =>
+export const normalizeForSearch = (value: string): string =>
   value
     .toLocaleLowerCase('en-US')
     .replaceAll('ł', 'l')

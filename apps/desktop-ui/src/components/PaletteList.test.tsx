@@ -19,7 +19,7 @@ import { TypeFilter } from './TypeFilter';
 /// options too. An unscoped option query matches both, so a test can pass
 /// while the list it meant to inspect has not loaded at all.
 const paletteList = () =>
-  within(screen.getByRole('listbox', { name: 'Application and history results' }));
+  within(screen.getByRole('listbox', { name: 'Applications, secrets and history results' }));
 
 const makeApps = (count: number, startAt = 1): AppEntry[] =>
   Array.from({ length: count }, (_, index) => ({
@@ -76,11 +76,13 @@ const KeyboardHarness = ({ items, onActivate }: KeyboardHarnessProps): React.JSX
       ? undefined
       : selectedEntry.kind === 'app'
         ? `app-option-${selectedIndex}`
-        : `history-option-${selectedEntry.item.eventId}`;
+        : selectedEntry.kind === 'vault'
+          ? `vault-option-${selectedIndex}`
+          : `history-option-${selectedEntry.item.eventId}`;
 
   return (
     <>
-      <label htmlFor="keyboard-search">Search applications and history</label>
+      <label htmlFor="keyboard-search">Search applications, secrets and history</label>
       <input
         id="keyboard-search"
         autoFocus
@@ -104,6 +106,10 @@ const makeGateway = (search: ClipboardGateway['search']): ClipboardGateway =>
   ({
     search,
     listApps: vi.fn(async () => []),
+    // The palette asks the vault once a query is typed; without this the hook throws where a
+    // rejected promise would have been handled, and takes the render down with it.
+    keyvaultList: vi.fn(async () => []),
+    keyvaultCopySecret: vi.fn(async () => undefined),
     preview: vi.fn(async (eventId: number) => ({
       eventId,
       kind: 'text',
@@ -159,7 +165,7 @@ describe('PaletteList', () => {
       />,
     );
 
-    const listbox = screen.getByRole('listbox', { name: 'Application and history results' });
+    const listbox = screen.getByRole('listbox', { name: 'Applications, secrets and history results' });
     expect(listbox.querySelector('button')).toBeNull();
     const appRow = paletteList().getByRole('option', { name: /Synthetic App 1/ });
     expect(appRow).toHaveAttribute('data-path', items[0]?.kind === 'app' ? items[0].app.path : '');
@@ -167,6 +173,37 @@ describe('PaletteList', () => {
     const historyRow = paletteList().getByRole('option', { name: /Synthetic clipboard item 1/ });
     expect(historyRow).toHaveAttribute('data-event-id', '1');
     expect(historyRow).toHaveAttribute('id', 'history-option-1');
+  });
+
+  it('offers a vault secret by name and copies it through the core on activation', async () => {
+    const user = userEvent.setup();
+    const activated: string[] = [];
+    const items = buildPaletteItems([], [], 'stripe', [
+      { slug: 'stripe-secret-key', name: 'Stripe secret key', category: 'payments' },
+    ]);
+    renderList(
+      <KeyboardHarness
+        items={items}
+        onActivate={(entry) => {
+          activated.push(
+            entry.kind === 'app'
+              ? `app:${entry.app.path}`
+              : entry.kind === 'vault'
+                ? `vault:${entry.secret.slug}`
+                : `history:${entry.item.eventId}`,
+          );
+        }}
+      />,
+    );
+
+    const row = paletteList().getByRole('option', { name: /Vault secret: Stripe secret key/ });
+    expect(row).toHaveAttribute('data-slug', 'stripe-secret-key');
+    // The slug and category are on the row; the value is not, and never passes through here.
+    expect(row).toHaveTextContent('payments');
+    expect(row.textContent).not.toContain('sk_');
+
+    await user.keyboard('{Home}{Enter}');
+    expect(activated).toEqual(['vault:stripe-secret-key']);
   });
 
   it('moves selection with ArrowDown across the app/history boundary and activates the right kind', async () => {
@@ -178,13 +215,17 @@ describe('PaletteList', () => {
         items={items}
         onActivate={(entry) => {
           activated.push(
-            entry.kind === 'app' ? `app:${entry.app.path}` : `history:${entry.item.eventId}`,
+            entry.kind === 'app'
+              ? `app:${entry.app.path}`
+              : entry.kind === 'vault'
+                ? `vault:${entry.secret.slug}`
+                : `history:${entry.item.eventId}`,
           );
         }}
       />,
     );
 
-    const input = screen.getByRole('textbox', { name: 'Search applications and history' });
+    const input = screen.getByRole('textbox', { name: 'Search applications, secrets and history' });
     expect(input).toHaveFocus();
     // Home to the first row, then Down into the history half.
     await user.keyboard('{Home}{ArrowDown}');
@@ -209,7 +250,7 @@ describe('PaletteList', () => {
       />,
     );
 
-    const input = screen.getByRole('textbox', { name: 'Search applications and history' });
+    const input = screen.getByRole('textbox', { name: 'Search applications, secrets and history' });
     await user.keyboard('{End}{ArrowUp}');
     // End lands on the last history row; ArrowUp crosses back onto the
     // last application of the apps half.
@@ -296,7 +337,7 @@ describe('clipboard palette states', () => {
     const search = vi.fn<ClipboardGateway['search']>(async () => page);
     render(<App gateway={makeGateway(search)} />);
 
-    expect(screen.getByRole('searchbox', { name: 'Search applications and history' })).toHaveFocus();
+    expect(screen.getByRole('searchbox', { name: 'Search applications, secrets and history' })).toHaveFocus();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150);
@@ -325,11 +366,11 @@ describe('clipboard palette states', () => {
       rankedTruncated: false,
     };
     render(<App gateway={makeGateway(async () => page)} />);
-    await screen.findByRole('listbox', { name: 'Application and history results' });
+    await screen.findByRole('listbox', { name: 'Applications, secrets and history results' });
     const selectedRow = paletteList().getByRole('option', {
       name: /Synthetic clipboard item 2/,
     });
-    const search = screen.getByRole('searchbox', { name: 'Search applications and history' });
+    const search = screen.getByRole('searchbox', { name: 'Search applications, secrets and history' });
 
     await user.click(selectedRow);
 
@@ -348,8 +389,8 @@ describe('clipboard palette states', () => {
       rankedTruncated: false,
     };
     render(<App gateway={makeGateway(async () => page)} />);
-    await screen.findByRole('listbox', { name: 'Application and history results' });
-    const search = screen.getByRole('searchbox', { name: 'Search applications and history' });
+    await screen.findByRole('listbox', { name: 'Applications, secrets and history results' });
+    const search = screen.getByRole('searchbox', { name: 'Search applications, secrets and history' });
 
     await user.selectOptions(screen.getByRole('combobox', { name: 'Filtr typu' }), 'Images');
 

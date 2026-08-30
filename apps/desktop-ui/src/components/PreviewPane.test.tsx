@@ -26,7 +26,7 @@ import { PreviewPane } from './PreviewPane';
 /// options too. An unscoped option query matches both, so a test can pass
 /// while the list it meant to inspect has not loaded at all.
 const historyList = () =>
-  within(screen.getByRole('listbox', { name: 'Application and history results' }));
+  within(screen.getByRole('listbox', { name: 'Applications, secrets and history results' }));
 
 
 const makeItem = (eventId: number, overrides: Partial<HistoryItem> = {}): HistoryItem => ({
@@ -153,7 +153,7 @@ const makeGateway = (
 };
 
 const settleInitialSearch = async (): Promise<void> => {
-  await screen.findByRole('listbox', { name: 'Application and history results' });
+  await screen.findByRole('listbox', { name: 'Applications, secrets and history results' });
 };
 
 /// The list selects its first row on its own, one effect after the listbox
@@ -441,7 +441,7 @@ describe('selected preview sequencing', () => {
     render(<App gateway={gateway} />);
     await settleInitialSearch();
 
-    const listbox = screen.getByRole('listbox', { name: 'Application and history results' });
+    const listbox = screen.getByRole('listbox', { name: 'Applications, secrets and history results' });
     expect(listbox).toHaveTextContent('report.txt');
     expect(listbox).not.toHaveTextContent('/synthetic/private-folder');
     expect(await screen.findByText(fullPath)).toBeVisible();
@@ -642,7 +642,7 @@ describe('history actions', () => {
     const user = userEvent.setup();
     render(<App gateway={gateway} />);
     await settleInitialSearch();
-    const search = screen.getByRole('searchbox', { name: 'Search applications and history' });
+    const search = screen.getByRole('searchbox', { name: 'Search applications, secrets and history' });
     expect(search).toHaveFocus();
 
     await user.keyboard('{Enter}');

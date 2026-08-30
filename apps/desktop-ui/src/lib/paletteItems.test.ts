@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { AppEntry, HistoryItem } from './contracts';
+import type { AppEntry, HistoryItem, KeyvaultSecret } from './contracts';
 import { buildPaletteItems, keyOfItem } from './paletteItems';
 
 const app = (path: string): AppEntry => ({ name: path, bundleId: null, path });
@@ -66,5 +66,45 @@ describe('buildPaletteItems', () => {
     expect(first.map(keyOfItem)).toEqual(['/a', 'h7', 'h9']);
     expect(second.map(keyOfItem)).toEqual(first.map(keyOfItem));
     expect(new Set(first.map(keyOfItem)).size).toBe(first.length);
+  });
+});
+
+const secret = (slug: string): KeyvaultSecret => ({ slug, name: slug, category: null });
+
+describe('buildPaletteItems with vault secrets', () => {
+  it('leads each round with a secret, then an application, then history', () => {
+    const items = buildPaletteItems(
+      [app('/A.app'), app('/B.app')],
+      [history(1), history(2)],
+      'match',
+      [secret('openai'), secret('stripe')],
+    );
+    // Naming a secret is a deliberate act: someone typing `openai` with a vault configured is
+    // reaching for the key, not hoping to find it under whatever else matched.
+    expect(kindsOf(items)).toEqual([
+      'vault',
+      'app',
+      'history',
+      'vault',
+      'app',
+      'history',
+    ]);
+  });
+
+  it('leaves the launcher view untouched when nothing is typed', () => {
+    // The catalog is not even fetched without a query, so this is the shape that actually
+    // reaches the palette on open — and it must be exactly what it was before secrets existed.
+    const items = buildPaletteItems([app('/A.app')], [history(1)], '', [secret('openai')]);
+    expect(kindsOf(items)).toEqual(['app', 'history']);
+  });
+
+  it('keys a secret so it cannot collide with a history row', () => {
+    expect(keyOfItem({ kind: 'vault', secret: secret('openai') })).toBe('vopenai');
+    expect(keyOfItem({ kind: 'history', item: history(1) })).toBe('h1');
+  });
+
+  it('still merges when only secrets match', () => {
+    const items = buildPaletteItems([], [], 'openai', [secret('openai')]);
+    expect(kindsOf(items)).toEqual(['vault']);
   });
 });
