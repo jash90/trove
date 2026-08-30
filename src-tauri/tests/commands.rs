@@ -593,6 +593,9 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "get_link_preview",
             "keyvault_list",
             "keyvault_copy_secret",
+            "keyvault_pair_start",
+            "keyvault_pair_poll",
+            "keyvault_pair_cancel",
         ]
     );
 

@@ -34,7 +34,10 @@ pub struct PairingStart {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PairingOutcome {
     Pending,
-    Approved { url: String, token: String },
+    Approved {
+        url: String,
+        token: String,
+    },
     Expired,
     NotFound,
     /// Someone already collected this pairing's result — it is spent, and not by us.
@@ -91,12 +94,13 @@ fn client_api(base_url: &str) -> Result<String, KeyvaultError> {
     Ok(trimmed.replace(".convex.site", ".convex.cloud"))
 }
 
-async fn mutation(
+async fn call(
+    kind: &str,
     base_url: &str,
     path: &str,
     args: serde_json::Value,
 ) -> Result<serde_json::Value, KeyvaultError> {
-    let endpoint = format!("{}/api/mutation", client_api(base_url)?);
+    let endpoint = format!("{}/api/{kind}", client_api(base_url)?);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
@@ -126,7 +130,29 @@ async fn mutation(
     if body.get("status").and_then(|s| s.as_str()) != Some("success") {
         return Err(KeyvaultError::BadResponse);
     }
-    Ok(body.get("value").cloned().unwrap_or(serde_json::Value::Null))
+    Ok(body
+        .get("value")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
+}
+
+/// Asks the deployment where its web interface lives.
+///
+/// The API and the interface sit on different hosts and neither can be derived from the other, so
+/// the alternative to asking is making someone type two addresses and know which is which. A
+/// deployment that has not published one says so, and pairing stops with a reason rather than
+/// opening a browser at a guess.
+pub async fn page_url(base_url: &str) -> Result<String, KeyvaultError> {
+    let value = call(
+        "query",
+        base_url,
+        "config:getPairingUrl",
+        serde_json::json!({}),
+    )
+    .await?;
+    let url = value.as_str().ok_or(KeyvaultError::PairingPageUnknown)?;
+    crate::validate_base_url(url)?;
+    Ok(url.trim_end_matches('/').to_owned())
 }
 
 /// Opens a pairing and returns the code to put in the browser URL.
@@ -135,7 +161,8 @@ pub async fn start(
     label: &str,
     public_jwk: &str,
 ) -> Result<PairingStart, KeyvaultError> {
-    let value = mutation(
+    let value = call(
+        "mutation",
         base_url,
         "pairing:createPairing",
         serde_json::json!({ "appPublicJwk": public_jwk, "label": label }),
@@ -161,7 +188,13 @@ pub async fn claim(
     code: &str,
     private_jwk: &str,
 ) -> Result<PairingOutcome, KeyvaultError> {
-    let value = mutation(base_url, "pairing:claimPairing", serde_json::json!({ "code": code })).await?;
+    let value = call(
+        "mutation",
+        base_url,
+        "pairing:claimPairing",
+        serde_json::json!({ "code": code }),
+    )
+    .await?;
     let status = value
         .get("status")
         .and_then(|v| v.as_str())

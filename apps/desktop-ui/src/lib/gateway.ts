@@ -23,6 +23,7 @@ import {
   type SearchRequest,
   type StorageStats,
   type Thumbnail,
+  type PairingStatus,
 } from './contracts';
 import { mockGateway } from './mockGateway';
 
@@ -55,6 +56,15 @@ export interface ClipboardGateway {
    * this resolves knowing only whether it worked.
    */
   keyvaultCopySecret(slug: string): Promise<void>;
+  /**
+   * Begins pairing with a vault and resolves to the fingerprint to display.
+   *
+   * The fingerprint is not decoration: it is the only thing tying the page being approved to
+   * this application, so the interface must show it and say what it is for.
+   */
+  keyvaultPairStart(url: string): Promise<string>;
+  keyvaultPairPoll(): Promise<{ status: PairingStatus }>;
+  keyvaultPairCancel(): Promise<void>;
   /**
    * Calls back whenever the core records something new. Returns a function
    * that stops listening; without it the palette would show a history that is
@@ -153,6 +163,9 @@ export const tauriGateway: ClipboardGateway = {
   exportHistory: (directory) => invoke<ExportSummary>('export_history', { directory }),
   keyvaultList: () => invoke<KeyvaultSecret[]>('keyvault_list'),
   keyvaultCopySecret: (slug) => invoke<void>('keyvault_copy_secret', { slug }),
+  keyvaultPairStart: (url) => invoke<string>('keyvault_pair_start', { url }),
+  keyvaultPairPoll: () => invoke<{ status: PairingStatus }>('keyvault_pair_poll'),
+  keyvaultPairCancel: () => invoke<void>('keyvault_pair_cancel'),
   onHistoryChanged: (listener) => subscribe('history-changed', listener),
   getThumbnail: (eventId) => invoke<Thumbnail | null>('get_thumbnail', { eventId }),
   getSettings: () => invoke<AppSettings>('get_settings'),

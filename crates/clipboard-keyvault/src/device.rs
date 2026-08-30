@@ -207,14 +207,14 @@ pub fn save_paired(
         std::fs::create_dir_all(directory).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
         set_owner_only(directory, 0o700);
     }
-    let body = serde_json::to_string_pretty(&root)
-        .map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
+    let body =
+        serde_json::to_string_pretty(&root).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
     // Written to a neighbour and renamed: a crash mid-write would otherwise truncate the file the
     // MCP server reads, taking out a consumer that had nothing to do with this pairing.
     let temporary = path.with_extension("json.tmp-pairing");
     {
-        let mut file = std::fs::File::create(&temporary)
-            .map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
+        let mut file =
+            std::fs::File::create(&temporary).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
         set_owner_only(&temporary, 0o600);
         file.write_all(body.as_bytes())
             .and_then(|()| file.write_all(b"\n"))

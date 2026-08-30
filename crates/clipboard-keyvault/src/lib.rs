@@ -28,8 +28,11 @@ pub use config::{KeyvaultConfig, MAX_TOKEN_BYTES, validate_base_url, validate_to
 pub use decrypt::{PrivateKey, decrypt_envelope, parse_private_jwk};
 pub use device::{CONSUMER, agent_file_path, load as load_device_identity, save_paired};
 pub use envelope::{AgentEnvelope, MAX_ENVELOPE_BYTES};
-pub use pairing::{DeviceKey, PairingOutcome, PairingStart, claim as claim_pairing, generate_device_key, start as start_pairing};
 pub use http::{ReqwestSecretTransport, SecretResponse, SecretTransport};
+pub use pairing::{
+    DeviceKey, PairingOutcome, PairingStart, claim as claim_pairing, generate_device_key,
+    page_url as pairing_page_url, start as start_pairing,
+};
 
 /// Every failure this crate can report, as a stable code.
 ///
@@ -52,6 +55,10 @@ pub enum KeyvaultError {
     /// because a typo in an editor deserves to be named as one.
     #[error("keyvault_device_identity_invalid")]
     DeviceIdentityInvalid,
+    /// The deployment has not published where its web interface lives, so there is nowhere to
+    /// send someone to approve a pairing.
+    #[error("keyvault_pairing_page_unknown")]
+    PairingPageUnknown,
     #[error("keyvault_invalid_slug")]
     InvalidSlug,
     #[error("keyvault_unauthorized")]

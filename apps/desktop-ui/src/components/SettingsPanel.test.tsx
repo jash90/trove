@@ -79,6 +79,9 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
     getStorageStats: vi.fn(async () => storageStats),
     keyvaultList: vi.fn(async () => vaultSecrets.map((secret) => ({ ...secret }))),
     keyvaultCopySecret: vi.fn(async () => undefined),
+    keyvaultPairStart: vi.fn(async () => 'A1B2-C3D4'),
+    keyvaultPairPoll: vi.fn(async () => ({ status: 'paired' as const })),
+    keyvaultPairCancel: vi.fn(async () => undefined),
     ...overrides,
   }) as ClipboardGateway;
 
@@ -395,6 +398,35 @@ describe('keyvault section', () => {
         expect.objectContaining({ keyvault: { url: null, token: null } }),
       );
     });
+  });
+
+  it('refuses to connect without an address rather than opening a browser at nothing', async () => {
+    const gateway = makeGateway();
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    expect(await screen.findByText(/Enter the vault address above/u)).toBeVisible();
+    expect(gateway.keyvaultPairStart).not.toHaveBeenCalled();
+  });
+
+  it('shows the fingerprint while waiting, because approving without it proves nothing', async () => {
+    const gateway = makeGateway();
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    await userEvent.type(screen.getByLabelText(/Vault address/u), 'https://vault.example.invalid');
+    await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    await waitFor(() => {
+      expect(gateway.keyvaultPairStart).toHaveBeenCalledWith('https://vault.example.invalid');
+    });
+
+    // The fingerprint is the whole point of the waiting state: it is what the person compares
+    // against the browser before approving.
+    expect(await screen.findByText('A1B2-C3D4')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Waiting for approval…' })).toBeDisabled();
   });
 
   it('tests the connection by listing metadata, and copies without showing a value', async () => {
