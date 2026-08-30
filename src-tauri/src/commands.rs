@@ -140,17 +140,31 @@ pub struct AppSettingsDto {
     pub keyvault: KeyvaultSettingsDto,
 }
 
-/// The keyvault connection: base URL, bearer token, and the device-side
-/// private key that opens what the vault seals.
+/// Optional overrides for the vault connection.
 ///
-/// Stored as this application's settings, which is a plaintext row in the
-/// local database — the same trust boundary the database itself already sits
-/// on. Never echoed into a log, an error, or a Debug print anywhere.
+/// The connection itself — URL, token and the private key that opens what the
+/// vault seals — comes from the device's shared identity file, so no key is
+/// stored in this database at all. These fields exist only to point one
+/// install somewhere else, at a local Convex backend for instance, without
+/// editing the identity every other consumer reads.
+///
+/// `private_jwk` is retained for one reason: rows written before the identity
+/// file existed carry it, and `deny_unknown_fields` would refuse to parse them
+/// if the field vanished. It is ignored on read and blanked on the next save,
+/// so an old row's key stops sitting in the database as soon as anything
+/// touches the settings.
 #[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KeyvaultSettingsDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// Written by versions that kept the key here. Skipped on serialize, so
+    /// the first save after upgrading drops it from the row outright rather
+    /// than leaving a `null` where a key used to be; `default` is what lets
+    /// those shorter rows parse on the way back in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_jwk: Option<String>,
 }
 
@@ -169,8 +183,9 @@ impl std::fmt::Debug for KeyvaultSettingsDto {
 }
 
 impl KeyvaultSettingsDto {
-    /// The three fields, present and non-blank, or nothing.
-    pub(crate) fn resolved(&self) -> Option<(String, String, String)> {
+    /// The overrides that are actually set. Either may be absent, and usually
+    /// both are: the identity file is the ordinary source of both values.
+    pub(crate) fn overrides(&self) -> (Option<String>, Option<String>) {
         let field = |value: &Option<String>| {
             value
                 .as_deref()
@@ -178,18 +193,7 @@ impl KeyvaultSettingsDto {
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned)
         };
-        Some((
-            field(&self.url)?,
-            field(&self.token)?,
-            field(&self.private_jwk)?,
-        ))
-    }
-
-    /// Whether every field is absent or blank: the unconfigured state.
-    fn is_blank(&self) -> bool {
-        let blank =
-            |value: &Option<String>| value.as_deref().map(str::trim).is_none_or(str::is_empty);
-        blank(&self.url) && blank(&self.token) && blank(&self.private_jwk)
+        (field(&self.url), field(&self.token))
     }
 }
 
@@ -1120,7 +1124,10 @@ pub async fn save_settings_service(
     let keyvault = KeyvaultSettingsDto {
         url: normalize_keyvault_field(&settings.keyvault.url),
         token: normalize_keyvault_field(&settings.keyvault.token),
-        private_jwk: normalize_keyvault_field(&settings.keyvault.private_jwk),
+        // Never stored: the key belongs to the device identity file. Writing
+        // None here is also the migration — the first save after upgrading
+        // clears whatever an older version left in the row.
+        private_jwk: None,
     };
     settings.keyvault = keyvault;
     validate_settings(&settings)?;
@@ -1445,18 +1452,17 @@ fn validate_settings(settings: &AppSettingsDto) -> Result<(), String> {
                 && !app.chars().any(char::is_control)
                 && unique_apps.insert(app.as_str())
         });
-    // All three fields or none: a half-configured vault is a settings error,
-    // not a surprise at copy time.
-    let keyvault_is_valid = match settings.keyvault.resolved() {
-        None => settings.keyvault.is_blank(),
-        Some((url, token, private_jwk)) => clipboard_keyvault::KeyvaultConfig {
-            base_url: url,
-            token,
-            private_jwk,
-        }
-        .validate()
-        .is_ok(),
-    };
+    // Overrides are independent now — either may stand alone over the identity
+    // file — so each is checked on its own rather than as an all-or-nothing
+    // triple. An override that cannot be a URL or a token is still a settings
+    // error rather than a surprise at copy time.
+    let (url_override, token_override) = settings.keyvault.overrides();
+    let keyvault_is_valid = url_override
+        .as_deref()
+        .is_none_or(|url| clipboard_keyvault::validate_base_url(url).is_ok())
+        && token_override
+            .as_deref()
+            .is_none_or(|token| clipboard_keyvault::validate_token(token).is_ok());
     if settings.schema_version != 1
         || !retention_is_valid
         || !hotkey_is_valid

@@ -2,7 +2,9 @@
 //! plaintext exists only between the decrypt and the clipboard write.
 //!
 //! The vault is zero-knowledge — its answers are sealed envelopes, and the
-//! private key that opens them lives on this device. Everything here keeps it
+//! private key that opens them lives on this device, in the identity file
+//! every consumer on the machine shares rather than in this application's own
+//! settings row. Everything here keeps it
 //! that way: errors carry codes only, results carry metadata only, and the
 //! one place plaintext appears arms the capture monitor first so a fetched key
 //! cannot land in the history this application exists to keep private.
@@ -22,19 +24,35 @@ use crate::{commands::AppSettingsDto, state::AppState};
 /// ever turning a 429 into the pane's only message.
 const MIN_REQUEST_INTERVAL_MS: i64 = 1_050;
 
-/// Reads the vault configuration out of the settings, or says it is absent.
+/// Reads the vault configuration: the device's shared identity file, with
+/// whatever this install overrides laid over it.
 ///
-/// A row that passed validation resolves here; the redundant check is for the
-/// same reason every boundary here checks twice.
+/// The private key is only ever the device's. There is deliberately no way to
+/// override it from the settings — a second copy of the key is the thing this
+/// arrangement exists to stop, and the copy you forget at rotation is the one
+/// that fails as a decrypt error pointing at the wrong thing.
+///
+/// A missing identity is the ordinary unconfigured state and says so. A
+/// malformed one is a different answer, because a typo deserves to be named.
 pub fn config_from(settings: &AppSettingsDto) -> Result<KeyvaultConfig, String> {
-    let Some((base_url, token, private_jwk)) = settings.keyvault.resolved() else {
-        return Err("keyvault_not_configured".to_owned());
+    let mut config = match clipboard_keyvault::load_device_identity(clipboard_keyvault::CONSUMER) {
+        Ok(config) => config,
+        Err(clipboard_keyvault::KeyvaultError::DeviceIdentityMissing) => {
+            return Err("keyvault_not_configured".to_owned());
+        }
+        Err(error) => return Err(error.to_string()),
     };
-    let config = KeyvaultConfig {
-        base_url,
-        token,
-        private_jwk,
-    };
+
+    let (url_override, token_override) = settings.keyvault.overrides();
+    if let Some(url) = url_override {
+        config.base_url = url;
+    }
+    if let Some(token) = token_override {
+        config.token = token;
+    }
+
+    // The identity file validated itself when it was read; this re-checks the
+    // merge, which is the part no earlier step has seen.
     config
         .validate()
         .map_err(|_| "keyvault_invalid_config".to_owned())?;

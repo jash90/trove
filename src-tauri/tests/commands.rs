@@ -1749,6 +1749,27 @@ fn valid_jwk_json() -> String {
     jwk_json_for(&rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap())
 }
 
+/// Points every test in this process at an identity file that does not exist.
+///
+/// Without this the suite reads whatever `~/.config/keyvault/agent.json` the
+/// developer running it happens to have, so the vault tests would pass or fail
+/// according to a file outside the repository. Set once to a constant path, so
+/// the tokio tests racing to call it all write the same value.
+fn isolate_device_identity() {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        // SAFETY: edition 2024 makes this unsafe because another thread may be
+        // reading the environment. It runs before any vault test touches the
+        // identity, writes one constant value, and never writes again.
+        unsafe {
+            std::env::set_var(
+                "KEYVAULT_AGENT_FILE",
+                "/nonexistent/clipboard-history-tests/agent.json",
+            );
+        }
+    });
+}
+
 fn vault_settings() -> AppSettingsDto {
     let mut settings = AppSettingsDto::default();
     settings.keyvault.url = Some("https://trustworthy-eagle-783.convex.site".to_owned());
@@ -1759,6 +1780,7 @@ fn vault_settings() -> AppSettingsDto {
 
 #[tokio::test]
 async fn keyvault_settings_default_off_and_old_rows_still_parse() {
+    isolate_device_identity();
     let directory = tempfile::tempdir().unwrap();
     let state = AppState::open_data_dir(directory.path()).unwrap();
 
@@ -1781,20 +1803,28 @@ async fn keyvault_settings_default_off_and_old_rows_still_parse() {
 }
 
 #[tokio::test]
-async fn keyvault_settings_validate_all_or_nothing_through_the_crate_rules() {
+async fn keyvault_setting_overrides_are_independent_and_the_key_is_never_stored() {
+    isolate_device_identity();
     let directory = tempfile::tempdir().unwrap();
     let state = AppState::open_data_dir(directory.path()).unwrap();
 
-    let mut partial = vault_settings();
-    partial.keyvault.private_jwk = None;
-    assert_eq!(
-        commands::save_settings_service(&state, partial)
-            .await
-            .unwrap_err(),
-        "invalid_settings"
-    );
+    // Each override stands alone over the identity file. A URL without a token
+    // is the ordinary shape for pointing one install at a local backend, and it
+    // is no longer the half-configured error it used to be.
+    let mut url_only = AppSettingsDto::default();
+    url_only.keyvault.url = Some("http://127.0.0.1:3211".to_owned());
+    commands::save_settings_service(&state, url_only)
+        .await
+        .unwrap();
 
-    let mut broken_url = vault_settings();
+    let mut token_only = AppSettingsDto::default();
+    token_only.keyvault.token = Some("kv_AbCdEf0123456789-_".to_owned());
+    commands::save_settings_service(&state, token_only)
+        .await
+        .unwrap();
+
+    // An override that cannot be what it claims is still a settings error.
+    let mut broken_url = AppSettingsDto::default();
     broken_url.keyvault.url = Some("http://vault.example.com".to_owned());
     assert_eq!(
         commands::save_settings_service(&state, broken_url)
@@ -1803,16 +1833,55 @@ async fn keyvault_settings_validate_all_or_nothing_through_the_crate_rules() {
         "invalid_settings"
     );
 
-    let complete = vault_settings();
-    let saved = commands::save_settings_service(&state, complete)
+    let mut broken_token = AppSettingsDto::default();
+    broken_token.keyvault.token = Some("not-a-kv-token".to_owned());
+    assert_eq!(
+        commands::save_settings_service(&state, broken_token)
+            .await
+            .unwrap_err(),
+        "invalid_settings"
+    );
+}
+
+#[tokio::test]
+async fn saving_settings_scrubs_a_private_key_an_older_version_stored() {
+    isolate_device_identity();
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+
+    // The shape an older build wrote: the key pasted into the settings row.
+    let legacy = vault_settings();
+    assert!(legacy.keyvault.private_jwk.is_some());
+
+    let saved = commands::save_settings_service(&state, legacy)
         .await
         .unwrap();
     let reloaded = commands::get_settings_service(&state).await.unwrap();
     assert_eq!(saved, reloaded);
+
+    // The save is the migration: the key is gone from the row, and what the
+    // user actually set is kept.
+    assert_eq!(reloaded.keyvault.private_jwk, None);
+    assert_eq!(
+        reloaded.keyvault.url.as_deref(),
+        Some("https://trustworthy-eagle-783.convex.site")
+    );
+
+    // And it is gone from the database, not merely from the parsed view.
+    let stored = state
+        .store
+        .get_setting("app")
+        .unwrap()
+        .expect("the row was just written");
+    assert!(
+        !stored.contains("privateJwk"),
+        "the stored row still carries the key"
+    );
 }
 
 #[tokio::test]
 async fn keyvault_commands_refuse_before_anything_is_configured() {
+    isolate_device_identity();
     let directory = tempfile::tempdir().unwrap();
     let state = AppState::open_data_dir(directory.path()).unwrap();
 

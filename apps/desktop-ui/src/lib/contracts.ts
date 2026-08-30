@@ -64,11 +64,21 @@ export interface Thumbnail {
   base64: string;
 }
 
-/** The keyvault connection: all three fields, or all null. */
+/**
+ * Optional overrides for the vault connection.
+ *
+ * The connection itself — address, token and the private key — comes from the
+ * device's shared identity file (`~/.config/keyvault/agent.json`), so no key is
+ * stored by this application at all. These point one install somewhere else,
+ * at a local backend for instance, and are normally both null.
+ *
+ * `privateJwk` is only ever read back from rows an older version wrote; the
+ * next save drops it.
+ */
 export interface KeyvaultSettings {
   url: string | null;
   token: string | null;
-  privateJwk: string | null;
+  privateJwk?: string | null;
 }
 
 export interface AppSettings {
