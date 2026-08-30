@@ -16,6 +16,7 @@ mod decrypt;
 mod device;
 mod envelope;
 mod http;
+mod pairing;
 
 #[cfg(test)]
 mod tests;
@@ -25,8 +26,9 @@ use thiserror::Error;
 pub use client::{KeyvaultClient, SecretRef};
 pub use config::{KeyvaultConfig, MAX_TOKEN_BYTES, validate_base_url, validate_token};
 pub use decrypt::{PrivateKey, decrypt_envelope, parse_private_jwk};
-pub use device::{CONSUMER, agent_file_path, load as load_device_identity};
+pub use device::{CONSUMER, agent_file_path, load as load_device_identity, save_paired};
 pub use envelope::{AgentEnvelope, MAX_ENVELOPE_BYTES};
+pub use pairing::{DeviceKey, PairingOutcome, PairingStart, claim as claim_pairing, generate_device_key, start as start_pairing};
 pub use http::{ReqwestSecretTransport, SecretResponse, SecretTransport};
 
 /// Every failure this crate can report, as a stable code.
