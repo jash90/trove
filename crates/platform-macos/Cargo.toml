@@ -9,7 +9,19 @@ clipboard-core = { path = "../clipboard-core" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", features = ["NSPasteboard", "NSWorkspace", "NSRunningApplication", "NSImage", "NSBitmapImageRep", "NSImageRep"] }
+objc2-app-kit = { version = "0.3.2", features = [
+    "NSPasteboard",
+    "NSWorkspace",
+    "NSRunningApplication",
+    "NSImage",
+    "NSBitmapImageRep",
+    "NSImageRep",
+    # `CGImageForProposedRect:context:hints:` and `initWithCGImage:` — the
+    # rasterisation an icon-services image can actually answer — live behind
+    # these two.
+    "NSGraphicsContext",
+    "objc2-core-graphics",
+] }
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSArray", "NSData", "NSDictionary", "NSGeometry"] }
 objc2-core-graphics = { version = "0.3.2", features = ["CGEvent", "CGEventSource", "CGEventTypes"] }
 

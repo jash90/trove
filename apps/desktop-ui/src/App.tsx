@@ -143,11 +143,12 @@ const ClipboardPalette = (): React.JSX.Element => {
 
   const handleSelectItem = (entry: PaletteItem): void => {
     navigation.setSelectedKey(keyOfItem(entry));
-    if (entry.kind === 'app') {
-      setLaunchError(null);
-    } else {
-      actions.clearFeedback();
-    }
+    // A refusal to launch is about the row that refused, so moving off it
+    // clears the alert whichever kind of row the user moved to — the history
+    // is one list with the applications now, not a place the launcher's
+    // error can follow the user into.
+    setLaunchError(null);
+    if (entry.kind !== 'app') actions.clearFeedback();
     focusSearch();
   };
   const handleQueryChange = (nextQuery: string): void => {

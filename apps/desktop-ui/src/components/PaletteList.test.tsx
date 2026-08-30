@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
 import { useListNavigation } from '../hooks/useListNavigation';
 import type { AppEntry, HistoryItem, HistoryPage } from '../lib/contracts';
+import { SYNTHETIC_APP_ICON } from '../lib/fixtures';
 import { GatewayProvider, type ClipboardGateway } from '../lib/gateway';
 import { buildPaletteItems, keyOfItem, type PaletteItem } from '../lib/paletteItems';
 import { PaletteList } from './PaletteList';
@@ -63,6 +64,20 @@ const KeyboardHarness = ({ items, onActivate }: KeyboardHarnessProps): React.JSX
     navigation.handleKeyDown(event);
   };
 
+  // The harness announces the same relation the palette does: the listbox
+  // PaletteList renders carries id="history-results", and the active option
+  // is the row's own id — `app-option-${index}` or `history-option-${eventId}`
+  // — not a key invented here. A harness that points at neither would let a
+  // broken ARIA wiring pass its own test.
+  const selectedIndex = items.findIndex((entry) => keyOfItem(entry) === navigation.selectedKey);
+  const selectedEntry = selectedIndex < 0 ? undefined : items[selectedIndex];
+  const activeDescendant =
+    selectedEntry === undefined
+      ? undefined
+      : selectedEntry.kind === 'app'
+        ? `app-option-${selectedIndex}`
+        : `history-option-${selectedEntry.item.eventId}`;
+
   return (
     <>
       <label htmlFor="keyboard-search">Search applications and history</label>
@@ -70,10 +85,8 @@ const KeyboardHarness = ({ items, onActivate }: KeyboardHarnessProps): React.JSX
         id="keyboard-search"
         autoFocus
         value={query}
-        aria-controls="keyboard-results"
-        aria-activedescendant={
-          navigation.selectedKey === null ? undefined : `selected-${navigation.selectedKey}`
-        }
+        aria-controls="history-results"
+        aria-activedescendant={activeDescendant}
         onChange={(event) => setQuery(event.currentTarget.value)}
         onKeyDown={handleKeyDown}
       />
@@ -374,6 +387,43 @@ describe('clipboard palette states', () => {
     expect(alert).not.toHaveTextContent('private');
     expect(alert).not.toHaveTextContent('archive.json');
   });
+
+  it('speaks for the catalog when the history answered and had nothing', async () => {
+    vi.useFakeTimers();
+    const empty = async (): Promise<HistoryPage> => ({
+      items: [],
+      nextCursor: null,
+      rankedTruncated: false,
+    });
+
+    // History ready and empty, catalog still reading the bundles: without a
+    // state of its own the panel would say nothing at all.
+    const loadingCatalog = {
+      ...makeGateway(empty),
+      listApps: vi.fn(() => new Promise<AppEntry[]>(() => undefined)),
+    } as unknown as ClipboardGateway;
+    const { rerender } = render(<App gateway={loadingCatalog} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(screen.getByRole('status')).toHaveTextContent('Loading applications');
+
+    // And a catalog that failed must say so rather than fail silently.
+    const brokenCatalog = {
+      ...makeGateway(empty),
+      listApps: vi.fn(async () => {
+        throw new Error('/private/Applications is not a place to name');
+      }),
+    } as unknown as ClipboardGateway;
+    rerender(<App gateway={brokenCatalog} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+
+    const catalogAlert = screen.getByRole('alert');
+    expect(catalogAlert).toHaveTextContent('The applications could not be loaded');
+    expect(catalogAlert).not.toHaveTextContent('private');
+  });
 });
 
 describe('grouped rows', () => {
@@ -420,5 +470,51 @@ describe('grouped rows', () => {
     });
     expect(within(once).queryByText('×1')).not.toBeInTheDocument();
     expect(within(once).queryByLabelText(/Captured \d+ times/)).not.toBeInTheDocument();
+  });
+
+  /// A fresh path per icon test: the icon cache is module-wide, and a path
+  /// another test already answered would short-circuit the gateway mock.
+  const freshApp = (): AppEntry => ({
+    name: 'Iconed',
+    bundleId: 'com.example.iconed',
+    path: `/synthetic/Applications/${crypto.randomUUID()}/Iconed.app`,
+  });
+
+  const renderIconedList = (getAppIcon: ClipboardGateway['getAppIcon'], app: AppEntry) =>
+    render(
+      <GatewayProvider gateway={{ getAppIcon } as unknown as ClipboardGateway}>
+        <PaletteList
+          items={buildPaletteItems([app], [], '')}
+          selectedKey={null}
+          onSelect={() => undefined}
+          onActivate={() => undefined}
+        />
+      </GatewayProvider>,
+    );
+
+  it('draws the rendered application icon in the row', async () => {
+    const getAppIcon = vi.fn(async () => SYNTHETIC_APP_ICON);
+
+    renderIconedList(getAppIcon, freshApp());
+
+    const option = paletteList().getByRole('option');
+    await waitFor(() => {
+      const icon = option.querySelector('img.app-row__icon');
+      expect(icon).not.toBeNull();
+      expect(icon?.getAttribute('src')).toMatch(/^data:image\/png;base64,/);
+    });
+    // Decorative: the row's accessible name is the application, not a
+    // repeated "icon of X" the screen reader would read twice.
+    expect(option.querySelector('img.app-row__icon')).toHaveAttribute('alt', '');
+  });
+
+  it('keeps the glyph when no icon arrives', async () => {
+    const getAppIcon = vi.fn(async () => null);
+
+    renderIconedList(getAppIcon, freshApp());
+
+    await waitFor(() => expect(getAppIcon).toHaveBeenCalled());
+    // The placeholder glyph is the icon slot's occupant, not an <img>.
+    expect(paletteList().getByRole('option').querySelector('img')).toBeNull();
   });
 });

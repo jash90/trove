@@ -90,6 +90,15 @@ export const PaletteWorkspace = ({
         {status === 'ready' && appsStatus === 'ready' && items.length === 0 ? (
           <EmptyState kind="empty" />
         ) : null}
+        {/* The history has answered and has nothing; the catalog has not.
+            Without these two the panel says nothing at all — and a catalog
+            that failed to load fails silently. */}
+        {status === 'ready' && appsStatus === 'loading' && items.length === 0 ? (
+          <EmptyState kind="loading" subject="applications" />
+        ) : null}
+        {status === 'ready' && appsStatus === 'error' && items.length === 0 ? (
+          <EmptyState kind="error" subject="applications" />
+        ) : null}
         {items.length > 0 ? (
           <PaletteList
             items={items}

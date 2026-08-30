@@ -48,13 +48,17 @@ export const useAppIcon = (
       .getAppIcon(path)
       .then((icon: Thumbnail | null) => (icon === null ? null : thumbnailDataUrl(icon)))
       .then((url) => {
-        if (!active) return;
+        // The cache is written before the guard on purpose: the answer
+        // belongs to the path, not to the row that happened to ask. A row
+        // scrolled out of view before the icon arrived would otherwise throw
+        // the pixels away and ask again on its way back.
         iconCache.set(path, url);
+        if (!active) return;
         setState({ status: 'ready', url });
       })
       .catch(() => {
-        if (!active) return;
         iconCache.set(path, null);
+        if (!active) return;
         setState({ status: 'ready', url: null });
       });
     return () => {

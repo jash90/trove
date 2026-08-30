@@ -254,6 +254,36 @@ describe('the unified palette', () => {
     expect(alert).not.toHaveTextContent('.app');
   });
 
+  it('drops the launch alert when the user moves to a history row', async () => {
+    const user = userEvent.setup();
+    const launchApp = vi.fn(async () => {
+      throw new Error('/private/wherever/the/app/was.app');
+    });
+    render(<App gateway={{ ...mockGateway, launchApp } as ClipboardGateway} />);
+
+    await settleApps();
+    await settleHistory();
+
+    await user.type(screen.getByRole('searchbox'), 'terminal');
+    await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
+    await user.keyboard('{Enter}');
+    expect(await screen.findByRole('alert')).toBeVisible();
+
+    // One list means one selection: a refusal that belongs to an application
+    // row has no business staying on screen once the user is reading history.
+    await user.keyboard('{Escape}');
+    const historyRow = await waitFor(() => {
+      const row = historyResults()
+        .getAllByRole('option')
+        .find((option) => option.hasAttribute('data-event-id'));
+      expect(row).toBeDefined();
+      return row as HTMLElement;
+    });
+    await user.click(historyRow);
+
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  });
+
   it('leaves Tab to the dialog while one is open', async () => {
     const user = userEvent.setup();
     render(<App />);

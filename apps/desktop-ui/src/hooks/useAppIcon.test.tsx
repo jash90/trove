@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Thumbnail } from '../lib/contracts';
@@ -68,5 +68,31 @@ describe('useAppIcon', () => {
 
     await waitFor(() => expect(result.current.status).toBe('ready'));
     expect(result.current.url).toBeNull();
+  });
+
+  it('keeps an icon that arrived after the row scrolled away', async () => {
+    const path = freshPath();
+    let deliver: (icon: Thumbnail) => void = () => undefined;
+    const getAppIcon = vi.fn(
+      () =>
+        new Promise<Thumbnail>((resolve) => {
+          deliver = resolve;
+        }),
+    );
+    const gateway = makeGateway(getAppIcon as unknown as ClipboardGateway['getAppIcon']);
+
+    // The virtualized list unmounts the row while the icon is still in
+    // flight; the answer is about the path, not about the row that asked, so
+    // it must survive that.
+    const first = renderHook(() => useAppIcon(gateway, path));
+    first.unmount();
+    await act(async () => {
+      deliver(syntheticIcon);
+    });
+
+    const second = renderHook(() => useAppIcon(gateway, path));
+    await waitFor(() => expect(second.result.current.status).toBe('ready'));
+    expect(second.result.current.url).toMatch(/^data:image\/png;base64,/);
+    expect(getAppIcon).toHaveBeenCalledOnce();
   });
 });
