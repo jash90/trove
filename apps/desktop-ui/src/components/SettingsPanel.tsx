@@ -124,8 +124,30 @@ export const vaultErrorCode = (error: unknown): string =>
   typeof error === 'string' ? error : error instanceof Error ? error.message : '';
 
 /** One plain sentence per vault denial. Codes only reach here; never values. */
+/** What to say when a pairing stops for a reason that is not success. */
+export const pairingMessage = (status: string): string => {
+  switch (status) {
+    case 'paired':
+      return 'Connected. This device has its own key and its own token now.';
+    case 'expired':
+      return 'That connection request expired. Start again.';
+    case 'alreadyClaimed':
+      return 'That connection was already collected — by something other than this application. Start again, and approve only the fingerprint shown here.';
+    case 'notFound':
+      return 'That connection request no longer exists. Start again.';
+    default:
+      return 'Connecting stopped unexpectedly.';
+  }
+};
+
 export const keyvaultErrorMessage = (code: string): string => {
   switch (code) {
+    case 'keyvault_pairing_page_unknown':
+      return 'This vault has not published where its web interface lives, so there is nowhere to send you to approve.';
+    case 'keyvault_browser_failed':
+      return 'Could not open a browser to finish connecting.';
+    case 'keyvault_pairing_failed':
+      return 'Could not start connecting to that vault.';
     case 'keyvault_device_identity_invalid':
       return 'The device vault identity at ~/.config/keyvault/agent.json could not be read.';
     case 'keyvault_not_configured':
@@ -145,6 +167,18 @@ export const keyvaultErrorMessage = (code: string): string => {
       return 'The vault allows one read a second — try again in a moment.';
     case 'keyvault_decrypt_failed':
       return 'The private key does not match the one the vault seals to.';
+    case 'keyvault_pairing_payload_invalid':
+      return 'Connecting got as far as the vault answering, but what it sent back was not a complete identity. The vault deployment is misconfigured.';
+    case 'keyvault_device_identity_missing':
+      return 'This device has no vault identity yet. Use Connect to pair it.';
+    case 'keyvault_bad_response':
+      return 'The vault replied in a shape this version does not understand.';
+    case 'keyvault_invalid_slug':
+      return 'That secret name is not one the vault can hold.';
+    case 'keyvault_envelope_invalid':
+    case 'keyvault_envelope_unsupported_version':
+    case 'keyvault_envelope_too_large':
+      return 'The sealed answer from the vault was not one this version can open.';
     case 'keyvault_transport_failed':
       return 'The vault could not be reached. Check the address and the connection.';
     default:
@@ -165,6 +199,8 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [vaultUrl, setVaultUrl] = useState('');
   const [vaultToken, setVaultToken] = useState('');
   const [vaultSecrets, setVaultSecrets] = useState<KeyvaultSecret[] | null>(null);
+  const [pairFingerprint, setPairFingerprint] = useState<string | null>(null);
+  const [pairNotice, setPairNotice] = useState<string | null>(null);
   const [vaultBusy, setVaultBusy] = useState(false);
   const [vaultError, setVaultError] = useState<string | null>(null);
   const [vaultCopiedSlug, setVaultCopiedSlug] = useState<string | null>(null);
@@ -311,6 +347,73 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
 
   /// Asks the vault what this token may read. Metadata only: what comes back
   /// is slugs and names, and a refusal arrives as a code this pane translates.
+  /**
+   * Starts pairing: the core mints this device a keypair and opens the browser to approve it.
+   *
+   * Only the vault's address is needed, and only to find the vault — nothing is typed in, and no
+   * key is ever pasted here, because the key this device will use does not exist until this runs.
+   */
+  const connectToVault = async (): Promise<void> => {
+    if (vaultBusy || pairFingerprint !== null) return;
+    const address = vaultUrl.trim();
+    if (!address) {
+      setPairNotice('Enter the vault address above, then connect.');
+      return;
+    }
+    setVaultBusy(true);
+    setPairNotice(null);
+    setVaultError(null);
+    try {
+      setPairFingerprint(await gateway.keyvaultPairStart(address));
+    } catch (error) {
+      setVaultError(keyvaultErrorMessage(vaultErrorCode(error)));
+    }
+    setVaultBusy(false);
+  };
+
+  const cancelPairing = async (): Promise<void> => {
+    setPairFingerprint(null);
+    setPairNotice(null);
+    await gateway.keyvaultPairCancel();
+  };
+
+  // Ask the core, on a timer, whether the browser has approved yet.
+  //
+  // Every answer other than "pending" ends the pairing, so the interval is torn down with it —
+  // a finished pairing that went on being polled would keep asking a question already answered.
+  useEffect(() => {
+    if (pairFingerprint === null) return;
+    let stopped = false;
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          const { status } = await gateway.keyvaultPairPoll();
+          if (stopped || status === 'pending') return;
+          setPairFingerprint(null);
+          setPairNotice(pairingMessage(status));
+          // A pairing that worked leaves this install configured, so the list it could not fetch
+          // a moment ago is worth fetching now.
+          if (status === 'paired') {
+            try {
+              setVaultSecrets(await gateway.keyvaultList());
+              setVaultError(null);
+            } catch {
+              /* the pairing still stands; the list can be retried by hand */
+            }
+          }
+        } catch (error) {
+          if (stopped) return;
+          setPairFingerprint(null);
+          setVaultError(keyvaultErrorMessage(vaultErrorCode(error)));
+        }
+      })();
+    }, 2000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [pairFingerprint, gateway]);
+
   const testVaultConnection = async (): Promise<void> => {
     if (vaultBusy) return;
     setVaultBusy(true);
@@ -560,8 +663,17 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                   onChange={(event) => setVaultToken(event.currentTarget.value)}
                 />
               </label>
+              {vaultToken.trim() || vaultUrl.trim() ? (
+                <p className="workflow-alert" role="status">
+                  These override the paired device identity — the vault is contacted with what is
+                  typed here, not with what connecting set up. Clear them to use the pairing.
+                </p>
+              ) : null}
               <p className="settings-help">
-                Both fields are optional: leave them blank and this application uses the
+                <strong>Connect</strong> pairs this device: it generates a key here, sends only
+                the public half, and the browser hands back a token of its own — nothing is
+                pasted, and the key never leaves this machine. Both fields below are optional:
+                leave them blank and this application uses the
                 device’s shared vault identity at <code>~/.config/keyvault/agent.json</code>,
                 which is also where the private key lives — it is never stored here. Fill one in
                 only to point this install at a different vault. The vault answers with sealed
@@ -571,12 +683,36 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
               <div className="workflow-actions workflow-actions--start">
                 <button
                   type="button"
+                  onClick={() => void connectToVault()}
+                  disabled={vaultBusy || pending || pairFingerprint !== null}
+                >
+                  {pairFingerprint !== null ? 'Waiting for approval…' : 'Connect'}
+                </button>
+                <button
+                  type="button"
                   onClick={() => void testVaultConnection()}
                   disabled={vaultBusy || pending}
                 >
                   {vaultBusy ? 'Talking to the vault…' : 'Test connection'}
                 </button>
               </div>
+              {pairFingerprint !== null ? (
+                <div className="workflow-status" role="status">
+                  <p>
+                    Approve this in the browser. Check that the page shows the same code — it is
+                    what ties that page to this application.
+                  </p>
+                  <p className="settings-pair-fingerprint">{pairFingerprint}</p>
+                  <button type="button" className="link" onClick={() => void cancelPairing()}>
+                    Cancel
+                  </button>
+                </div>
+              ) : null}
+              {pairNotice !== null ? (
+                <p className="workflow-status" role="status">
+                  {pairNotice}
+                </p>
+              ) : null}
               {vaultError ? (
                 <p className="workflow-alert" role="alert">
                   {vaultError}

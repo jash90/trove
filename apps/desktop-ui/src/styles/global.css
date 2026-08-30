@@ -52,3 +52,13 @@ button {
   white-space: nowrap;
   border: 0;
 }
+
+/* The pairing fingerprint. Monospaced and large on purpose: it is compared by eye against what
+   the browser shows, and that comparison is the only thing standing between approving this
+   application's request and approving somebody else's. */
+.settings-pair-fingerprint {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 1.35rem;
+  letter-spacing: 0.14em;
+  margin: 0.35rem 0;
+}

@@ -12,6 +12,7 @@ import { ImportWizard } from './components/ImportWizard';
 import { PaletteHeader } from './components/PaletteHeader';
 import { PaletteWorkspace } from './components/PaletteWorkspace';
 import { useAppsCatalog } from './hooks/useAppsCatalog';
+import { useVaultCatalog } from './hooks/useVaultCatalog';
 import { useHistoryActions } from './hooks/useHistoryActions';
 import { useHistorySearch } from './hooks/useHistorySearch';
 import { useListNavigation } from './hooks/useListNavigation';
@@ -21,6 +22,7 @@ import { useThumbnail } from './hooks/useThumbnail';
 import { HISTORY_PAGE_SIZE } from './lib/contracts';
 import { filterApps } from './lib/appSearch';
 import { buildPaletteItems, keyOfItem, type PaletteItem } from './lib/paletteItems';
+import { filterSecrets } from './lib/vaultSearch';
 import {
   GatewayProvider,
   useGateway,
@@ -65,6 +67,14 @@ const ClipboardPalette = (): React.JSX.Element => {
   // is a launcher the moment it opens, not after a mode is toggled into.
   const catalog = useAppsCatalog(gateway, true);
   const visibleApps = useMemo(() => filterApps(catalog.apps, query), [catalog.apps, query]);
+  // Only asked for once someone types. The application catalog is a local scan and may load
+  // eagerly; this one reaches someone's vault over the network, and an untouched palette has no
+  // business doing that.
+  const vault = useVaultCatalog(gateway, query.trim() !== '');
+  const visibleSecrets = useMemo(
+    () => filterSecrets(vault.secrets, query),
+    [vault.secrets, query],
+  );
   const [launchError, setLaunchError] = useState<string | null>(null);
   const focusSearch = (): void => searchInputRef.current?.focus();
   useEffect(() => {
@@ -85,13 +95,21 @@ const ClipboardPalette = (): React.JSX.Element => {
   };
 
   const paletteItems = useMemo<PaletteItem[]>(
-    () => buildPaletteItems(visibleApps, actions.visibleItems, query),
-    [visibleApps, actions.visibleItems, query],
+    () => buildPaletteItems(visibleApps, actions.visibleItems, query, visibleSecrets),
+    [visibleApps, actions.visibleItems, query, visibleSecrets],
   );
 
   const handleActivate = (entry: PaletteItem): void => {
     if (entry.kind === 'app') {
       handleLaunch(entry.app.path);
+    } else if (entry.kind === 'vault') {
+      setLaunchError(null);
+      // Through the core, which arms the capture suppression before the write, so the key does
+      // not land in the history this application exists to keep. The value never comes back
+      // here — the interface learns only whether it worked.
+      void gateway
+        .keyvaultCopySecret(entry.secret.slug)
+        .catch(() => setLaunchError('That secret could not be copied from the vault.'));
     } else {
       actions.copy(entry.item.eventId, 'paste');
     }
@@ -115,7 +133,9 @@ const ClipboardPalette = (): React.JSX.Element => {
       ? undefined
       : selected.kind === 'app'
         ? `app-option-${selectedIndex}`
-        : `history-option-${selectedHistoryId}`;
+        : selected.kind === 'vault'
+          ? `vault-option-${selectedIndex}`
+          : `history-option-${selectedHistoryId}`;
 
   const preview = useSelectedPreview(gateway, selectedHistoryId);
   const thumbnail = useThumbnail(
@@ -244,7 +264,7 @@ const ClipboardPalette = (): React.JSX.Element => {
         <PaletteHeader
           query={query}
           activeDescendant={activeDescendant}
-          resultCount={visibleApps.length + actions.visibleItems.length}
+          resultCount={visibleSecrets.length + visibleApps.length + actions.visibleItems.length}
           resultsTruncated={actions.visibleItems.length >= HISTORY_PAGE_SIZE}
           refreshing={refreshing}
           searchInputRef={searchInputRef}

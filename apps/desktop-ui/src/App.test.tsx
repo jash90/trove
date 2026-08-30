@@ -61,9 +61,9 @@ describe('the unified palette', () => {
   });
 
   const historyResults = () =>
-    within(screen.getByRole('listbox', { name: 'Application and history results' }));
+    within(screen.getByRole('listbox', { name: 'Applications, secrets and history results' }));
   const appsResults = () =>
-    within(screen.getByRole('listbox', { name: 'Application and history results' }));
+    within(screen.getByRole('listbox', { name: 'Applications, secrets and history results' }));
 
   const settleHistory = async (): Promise<void> => {
     await waitFor(() =>
@@ -295,7 +295,7 @@ describe('the unified palette', () => {
 
     await user.keyboard('{Tab}');
 
-    expect(screen.getByRole('listbox', { name: 'Application and history results' })).toBeInTheDocument();
+    expect(screen.getByRole('listbox', { name: 'Applications, secrets and history results' })).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Import history' })).toBeVisible();
   });
 });

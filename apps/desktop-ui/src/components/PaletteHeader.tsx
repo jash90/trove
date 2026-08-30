@@ -46,7 +46,7 @@ export const PaletteHeader = ({
     <header className="palette-header">
       <label className="search-field" htmlFor="history-search">
         <Search className="search-field__icon" size={19} strokeWidth={1.8} aria-hidden="true" />
-        <span className="sr-only">Search applications and history</span>
+        <span className="sr-only">Search applications, secrets and history</span>
         <input
           ref={searchInputRef}
           id="history-search"
@@ -57,7 +57,7 @@ export const PaletteHeader = ({
           placeholder="Szukaj w aplikacjach i historii…"
           aria-controls="apps-results history-results"
           aria-autocomplete="list"
-          aria-label="Search applications and history"
+          aria-label="Search applications, secrets and history"
           aria-activedescendant={activeDescendant}
           onChange={handleChange}
           onKeyDown={onKeyDown}

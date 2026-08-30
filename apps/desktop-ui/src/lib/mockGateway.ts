@@ -116,6 +116,11 @@ export const mockGateway: ClipboardGateway = {
   keyvaultList: async () =>
     SYNTHETIC_KEYVAULT_SECRETS.map((secret) => ({ ...secret })),
   keyvaultCopySecret: async () => undefined,
+  // The mock pairs instantly. Nothing here talks to a vault, and a fake that made callers wait
+  // would only teach the tests to tolerate a spinner.
+  keyvaultPairStart: async () => 'A1B2-C3D4',
+  keyvaultPairPoll: async () => ({ status: 'paired' as const }),
+  keyvaultPairCancel: async () => undefined,
   // The browser preview has no core behind it, so nothing ever changes.
   onHistoryChanged: () => () => undefined,
   onLinkPreviewReady: () => () => undefined,

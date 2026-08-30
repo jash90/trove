@@ -144,3 +144,208 @@ pub async fn copy_secret_service<R: Runtime, T: SecretTransport>(
     })
     .await
 }
+
+// ------------------------------------------------------------------ pairing --
+
+/// A pairing waiting on the browser.
+///
+/// Held in memory only. If the application closes mid-pairing the session is abandoned rather
+/// than resumed, which is the honest outcome: the code is short-lived, and a half-finished
+/// pairing restored from disk would be a credential nobody remembers granting.
+struct PendingPairing {
+    base_url: String,
+    code: String,
+    private_jwk: String,
+}
+
+fn pending() -> &'static Mutex<Option<PendingPairing>> {
+    static PENDING: OnceLock<Mutex<Option<PendingPairing>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(None))
+}
+
+/// Where a pairing stands, in the words the interface shows.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingStatusDto {
+    pub status: &'static str,
+}
+
+impl PairingStatusDto {
+    fn of(status: &'static str) -> Self {
+        Self { status }
+    }
+}
+
+/// Begins a pairing: mints this device a keypair, opens one, and sends the browser to approve it.
+///
+/// Returns the fingerprint, which the interface must show. It is the only thing tying the page
+/// someone is about to approve to the application that asked — without comparing it, approving
+/// means trusting whatever code happens to be in the address bar.
+pub async fn pair_start_service(base_url: String) -> Result<String, String> {
+    let base_url = base_url.trim().to_owned();
+    clipboard_keyvault::validate_base_url(&base_url).map_err(|error| error.to_string())?;
+
+    // Asked before anything is generated: a deployment with no published interface cannot be
+    // paired at all, and spending two seconds on a keypair first would only delay saying so.
+    let page = clipboard_keyvault::pairing_page_url(&base_url)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    // Generating 3072-bit RSA takes a second or two of solid arithmetic; off the async runtime so
+    // it cannot stall everything else the application is doing.
+    let key = tokio::task::spawn_blocking(clipboard_keyvault::generate_device_key)
+        .await
+        .map_err(|_| "keyvault_pairing_failed".to_owned())?
+        .map_err(|error| error.to_string())?;
+
+    let started =
+        clipboard_keyvault::start_pairing(&base_url, "Clipboard History", &key.public_jwk)
+            .await
+            .map_err(|error| error.to_string())?;
+
+    let url = format!("{page}/pair?code={}", urlencoding_minimal(&started.code));
+    {
+        let mut slot = pending()
+            .lock()
+            .expect("the pairing slot is only held briefly");
+        *slot = Some(PendingPairing {
+            base_url,
+            code: started.code,
+            private_jwk: key.private_jwk,
+        });
+    }
+    open_in_browser(&url)?;
+    Ok(started.fingerprint)
+}
+
+/// Asks once whether the browser has approved, and records the result if it has.
+///
+/// The interface calls this on a timer, so every answer other than "pending" also clears the
+/// slot: a pairing that expired or was collected by someone else must not be polled forever.
+pub async fn pair_poll_service(state: &AppState) -> Result<PairingStatusDto, String> {
+    // The lock is released before the request. Holding it across an await would block the
+    // interface's next call on the network, and a cancel would have nothing to take.
+    let Some((base_url, code, private_jwk)) = ({
+        let slot = pending()
+            .lock()
+            .expect("the pairing slot is only held briefly");
+        slot.as_ref()
+            .map(|p| (p.base_url.clone(), p.code.clone(), p.private_jwk.clone()))
+    }) else {
+        return Ok(PairingStatusDto::of("idle"));
+    };
+
+    let outcome = clipboard_keyvault::claim_pairing(&base_url, &code, &private_jwk)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    match outcome {
+        clipboard_keyvault::PairingOutcome::Pending => Ok(PairingStatusDto::of("pending")),
+        clipboard_keyvault::PairingOutcome::Approved { url, token } => {
+            clipboard_keyvault::save_paired(
+                clipboard_keyvault::CONSUMER,
+                &url,
+                &private_jwk,
+                &token,
+            )
+            .map_err(|error| error.to_string())?;
+            // Only after the identity is safely on disk: clearing first would leave an install
+            // with neither the old configuration nor the new one if the write failed.
+            clear_settings_overrides(state).await?;
+            pair_cancel_service();
+            Ok(PairingStatusDto::of("paired"))
+        }
+        clipboard_keyvault::PairingOutcome::Expired => {
+            pair_cancel_service();
+            Ok(PairingStatusDto::of("expired"))
+        }
+        clipboard_keyvault::PairingOutcome::NotFound => {
+            pair_cancel_service();
+            Ok(PairingStatusDto::of("notFound"))
+        }
+        clipboard_keyvault::PairingOutcome::AlreadyClaimed => {
+            pair_cancel_service();
+            Ok(PairingStatusDto::of("alreadyClaimed"))
+        }
+    }
+}
+
+/// Drops the URL and token overrides once a pairing has replaced them.
+///
+/// A pairing is an act of configuration, so whatever was configured before it is stale by
+/// definition — and a stale token override is not inert: `config_from` lays overrides over the
+/// device identity, so a revoked one shadows the working token pairing just installed and the
+/// vault answers 401. That is the bug this exists to prevent, and it is invisible from the
+/// interface, which shows filled fields and a refusal without connecting the two.
+///
+/// An override set *after* pairing still wins. The rule is unchanged — the last thing configured
+/// wins — except that pairing now counts as configuring.
+pub async fn clear_settings_overrides(state: &AppState) -> Result<(), String> {
+    let store = state.store.clone();
+    let settings = crate::commands::run_blocking("settings_unavailable", move || {
+        crate::commands::get_settings_blocking(&store)
+    })
+    .await?;
+
+    // Nothing to clear is the common case, and writing the row anyway would touch settings on
+    // every pairing for no reason.
+    if settings.keyvault.url.is_none() && settings.keyvault.token.is_none() {
+        return Ok(());
+    }
+
+    let mut cleared = settings;
+    cleared.keyvault.url = None;
+    cleared.keyvault.token = None;
+    // Through the ordinary save so there is one way into this row, with its validation and the
+    // side effects that hang off it.
+    crate::commands::save_settings_service(state, cleared).await?;
+    Ok(())
+}
+
+/// Forgets the pairing in flight, and with it this device's unsaved key./// Forgets the pairing in flight, and with it this device's unsaved key.
+pub fn pair_cancel_service() {
+    let mut slot = pending()
+        .lock()
+        .expect("the pairing slot is only held briefly");
+    *slot = None;
+}
+
+/// Percent-encodes what a pairing code may contain.
+///
+/// Codes are base64url, so only `-` and `_` beyond alphanumerics, and none of those need encoding.
+/// Anything else would mean the vault changed its alphabet, and passing it through unescaped is
+/// how a query string quietly becomes two.
+fn urlencoding_minimal(code: &str) -> String {
+    code.chars()
+        .flat_map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                vec![character]
+            } else {
+                format!("%{:02X}", character as u32 as u8).chars().collect()
+            }
+        })
+        .collect()
+}
+
+/// Hands the URL to the browser. Passed as one argument and never through a shell.
+fn open_in_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/usr/bin/open")
+            .arg(url)
+            .status()
+            .map_err(|_| "keyvault_browser_failed".to_owned())
+            .and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err("keyvault_browser_failed".to_owned())
+                }
+            })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = url;
+        Err("keyvault_browser_failed".to_owned())
+    }
+}

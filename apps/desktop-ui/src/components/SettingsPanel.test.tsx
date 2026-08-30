@@ -79,6 +79,9 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
     getStorageStats: vi.fn(async () => storageStats),
     keyvaultList: vi.fn(async () => vaultSecrets.map((secret) => ({ ...secret }))),
     keyvaultCopySecret: vi.fn(async () => undefined),
+    keyvaultPairStart: vi.fn(async () => 'A1B2-C3D4'),
+    keyvaultPairPoll: vi.fn(async () => ({ status: 'paired' as const })),
+    keyvaultPairCancel: vi.fn(async () => undefined),
     ...overrides,
   }) as ClipboardGateway;
 
@@ -395,6 +398,51 @@ describe('keyvault section', () => {
         expect.objectContaining({ keyvault: { url: null, token: null } }),
       );
     });
+  });
+
+  it('says plainly when a leftover override is what the vault is being asked with', async () => {
+    const gateway = makeGateway();
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    // Nothing typed: the pairing is in charge and there is nothing to warn about.
+    expect(screen.queryByText(/override the paired device identity/u)).not.toBeInTheDocument();
+
+    // A token left over from an earlier configuration silently outranks a working pairing and
+    // the vault answers 401. The pane used to show a filled field and a refusal without ever
+    // connecting the two, which is exactly how that went unnoticed.
+    await userEvent.type(screen.getByLabelText(/Agent token/u), 'kv_stale0123456789');
+
+    expect(await screen.findByText(/override the paired device identity/u)).toBeVisible();
+  });
+
+  it('refuses to connect without an address rather than opening a browser at nothing', async () => {
+    const gateway = makeGateway();
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    expect(await screen.findByText(/Enter the vault address above/u)).toBeVisible();
+    expect(gateway.keyvaultPairStart).not.toHaveBeenCalled();
+  });
+
+  it('shows the fingerprint while waiting, because approving without it proves nothing', async () => {
+    const gateway = makeGateway();
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    await userEvent.type(screen.getByLabelText(/Vault address/u), 'https://vault.example.invalid');
+    await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    await waitFor(() => {
+      expect(gateway.keyvaultPairStart).toHaveBeenCalledWith('https://vault.example.invalid');
+    });
+
+    // The fingerprint is the whole point of the waiting state: it is what the person compares
+    // against the browser before approving.
+    expect(await screen.findByText('A1B2-C3D4')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Waiting for approval…' })).toBeDisabled();
   });
 
   it('tests the connection by listing metadata, and copies without showing a value', async () => {

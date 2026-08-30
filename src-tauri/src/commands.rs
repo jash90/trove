@@ -52,6 +52,9 @@ macro_rules! clipboard_history_command_registry {
             get_link_preview => $crate::commands::get_link_preview,
             keyvault_list => $crate::commands::keyvault_list,
             keyvault_copy_secret => $crate::commands::keyvault_copy_secret,
+            keyvault_pair_start => $crate::commands::keyvault_pair_start,
+            keyvault_pair_poll => $crate::commands::keyvault_pair_poll,
+            keyvault_pair_cancel => $crate::commands::keyvault_pair_cancel,
         }
     };
 }
@@ -1159,6 +1162,30 @@ pub async fn keyvault_list(
 ) -> Result<Vec<clipboard_keyvault::SecretRef>, String> {
     crate::keyvault::throttle(current_time_ms())?;
     crate::keyvault::list_service(state.inner()).await
+}
+
+/// Starts pairing with a vault and returns the fingerprint the interface must show.
+///
+/// Not throttled like the read path: this is one deliberate click, and the two seconds it spends
+/// generating a keypair are their own rate limit.
+#[tauri::command]
+pub async fn keyvault_pair_start(url: String) -> Result<String, String> {
+    crate::keyvault::pair_start_service(url).await
+}
+
+/// Asks whether the browser has approved yet. Called on a timer by the interface.
+#[tauri::command]
+pub async fn keyvault_pair_poll(
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::keyvault::PairingStatusDto, String> {
+    crate::keyvault::pair_poll_service(state.inner()).await
+}
+
+/// Abandons a pairing in flight, discarding the key generated for it.
+#[tauri::command]
+pub async fn keyvault_pair_cancel() -> Result<(), String> {
+    crate::keyvault::pair_cancel_service();
+    Ok(())
 }
 
 #[tauri::command(rename_all = "camelCase")]

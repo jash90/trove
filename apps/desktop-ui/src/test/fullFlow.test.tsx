@@ -14,7 +14,7 @@ import { mockGateway } from '../lib/mockGateway';
 /// options too. An unscoped option query matches both, so a test can pass
 /// while the list it meant to inspect has not loaded at all.
 const historyList = () =>
-  within(screen.getByRole('listbox', { name: 'Application and history results' }));
+  within(screen.getByRole('listbox', { name: 'Applications, secrets and history results' }));
 
 
 /**
@@ -117,7 +117,7 @@ describe('the palette end to end', () => {
 
     await waitFor(() =>
       expect(
-        within(screen.getByRole('listbox', { name: 'Application and history results' })).getAllByRole(
+        within(screen.getByRole('listbox', { name: 'Applications, secrets and history results' })).getAllByRole(
           'option',
         ).length,
       ).toBeGreaterThan(0),

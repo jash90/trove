@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react';
 
 import { keyOfItem, type PaletteItem } from '../lib/paletteItems';
 import { AppRow } from './AppRow';
+import { VaultRow } from './VaultRow';
 import { HistoryRow } from './HistoryRow';
 
 interface PaletteListProps {
@@ -50,7 +51,7 @@ export const PaletteList = ({
       ref={scrollRef}
       id="history-results"
       role="listbox"
-      aria-label="Application and history results"
+      aria-label="Applications, secrets and history results"
       className="history-list"
     >
       <div
@@ -70,6 +71,19 @@ export const PaletteList = ({
               <AppRow
                 key={entry.app.path}
                 app={entry.app}
+                index={virtualItem.index}
+                selected={keyOfItem(entry) === selectedKey}
+                style={style}
+                onSelect={() => onSelect(entry)}
+                onActivate={() => onActivate(entry)}
+              />
+            );
+          }
+          if (entry.kind === 'vault') {
+            return (
+              <VaultRow
+                key={`v${entry.secret.slug}`}
+                secret={entry.secret}
                 index={virtualItem.index}
                 selected={keyOfItem(entry) === selectedKey}
                 style={style}
