@@ -189,8 +189,38 @@ pub fn hide_instead_of_closing<R: Runtime>(
     window: &tauri::Window<R>,
     api: &tauri::CloseRequestApi,
 ) {
-    if window.label() == PALETTE_WINDOW {
+    if should_hide_instead_of_closing(window.label()) {
         api.prevent_close();
         let _ = window.hide();
+    }
+}
+
+/// Which windows are put away rather than destroyed when they are closed.
+///
+/// Both of them: they are created once at startup and shown on demand, so a destroyed one cannot
+/// come back. Settings was missing from here, and closing it meant the settings never opened
+/// again until the application was restarted — `show_settings` looks the window up and quietly
+/// gives up when it is gone.
+///
+/// An unknown label is not covered on purpose. A window added later should decide this for itself
+/// rather than inherit it by being adjacent.
+fn should_hide_instead_of_closing(label: &str) -> bool {
+    matches!(label, PALETTE_WINDOW | SETTINGS_WINDOW)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_windows_are_put_away_rather_than_destroyed() {
+        // Settings had been left out. It is created once at startup with visible: false, so
+        // closing it destroyed the only one there was and show_settings had nothing to show —
+        // the settings simply stopped opening.
+        assert!(should_hide_instead_of_closing(PALETTE_WINDOW));
+        assert!(should_hide_instead_of_closing(SETTINGS_WINDOW));
+
+        // Not a blanket rule: a window added later should say so itself.
+        assert!(!should_hide_instead_of_closing("some-future-window"));
     }
 }

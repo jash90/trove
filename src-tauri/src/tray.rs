@@ -9,7 +9,7 @@ use tauri::{
     AppHandle, Manager, Runtime,
     image::Image,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-    tray::{TrayIconBuilder, TrayIconEvent},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
 use crate::monitor::MonitorControl;
@@ -64,12 +64,30 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri
             on_menu_event(app, &event, &menu_control, &pause_item);
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { .. } = event {
+            if let TrayIconEvent::Click {
+                button,
+                button_state,
+                ..
+            } = event
+                && should_toggle(button, button_state)
+            {
                 crate::hotkey::toggle_palette(tray.app_handle());
             }
         })
         .build(app)?;
     Ok(())
+}
+
+/// Whether a tray event is the click that should show or put away the palette.
+///
+/// One physical click arrives twice — once pressed, once released — so matching the event without
+/// looking at its state ran the toggle twice and the palette appeared and vanished. `Up` is the
+/// half that means the click finished.
+///
+/// The right button belongs to the menu, which opens on its own; toggling the palette underneath
+/// it was the same over-broad match.
+fn should_toggle(button: MouseButton, state: MouseButtonState) -> bool {
+    matches!(button, MouseButton::Left) && matches!(state, MouseButtonState::Up)
 }
 
 fn on_menu_event<R: Runtime>(
@@ -101,6 +119,20 @@ fn show_palette<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_click_toggles_once_and_the_right_button_is_left_to_the_menu() {
+        // The palette appeared and vanished on a single click: the handler matched the event
+        // without its state, so pressing showed it and releasing hid it again.
+        assert!(should_toggle(MouseButton::Left, MouseButtonState::Up));
+        assert!(!should_toggle(MouseButton::Left, MouseButtonState::Down));
+
+        // The menu opens on the right button by itself. Toggling the palette under it was the
+        // same over-broad match, seen from the other side.
+        assert!(!should_toggle(MouseButton::Right, MouseButtonState::Up));
+        assert!(!should_toggle(MouseButton::Right, MouseButtonState::Down));
+        assert!(!should_toggle(MouseButton::Middle, MouseButtonState::Up));
+    }
 
     #[test]
     fn the_pause_entry_says_what_pressing_it_will_do() {
