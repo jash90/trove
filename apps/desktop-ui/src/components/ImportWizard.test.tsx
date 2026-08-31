@@ -217,6 +217,8 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
     keyvaultPairStart: vi.fn(async () => 'A1B2-C3D4'),
     keyvaultPairPoll: vi.fn(async () => ({ status: 'paired' as const })),
     keyvaultPairCancel: vi.fn(async () => undefined),
+    keyvaultIdentity: vi.fn(async () => ({ paired: false, url: null })),
+    keyvaultResetPairing: vi.fn(async () => undefined),
     ...overrides,
   }) as ClipboardGateway;
 

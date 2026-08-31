@@ -23,6 +23,7 @@ import {
   type SearchRequest,
   type StorageStats,
   type Thumbnail,
+  type KeyvaultIdentity,
   type PairingStatus,
 } from './contracts';
 import { mockGateway } from './mockGateway';
@@ -65,6 +66,15 @@ export interface ClipboardGateway {
   keyvaultPairStart(url: string): Promise<string>;
   keyvaultPairPoll(): Promise<{ status: PairingStatus }>;
   keyvaultPairCancel(): Promise<void>;
+  /** Whether this device is paired and which vault it knows. A file read, not a request. */
+  keyvaultIdentity(): Promise<KeyvaultIdentity>;
+  /**
+   * Forgets this device's pairing so it can pair again.
+   *
+   * Local only: the device registered in the vault keeps existing, because revoking it needs an
+   * account and this application holds a token. The next pairing offers to retire it.
+   */
+  keyvaultResetPairing(): Promise<void>;
   /**
    * Calls back whenever the core records something new. Returns a function
    * that stops listening; without it the palette would show a history that is
@@ -166,6 +176,8 @@ export const tauriGateway: ClipboardGateway = {
   keyvaultPairStart: (url) => invoke<string>('keyvault_pair_start', { url }),
   keyvaultPairPoll: () => invoke<{ status: PairingStatus }>('keyvault_pair_poll'),
   keyvaultPairCancel: () => invoke<void>('keyvault_pair_cancel'),
+  keyvaultIdentity: () => invoke<KeyvaultIdentity>('keyvault_identity'),
+  keyvaultResetPairing: () => invoke<void>('keyvault_reset_pairing'),
   onHistoryChanged: (listener) => subscribe('history-changed', listener),
   getThumbnail: (eventId) => invoke<Thumbnail | null>('get_thumbnail', { eventId }),
   getSettings: () => invoke<AppSettings>('get_settings'),

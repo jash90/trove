@@ -82,6 +82,8 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
     keyvaultPairStart: vi.fn(async () => 'A1B2-C3D4'),
     keyvaultPairPoll: vi.fn(async () => ({ status: 'paired' as const })),
     keyvaultPairCancel: vi.fn(async () => undefined),
+    keyvaultIdentity: vi.fn(async () => ({ paired: false, url: null })),
+    keyvaultResetPairing: vi.fn(async () => undefined),
     ...overrides,
   }) as ClipboardGateway;
 
@@ -358,33 +360,29 @@ describe('Settings page and storage semantics', () => {
 });
 
 describe('keyvault section', () => {
-  it('saves the overrides and never asks for a private key', async () => {
+  it('remembers the address and never asks for a token or a key', async () => {
     const gateway = makeGateway();
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
 
-    // The key belongs to the device identity file. There is deliberately no
-    // field for it here, and this is the assertion that keeps one from coming
-    // back: a second copy of the key is what the identity file exists to stop.
+    // Neither belongs to this pane. The key was never ours; the token comes from pairing, and a
+    // pasted one only ever shadowed it — which is how a successful pairing reported a refusal.
     expect(screen.queryByLabelText(/Private key/u)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Agent token/u)).not.toBeInTheDocument();
 
     await userEvent.type(screen.getByLabelText(/Vault address/u), 'https://vault.example.invalid');
-    await userEvent.type(screen.getByLabelText(/Agent token/u), 'kv_synthetic-token');
     fireEvent.submit(screen.getByRole('button', { name: 'Save settings' }).closest('form')!);
 
     await waitFor(() => {
       expect(gateway.saveSettings).toHaveBeenCalledWith(
         expect.objectContaining({
-          keyvault: {
-            url: 'https://vault.example.invalid',
-            token: 'kv_synthetic-token',
-          },
+          keyvault: { url: 'https://vault.example.invalid', token: null },
         }),
       );
     });
   });
 
-  it('leaves both overrides absent when the fields are untouched', async () => {
+  it('sends no address when the field is untouched', async () => {
     const gateway = makeGateway();
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
@@ -421,7 +419,6 @@ describe('keyvault section', () => {
     await loadSettings();
 
     await userEvent.type(screen.getByLabelText(/Vault address/u), 'https://old.example.invalid');
-    expect(await screen.findByText(/override the paired device identity/u)).toBeVisible();
 
     await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
 
@@ -435,23 +432,28 @@ describe('keyvault section', () => {
     await waitFor(() => {
       expect(screen.getByLabelText(/Vault address/u)).toHaveValue('');
     });
-    expect(screen.queryByText(/override the paired device identity/u)).not.toBeInTheDocument();
   };
 
-  it('says plainly when a leftover override is what the vault is being asked with', async () => {
+  it('locks the address once paired and offers a reset instead', async () => {
     const gateway = makeGateway();
+    gateway.keyvaultIdentity = vi.fn(async () => ({
+      paired: true,
+      url: 'https://trustworthy-eagle-783.convex.site',
+    })) as typeof gateway.keyvaultIdentity;
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
 
-    // Nothing typed: the pairing is in charge and there is nothing to warn about.
-    expect(screen.queryByText(/override the paired device identity/u)).not.toBeInTheDocument();
+    // Shown, so it is obvious which vault this is, and locked, because editing it would change
+    // nothing: reads go to the pairing. A field that looks editable and is ignored is the trap
+    // this pane used to be.
+    const address = await screen.findByLabelText(/Vault address/u);
+    await waitFor(() => expect(address).toBeDisabled());
+    expect(address).toHaveValue('https://trustworthy-eagle-783.convex.site');
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeDisabled();
 
-    // A token left over from an earlier configuration silently outranks a working pairing and
-    // the vault answers 401. The pane used to show a filled field and a refusal without ever
-    // connecting the two, which is exactly how that went unnoticed.
-    await userEvent.type(screen.getByLabelText(/Agent token/u), 'kv_stale0123456789');
+    await userEvent.click(screen.getByRole('button', { name: 'Reset' }));
 
-    expect(await screen.findByText(/override the paired device identity/u)).toBeVisible();
+    await waitFor(() => expect(gateway.keyvaultResetPairing).toHaveBeenCalledOnce());
   });
 
   it('connects with an empty address, because after the first pairing there is none to type', async () => {

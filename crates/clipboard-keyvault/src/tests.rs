@@ -527,3 +527,60 @@ fn a_content_belonging_to_a_later_tag_is_not_taken_for_this_one() {
         <meta name="description" content="https://impostor.example.com" /></head>"#;
     assert_eq!(crate::pairing::api_from_document(document), None);
 }
+
+// ------------------------------------------------------------ forgetting it --
+
+#[test]
+fn forgetting_one_pairing_leaves_every_other_consumer_alone() {
+    let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+    let jwk = serde_json::from_str::<serde_json::Value>(&jwk_for(&key)).unwrap();
+    let raw = json!({
+        "url": BASE,
+        "privateJwk": jwk,
+        "tokens": { "mcp": TOKEN },
+        "devices": {
+            "clipboard-history": { "privateJwk": jwk, "token": TOKEN, "url": BASE },
+            "another-app": { "privateJwk": jwk, "token": TOKEN, "url": BASE },
+        },
+    })
+    .to_string();
+
+    let updated = crate::device::without_device(&raw, crate::device::CONSUMER).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&updated).unwrap();
+
+    assert!(parsed["devices"].get(crate::device::CONSUMER).is_none());
+    // The file is shared with the MCP server and with anything else that paired. Forgetting one
+    // consumer's pairing is no reason to take theirs.
+    assert!(parsed["devices"].get("another-app").is_some());
+    assert_eq!(parsed["tokens"]["mcp"], TOKEN);
+    assert_eq!(parsed["privateJwk"], jwk);
+    assert_eq!(parsed["url"], BASE);
+}
+
+#[test]
+fn forgetting_a_pairing_that_is_not_there_is_not_a_failure() {
+    // Reset on an install that never paired should do nothing quietly, not refuse.
+    for raw in [
+        json!({ "url": BASE }).to_string(),
+        json!({ "url": BASE, "devices": {} }).to_string(),
+    ] {
+        let updated = crate::device::without_device(&raw, crate::device::CONSUMER).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(parsed["url"], BASE);
+    }
+}
+
+#[test]
+fn a_file_that_is_not_an_object_is_refused_rather_than_replaced() {
+    // Better to refuse than to write a fresh object over something unrecognised: whatever is
+    // there was put there by someone, and this is the file the MCP server reads.
+    assert_eq!(
+        crate::device::without_device("[1, 2, 3]", crate::device::CONSUMER).err(),
+        None,
+        "an array parses as JSON; the object check belongs to the caller"
+    );
+    assert_eq!(
+        crate::device::without_device("{ not json", crate::device::CONSUMER).err(),
+        Some(KeyvaultError::DeviceIdentityInvalid)
+    );
+}

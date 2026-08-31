@@ -55,6 +55,8 @@ macro_rules! clipboard_history_command_registry {
             keyvault_pair_start => $crate::commands::keyvault_pair_start,
             keyvault_pair_poll => $crate::commands::keyvault_pair_poll,
             keyvault_pair_cancel => $crate::commands::keyvault_pair_cancel,
+            keyvault_identity => $crate::commands::keyvault_identity,
+            keyvault_reset_pairing => $crate::commands::keyvault_reset_pairing,
         }
     };
 }
@@ -159,8 +161,16 @@ pub struct AppSettingsDto {
 #[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KeyvaultSettingsDto {
+    /// The vault address, remembered so the pane can show it and Connect can start from it.
+    ///
+    /// Remembered, not obeyed: reads go to the paired identity. It used to override that, which
+    /// is how a web address typed here sent reads to a host that answers 405 and reported it as
+    /// unreachable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Written by versions in which this overrode the paired identity. Ignored on read and
+    /// dropped on the next save: a stale one outranked a working pairing and made a pairing that
+    /// had just succeeded report a refused token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     /// Written by versions that kept the key here. Skipped on serialize, so
@@ -186,17 +196,13 @@ impl std::fmt::Debug for KeyvaultSettingsDto {
 }
 
 impl KeyvaultSettingsDto {
-    /// The overrides that are actually set. Either may be absent, and usually
-    /// both are: the identity file is the ordinary source of both values.
-    pub(crate) fn overrides(&self) -> (Option<String>, Option<String>) {
-        let field = |value: &Option<String>| {
-            value
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        };
-        (field(&self.url), field(&self.token))
+    /// The remembered vault address, if one was ever typed.
+    pub(crate) fn address(&self) -> Option<String> {
+        self.url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
     }
 }
 
@@ -1124,9 +1130,12 @@ pub async fn save_settings_service(
 ) -> Result<AppSettingsDto, String> {
     // A cleared keyvault field arrives as an empty string from the form;
     // storing it as absent keeps the row saying what it means.
+    // None of it is stored any more: the vault is configured by pairing, which writes the device
+    // identity file. Saving is also the migration for a row an older version left values in.
     let keyvault = KeyvaultSettingsDto {
         url: normalize_keyvault_field(&settings.keyvault.url),
-        token: normalize_keyvault_field(&settings.keyvault.token),
+        // Never stored: the token comes from pairing, and a pasted one only ever shadowed it.
+        token: None,
         // Never stored: the key belongs to the device identity file. Writing
         // None here is also the migration — the first save after upgrading
         // clears whatever an older version left in the row.
@@ -1157,11 +1166,21 @@ pub async fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppSettin
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn keyvault_list(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<clipboard_keyvault::SecretRef>, String> {
+pub async fn keyvault_list() -> Result<Vec<clipboard_keyvault::SecretRef>, String> {
     crate::keyvault::throttle(current_time_ms())?;
-    crate::keyvault::list_service(state.inner()).await
+    crate::keyvault::list_service().await
+}
+
+/// Whether this device is paired, and which vault it knows.
+#[tauri::command]
+pub async fn keyvault_identity() -> Result<crate::keyvault::IdentityDto, String> {
+    Ok(crate::keyvault::identity_service())
+}
+
+/// Forgets the pairing so the device can pair again. Local only — see the service.
+#[tauri::command]
+pub async fn keyvault_reset_pairing(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    crate::keyvault::reset_pairing_service(state.inner()).await
 }
 
 /// Starts pairing with a vault and returns the fingerprint the interface must show.
@@ -1191,16 +1210,10 @@ pub async fn keyvault_pair_cancel() -> Result<(), String> {
 #[tauri::command(rename_all = "camelCase")]
 pub async fn keyvault_copy_secret<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
-    state: tauri::State<'_, AppState>,
     slug: String,
 ) -> Result<(), String> {
     crate::keyvault::throttle(current_time_ms())?;
-    let store = state.store.clone();
-    let settings = run_blocking("settings_unavailable", move || {
-        get_settings_blocking(&store)
-    })
-    .await?;
-    let config = crate::keyvault::config_from(&settings)?;
+    let config = crate::keyvault::config_from()?;
     let transport = clipboard_keyvault::ReqwestSecretTransport::new(&config)
         .map_err(|error| error.to_string())?;
     crate::keyvault::copy_secret_service(&app, transport, &config, &slug).await
@@ -1479,17 +1492,13 @@ fn validate_settings(settings: &AppSettingsDto) -> Result<(), String> {
                 && !app.chars().any(char::is_control)
                 && unique_apps.insert(app.as_str())
         });
-    // Overrides are independent now — either may stand alone over the identity
-    // file — so each is checked on its own rather than as an all-or-nothing
-    // triple. An override that cannot be a URL or a token is still a settings
-    // error rather than a surprise at copy time.
-    let (url_override, token_override) = settings.keyvault.overrides();
-    let keyvault_is_valid = url_override
+    // The address is remembered, not obeyed, but a value that cannot be an address is still
+    // worth refusing here rather than at the moment someone presses Connect.
+    let keyvault_is_valid = settings
+        .keyvault
+        .address()
         .as_deref()
-        .is_none_or(|url| clipboard_keyvault::validate_base_url(url).is_ok())
-        && token_override
-            .as_deref()
-            .is_none_or(|token| clipboard_keyvault::validate_token(token).is_ok());
+        .is_none_or(|url| clipboard_keyvault::validate_base_url(url).is_ok());
     if settings.schema_version != 1
         || !retention_is_valid
         || !hotkey_is_valid

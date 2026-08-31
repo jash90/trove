@@ -17,7 +17,7 @@ use clipboard_keyvault::{
 };
 use tauri::{AppHandle, Manager, Runtime};
 
-use crate::{commands::AppSettingsDto, state::AppState};
+use crate::state::AppState;
 
 /// The vault rate-limits a token to sixty requests a minute; spacing this
 /// application's reads a little past a second keeps a settings screen from
@@ -34,8 +34,8 @@ const MIN_REQUEST_INTERVAL_MS: i64 = 1_050;
 ///
 /// A missing identity is the ordinary unconfigured state and says so. A
 /// malformed one is a different answer, because a typo deserves to be named.
-pub fn config_from(settings: &AppSettingsDto) -> Result<KeyvaultConfig, String> {
-    let mut config = match clipboard_keyvault::load_device_identity(clipboard_keyvault::CONSUMER) {
+pub fn config_from() -> Result<KeyvaultConfig, String> {
+    let config = match clipboard_keyvault::load_device_identity(clipboard_keyvault::CONSUMER) {
         Ok(config) => config,
         Err(clipboard_keyvault::KeyvaultError::DeviceIdentityMissing) => {
             return Err("keyvault_not_configured".to_owned());
@@ -43,16 +43,12 @@ pub fn config_from(settings: &AppSettingsDto) -> Result<KeyvaultConfig, String> 
         Err(error) => return Err(error.to_string()),
     };
 
-    let (url_override, token_override) = settings.keyvault.overrides();
-    if let Some(url) = url_override {
-        config.base_url = url;
-    }
-    if let Some(token) = token_override {
-        config.token = token;
-    }
-
-    // The identity file validated itself when it was read; this re-checks the
-    // merge, which is the part no earlier step has seen.
+    // The identity is the whole configuration. Settings used to be able to override the URL and
+    // the token, and every fault in this feature came through that door: a revoked token left in
+    // the row outranked a working pairing and produced a 401, and a web address typed into the
+    // URL sent reads to a host that answers 405. Both were invited by fields that looked like
+    // configuration and behaved like a trap. Pointing an install at a different vault is what
+    // pairing is for, and the identity file is where a person edits one by hand.
     config
         .validate()
         .map_err(|_| "keyvault_invalid_config".to_owned())?;
@@ -78,13 +74,8 @@ pub fn throttle(now_ms: i64) -> Result<(), String> {
 }
 
 /// Lists the secrets the token may read — metadata only, nothing sealed.
-pub async fn list_service(state: &AppState) -> Result<Vec<clipboard_keyvault::SecretRef>, String> {
-    let store = state.store.clone();
-    let settings = crate::commands::run_blocking("settings_unavailable", move || {
-        crate::commands::get_settings_blocking(&store)
-    })
-    .await?;
-    let config = config_from(&settings)?;
+pub async fn list_service() -> Result<Vec<clipboard_keyvault::SecretRef>, String> {
+    let config = config_from()?;
     let transport = ReqwestSecretTransport::new(&config).map_err(|error| error.to_string())?;
     KeyvaultClient::new(transport)
         .list()
@@ -286,14 +277,9 @@ pub async fn pair_poll_service(state: &AppState) -> Result<PairingStatusDto, Str
 
 /// Drops the URL and token overrides once a pairing has replaced them.
 ///
-/// A pairing is an act of configuration, so whatever was configured before it is stale by
-/// definition — and a stale token override is not inert: `config_from` lays overrides over the
-/// device identity, so a revoked one shadows the working token pairing just installed and the
-/// vault answers 401. That is the bug this exists to prevent, and it is invisible from the
-/// interface, which shows filled fields and a refusal without connecting the two.
-///
-/// An override set *after* pairing still wins. The rule is unchanged — the last thing configured
-/// wins — except that pairing now counts as configuring.
+/// The token and key a previous version could store here are gone from the read path entirely,
+/// but a row written by one still carries them. Clearing on a pairing is what finally removes
+/// them from an install that has been through those versions.
 pub async fn clear_settings_overrides(state: &AppState) -> Result<(), String> {
     let store = state.store.clone();
     let settings = crate::commands::run_blocking("settings_unavailable", move || {
@@ -362,4 +348,41 @@ fn open_in_browser(url: &str) -> Result<(), String> {
         let _ = url;
         Err("keyvault_browser_failed".to_owned())
     }
+}
+
+/// What the settings pane needs to show about this device's pairing.
+///
+/// A file read, not a request: the pane asks on every open and the answer is on disk. Whether a
+/// vault can actually be reached is what Test connection is for.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityDto {
+    pub paired: bool,
+    /// The vault this device knows, paired or not. It is what the address field displays, and
+    /// what a Reset leaves behind so pairing again is one press rather than a retyping.
+    pub url: Option<String>,
+}
+
+/// Reports the pairing state.
+///
+/// The identity is the truth here, not the settings row — the row has been wrong before, and
+/// showing a value nobody is using is how the last round of confusion started.
+pub fn identity_service() -> IdentityDto {
+    IdentityDto {
+        paired: clipboard_keyvault::load_device_identity(clipboard_keyvault::CONSUMER).is_ok(),
+        url: clipboard_keyvault::known_base_url(clipboard_keyvault::CONSUMER),
+    }
+}
+
+/// Forgets this device's pairing so it can pair again.
+///
+/// Local only. The device registered in the vault keeps existing: revoking it is an authenticated
+/// mutation, and this application holds a token rather than an account. The next pairing offers to
+/// retire it and the vault's Devices screen can do it by hand — which the interface says, because
+/// a "Reset" that quietly leaves a working credential behind would be a lie.
+pub async fn reset_pairing_service(state: &AppState) -> Result<(), String> {
+    clipboard_keyvault::forget_paired(clipboard_keyvault::CONSUMER)
+        .map_err(|error| error.to_string())?;
+    // The row's vestigial fields go too, so nothing is left to reappear in the pane.
+    clear_settings_overrides(state).await
 }

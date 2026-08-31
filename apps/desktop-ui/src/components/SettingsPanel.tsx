@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type FormEventHandler, type KeyboardEventH
 
 import type {
   AppSettings,
+  KeyvaultIdentity,
   ExportSummary as ExportSummaryContract,
   KeyvaultSecret,
   StorageStats as StorageStatsContract,
@@ -201,10 +202,12 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [stats, setStats] = useState<StorageStatsContract | null>(null);
   const [linkPreviews, setLinkPreviews] = useState(true);
   const [vaultUrl, setVaultUrl] = useState('');
-  const [vaultToken, setVaultToken] = useState('');
   const [vaultSecrets, setVaultSecrets] = useState<KeyvaultSecret[] | null>(null);
   const [pairFingerprint, setPairFingerprint] = useState<string | null>(null);
   const [pairNotice, setPairNotice] = useState<string | null>(null);
+  // What the device actually knows, as opposed to what the settings row remembers. The row has
+  // been wrong before, and showing a value nobody is using is how the last confusion started.
+  const [identity, setIdentity] = useState<KeyvaultIdentity | null>(null);
   const [vaultBusy, setVaultBusy] = useState(false);
   const [vaultError, setVaultError] = useState<string | null>(null);
   const [vaultCopiedSlug, setVaultCopiedSlug] = useState<string | null>(null);
@@ -224,12 +227,14 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [settings, native] = await Promise.all([
+      const [settings, native, paired] = await Promise.all([
         gateway.getSettings(),
         gateway.isAutostartEnabled().catch(() => null),
+        gateway.keyvaultIdentity().catch(() => null),
       ]);
       if (cancelled) return;
       setPersisted(settings);
+      setIdentity(paired);
       setHotkey(settings.hotkey);
       setAutostart(settings.autostart);
       setNativeAutostart(native);
@@ -238,7 +243,6 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setDenylist(settings.denylistedApps.join('\n'));
       setLinkPreviews(settings.linkPreviews);
       setVaultUrl(settings.keyvault.url ?? '');
-      setVaultToken(settings.keyvault.token ?? '');
     })();
     return () => {
       cancelled = true;
@@ -312,10 +316,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       // Overrides over the device identity file, each independent of the
       // other. A blank field travels as an absent one, meaning "use the
       // device's value". The private key is never sent: it is not ours to hold.
-      keyvault: {
-        url: vaultUrl.trim() || null,
-        token: vaultToken.trim() || null,
-      },
+      // The address is remembered so the pane can show it and Connect can start from it. The
+      // token is not ours to hold: it comes from pairing.
+      keyvault: { url: vaultUrl.trim() || null, token: null },
     };
 
     void (async () => {
@@ -373,6 +376,29 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
     setVaultBusy(false);
   };
 
+  const paired = identity?.paired === true;
+
+  /**
+   * Forgets the pairing so the device can connect again.
+   *
+   * The address it knew is kept in the field, so pairing again is one press rather than a
+   * retyping — which is the whole point of remembering it.
+   */
+  const resetPairing = async (): Promise<void> => {
+    setVaultError(null);
+    setVaultSecrets(null);
+    setPairNotice(null);
+    const previous = identity?.url ?? '';
+    try {
+      await gateway.keyvaultResetPairing();
+      setIdentity(await gateway.keyvaultIdentity());
+      setVaultUrl(previous);
+      setPairNotice('Pairing forgotten. Connect again when you are ready.');
+    } catch (error) {
+      setVaultError(keyvaultErrorMessage(vaultErrorCode(error)));
+    }
+  };
+
   const cancelPairing = async (): Promise<void> => {
     setPairFingerprint(null);
     setPairNotice(null);
@@ -401,10 +427,13 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
             // pairing that just replaced them, which is the opposite of true — and if anyone
             // then presses Save, the stale text is written back and really does break it.
             try {
-              const settings = await gateway.getSettings();
+              const [settings, paired] = await Promise.all([
+                gateway.getSettings(),
+                gateway.keyvaultIdentity().catch(() => null),
+              ]);
               setPersisted(settings);
+              setIdentity(paired);
               setVaultUrl(settings.keyvault.url ?? '');
-              setVaultToken(settings.keyvault.token ?? '');
             } catch {
               /* the pairing stands regardless; the next open reloads these anyway */
             }
@@ -662,49 +691,51 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                   autoComplete="off"
                   spellCheck={false}
                   placeholder="https://your-vault.example.com"
-                  value={vaultUrl}
+                  // Locked once paired, and showing what the device actually uses rather than
+                  // what the settings row remembers. Editing it would change nothing — reads go
+                  // to the pairing — and a field that looks editable and is ignored is precisely
+                  // the trap this pane used to be.
+                  value={paired ? (identity?.url ?? '') : vaultUrl}
+                  disabled={paired}
                   onChange={(event) => setVaultUrl(event.currentTarget.value)}
                 />
               </label>
-              <label className="settings-field" htmlFor="settings-keyvault-token">
-                <span>Agent token</span>
-                <input
-                  id="settings-keyvault-token"
-                  type="password"
-                  autoComplete="off"
-                  spellCheck={false}
-                  value={vaultToken}
-                  onChange={(event) => setVaultToken(event.currentTarget.value)}
-                />
-              </label>
-              {vaultToken.trim() || vaultUrl.trim() ? (
-                <p className="workflow-alert" role="status">
-                  These override the paired device identity — the vault is contacted with what is
-                  typed here, not with what connecting set up. Clear them to use the pairing.
-                </p>
-              ) : null}
               <p className="settings-help">
-                <strong>Connect</strong> pairs this device: it generates a key here, sends only
-                the public half, and the browser hands back a token of its own — nothing is
-                pasted, and the key never leaves this machine. The address below is the one you
-                open your vault at in a browser, and it is needed only the first time — once
-                paired, connecting again needs nothing typed at all, so there is no reason to
-                leave anything in these fields. Both are optional: leave them blank and this
-                application uses the
-                device’s shared vault identity at <code>~/.config/keyvault/agent.json</code>,
-                which is also where the private key lives — it is never stored here. Fill one in
-                only to point this install at a different vault. The vault answers with sealed
-                envelopes; a copied key goes to the clipboard without ever being recorded in the
-                history or shown here.
+                {paired ? (
+                  <>
+                    This device is paired. It has its own key and its own token, and neither can
+                    be typed in here. <strong>Reset</strong> forgets the pairing so you can
+                    connect again — it only forgets it locally, so the device stays listed in the
+                    vault until the next pairing retires it or you revoke it there.
+                  </>
+                ) : (
+                  <>
+                    <strong>Connect</strong> pairs this device: it generates a key here, sends
+                    only the public half, and the browser hands back a token of its own — nothing
+                    is pasted, and the key never leaves this machine. Put in the address you open
+                    your vault at in a browser. The vault answers with sealed envelopes; a copied
+                    key goes to the clipboard without ever being recorded in the history or shown
+                    here.
+                  </>
+                )}
               </p>
               <div className="workflow-actions workflow-actions--start">
                 <button
                   type="button"
                   onClick={() => void connectToVault()}
-                  disabled={vaultBusy || pending || pairFingerprint !== null}
+                  disabled={vaultBusy || pending || paired || pairFingerprint !== null}
                 >
                   {pairFingerprint !== null ? 'Waiting for approval…' : 'Connect'}
                 </button>
+                {paired ? (
+                  <button
+                    type="button"
+                    onClick={() => void resetPairing()}
+                    disabled={vaultBusy || pending || pairFingerprint !== null}
+                  >
+                    Reset
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => void testVaultConnection()}

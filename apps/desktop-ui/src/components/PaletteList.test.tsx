@@ -110,6 +110,8 @@ const makeGateway = (search: ClipboardGateway['search']): ClipboardGateway =>
     // rejected promise would have been handled, and takes the render down with it.
     keyvaultList: vi.fn(async () => []),
     keyvaultCopySecret: vi.fn(async () => undefined),
+    keyvaultIdentity: vi.fn(async () => ({ paired: false, url: null })),
+    keyvaultResetPairing: vi.fn(async () => undefined),
     preview: vi.fn(async (eventId: number) => ({
       eventId,
       kind: 'text',

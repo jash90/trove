@@ -97,6 +97,12 @@ export interface AppSettings {
  * `idle` means nothing is in flight — the answer after a pairing finished or was abandoned, so
  * the interface can stop its timer without needing to remember why.
  */
+/** Whether this device has paired, and which vault it knows. */
+export interface KeyvaultIdentity {
+  paired: boolean;
+  url: string | null;
+}
+
 export type PairingStatus =
   | 'idle'
   | 'pending'

@@ -202,6 +202,49 @@ pub fn known_base_url_in(raw: &str, consumer: &str) -> Option<String> {
         .filter(|url| crate::validate_base_url(url).is_ok())
 }
 
+/// Reads the identity file as a JSON object.
+///
+/// A missing file is an empty object, not an error: the first pairing on a fresh machine is
+/// exactly the case pairing exists to serve.
+fn read_root(path: &std::path::Path) -> Result<serde_json::Value, KeyvaultError> {
+    let root = match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw)
+            .map_err(|_| KeyvaultError::DeviceIdentityInvalid)?,
+        Err(_) => serde_json::json!({}),
+    };
+    if !root.is_object() {
+        return Err(KeyvaultError::DeviceIdentityInvalid);
+    }
+    Ok(root)
+}
+
+/// Writes the object back, owner-only, through a neighbour and a rename.
+///
+/// Never in place: a crash mid-write would truncate the file the MCP server reads too, taking out
+/// a consumer that had nothing to do with this change.
+fn write_root(path: &std::path::Path, root: &serde_json::Value) -> Result<(), KeyvaultError> {
+    use std::io::Write;
+
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
+        set_owner_only(directory, 0o700);
+    }
+    let body =
+        serde_json::to_string_pretty(root).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
+    let temporary = path.with_extension("json.tmp-pairing");
+    {
+        let mut file =
+            std::fs::File::create(&temporary).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
+        set_owner_only(&temporary, 0o600);
+        file.write_all(body.as_bytes())
+            .and_then(|()| file.write_all(b"\n"))
+            .map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
+    }
+    std::fs::rename(&temporary, path).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
+    set_owner_only(path, 0o600);
+    Ok(())
+}
+
 /// Records what a pairing produced, leaving everything else in the file as it was.
 ///
 /// Read-modify-write rather than a rewrite: the file is shared with the MCP server, and pairing
@@ -212,20 +255,8 @@ pub fn save_paired(
     private_jwk: &str,
     token: &str,
 ) -> Result<PathBuf, KeyvaultError> {
-    use std::io::Write;
-
     let path = agent_file_path().ok_or(KeyvaultError::DeviceIdentityMissing)?;
-    let mut root = match std::fs::read_to_string(&path) {
-        Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw)
-            .map_err(|_| KeyvaultError::DeviceIdentityInvalid)?,
-        // No file yet is the ordinary first-pairing case on a fresh machine, which is exactly the
-        // case pairing exists to serve.
-        Err(_) => serde_json::json!({}),
-    };
-    if !root.is_object() {
-        return Err(KeyvaultError::DeviceIdentityInvalid);
-    }
-
+    let mut root = read_root(&path)?;
     let key: serde_json::Value =
         serde_json::from_str(private_jwk).map_err(|_| KeyvaultError::InvalidPrivateKey)?;
     root["devices"][consumer] = serde_json::json!({
@@ -233,27 +264,39 @@ pub fn save_paired(
         "token": token,
         "url": url,
     });
-
-    if let Some(directory) = path.parent() {
-        std::fs::create_dir_all(directory).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
-        set_owner_only(directory, 0o700);
-    }
-    let body =
-        serde_json::to_string_pretty(&root).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
-    // Written to a neighbour and renamed: a crash mid-write would otherwise truncate the file the
-    // MCP server reads, taking out a consumer that had nothing to do with this pairing.
-    let temporary = path.with_extension("json.tmp-pairing");
-    {
-        let mut file =
-            std::fs::File::create(&temporary).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
-        set_owner_only(&temporary, 0o600);
-        file.write_all(body.as_bytes())
-            .and_then(|()| file.write_all(b"\n"))
-            .map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
-    }
-    std::fs::rename(&temporary, &path).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
-    set_owner_only(&path, 0o600);
+    write_root(&path, &root)?;
     Ok(path)
+}
+
+/// Drops one consumer's pairing, so it can pair again.
+///
+/// Only that consumer's entry. The file holds the shared key the MCP server reads and any other
+/// consumer's pairing, and forgetting this one's is no reason to take theirs.
+///
+/// Local only: the device registered in the vault keeps existing, because revoking it is an
+/// authenticated mutation and this application holds a token, not an account. The next pairing
+/// offers to retire it, and the vault's Devices screen can do it by hand.
+pub fn forget_paired(consumer: &str) -> Result<(), KeyvaultError> {
+    let path = agent_file_path().ok_or(KeyvaultError::DeviceIdentityMissing)?;
+    let root = read_root(&path)?;
+    let body = serde_json::to_string(&root).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
+    let updated = without_device(&body, consumer)?;
+    let root: serde_json::Value =
+        serde_json::from_str(&updated).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
+    write_root(&path, &root)
+}
+
+/// The editing half, separated so tests need neither a filesystem nor the process environment.
+///
+/// A consumer that was not paired is not an error: Reset on an unpaired install should be a
+/// no-op, not a refusal.
+pub fn without_device(raw: &str, consumer: &str) -> Result<String, KeyvaultError> {
+    let mut root: serde_json::Value =
+        serde_json::from_str(raw).map_err(|_| KeyvaultError::DeviceIdentityInvalid)?;
+    if let Some(devices) = root.get_mut("devices").and_then(|d| d.as_object_mut()) {
+        devices.remove(consumer);
+    }
+    serde_json::to_string(&root).map_err(|_| KeyvaultError::DeviceIdentityInvalid)
 }
 
 #[cfg(unix)]

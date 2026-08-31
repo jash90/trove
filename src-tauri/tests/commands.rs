@@ -596,6 +596,8 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "keyvault_pair_start",
             "keyvault_pair_poll",
             "keyvault_pair_cancel",
+            "keyvault_identity",
+            "keyvault_reset_pairing",
         ]
     );
 
@@ -1806,40 +1808,45 @@ async fn keyvault_settings_default_off_and_old_rows_still_parse() {
 }
 
 #[tokio::test]
-async fn keyvault_setting_overrides_are_independent_and_the_key_is_never_stored() {
+async fn the_address_is_remembered_and_the_token_never_is() {
     isolate_device_identity();
     let directory = tempfile::tempdir().unwrap();
     let state = AppState::open_data_dir(directory.path()).unwrap();
 
-    // Each override stands alone over the identity file. A URL without a token
-    // is the ordinary shape for pointing one install at a local backend, and it
-    // is no longer the half-configured error it used to be.
-    let mut url_only = AppSettingsDto::default();
-    url_only.keyvault.url = Some("http://127.0.0.1:3211".to_owned());
-    commands::save_settings_service(&state, url_only)
+    // The address is kept so the pane can show it and Connect can start from it. It is
+    // remembered, not obeyed: reads go to the paired identity either way.
+    let mut typed = AppSettingsDto::default();
+    typed.keyvault.url = Some("https://trustworthy-eagle-783.convex.site".to_owned());
+    // A token has no business being here. Storing one is what made a successful pairing report a
+    // refused token, so it is dropped rather than validated.
+    typed.keyvault.token = Some("kv_AbCdEf0123456789-_".to_owned());
+    commands::save_settings_service(&state, typed)
         .await
         .unwrap();
 
-    let mut token_only = AppSettingsDto::default();
-    token_only.keyvault.token = Some("kv_AbCdEf0123456789-_".to_owned());
-    commands::save_settings_service(&state, token_only)
-        .await
-        .unwrap();
-
-    // An override that cannot be what it claims is still a settings error.
-    let mut broken_url = AppSettingsDto::default();
-    broken_url.keyvault.url = Some("http://vault.example.com".to_owned());
+    let settings = commands::get_settings_service(&state).await.unwrap();
     assert_eq!(
-        commands::save_settings_service(&state, broken_url)
-            .await
-            .unwrap_err(),
-        "invalid_settings"
+        settings.keyvault.url.as_deref(),
+        Some("https://trustworthy-eagle-783.convex.site")
+    );
+    assert_eq!(settings.keyvault.token, None);
+
+    let stored = state
+        .store
+        .get_setting("app")
+        .unwrap()
+        .expect("just written");
+    assert!(
+        !stored.contains("kv_AbCdEf"),
+        "the token reached the database"
     );
 
-    let mut broken_token = AppSettingsDto::default();
-    broken_token.keyvault.token = Some("not-a-kv-token".to_owned());
+    // A value that could not be an address is still refused here, rather than at the moment
+    // somebody presses Connect.
+    let mut broken = AppSettingsDto::default();
+    broken.keyvault.url = Some("http://vault.example.com".to_owned());
     assert_eq!(
-        commands::save_settings_service(&state, broken_token)
+        commands::save_settings_service(&state, broken)
             .await
             .unwrap_err(),
         "invalid_settings"
@@ -1884,11 +1891,11 @@ async fn saving_settings_scrubs_a_private_key_an_older_version_stored() {
 
 #[tokio::test]
 async fn keyvault_commands_refuse_before_anything_is_configured() {
+    // No AppState: the vault is configured entirely by the device identity now, so an
+    // unconfigured one is unconfigured regardless of what any database says.
     isolate_device_identity();
-    let directory = tempfile::tempdir().unwrap();
-    let state = AppState::open_data_dir(directory.path()).unwrap();
 
-    let error = clipboard_history_app::keyvault::list_service(&state)
+    let error = clipboard_history_app::keyvault::list_service()
         .await
         .unwrap_err();
     assert_eq!(error, "keyvault_not_configured");

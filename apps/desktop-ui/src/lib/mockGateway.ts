@@ -121,6 +121,8 @@ export const mockGateway: ClipboardGateway = {
   keyvaultPairStart: async () => 'A1B2-C3D4',
   keyvaultPairPoll: async () => ({ status: 'paired' as const }),
   keyvaultPairCancel: async () => undefined,
+  keyvaultIdentity: async () => ({ paired: false, url: null }),
+  keyvaultResetPairing: async () => undefined,
   // The browser preview has no core behind it, so nothing ever changes.
   onHistoryChanged: () => () => undefined,
   onLinkPreviewReady: () => () => undefined,

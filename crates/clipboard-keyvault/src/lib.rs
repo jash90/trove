@@ -27,7 +27,8 @@ pub use client::{KeyvaultClient, SecretRef};
 pub use config::{KeyvaultConfig, MAX_TOKEN_BYTES, validate_base_url, validate_token};
 pub use decrypt::{PrivateKey, decrypt_envelope, parse_private_jwk};
 pub use device::{
-    CONSUMER, agent_file_path, known_base_url, load as load_device_identity, save_paired,
+    CONSUMER, agent_file_path, forget_paired, known_base_url, load as load_device_identity,
+    save_paired, without_device,
 };
 pub use envelope::{AgentEnvelope, MAX_ENVELOPE_BYTES};
 pub use http::{ReqwestSecretTransport, SecretResponse, SecretTransport};
