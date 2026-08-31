@@ -23,12 +23,12 @@
       },
       {
         "label": "settings",
-        "title": "Ustawienia — Clipboard History",
+        "title": "Settings — Clipboard History",
         "url": "index.html#settings",
-        "width": 720,
-        "height": 760,
-        "minWidth": 560,
-        "minHeight": 480,
+        "width": 840,
+        "height": 820,
+        "minWidth": 700,
+        "minHeight": 600,
         "center": true,
         "resizable": true,
         "visible": false

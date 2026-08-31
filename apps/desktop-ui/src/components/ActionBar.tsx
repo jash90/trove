@@ -78,7 +78,7 @@ export const ActionBar = ({
         </p>
         <div className="confirmation-sheet__actions">
           <button ref={cancelRef} type="button" disabled={deletePending} onClick={handleCancelDelete}>
-            Anuluj usuwanie
+            Cancel deletion
           </button>
           <button
             type="button"
@@ -98,7 +98,7 @@ export const ActionBar = ({
       <div className="action-bar" aria-label="Actions for the selected entry">
         <button type="button" aria-label="Paste or copy the entry" onClick={onPaste}>
           <ClipboardCopy size={15} aria-hidden="true" />
-          <span>Wklej</span>
+          <span>Paste</span>
         </button>
         <button
           type="button"

@@ -311,7 +311,7 @@ const ClipboardPalette = (): React.JSX.Element => {
             <button
               type="button"
               className="footer-action"
-              aria-label="Importuj archiwum"
+              aria-label="Import an archive"
               onClick={() => setWorkspace('import')}
             >
               Import <kbd>⌘I</kbd>

@@ -371,6 +371,7 @@ describe('Settings page and storage semantics', () => {
       />,
     );
     await loadSettings();
+    await openTab('Storage');
 
     expect(await screen.findByText('Storage figures are unavailable.')).toBeVisible();
     expect(screen.queryByText(`${Number.MAX_SAFE_INTEGER} B`)).not.toBeInTheDocument();
@@ -383,7 +384,7 @@ describe('settings tabs', () => {
     await loadSettings();
 
     const tabs = screen.getAllByRole('tab');
-    expect(tabs).toHaveLength(6);
+    expect(tabs).toHaveLength(7);
     expect(screen.getByRole('tab', { name: 'Shortcut' })).toHaveAttribute('aria-selected', 'true');
 
     // The point of tabs: the other five sections are not on screen competing for the eye.
@@ -393,6 +394,23 @@ describe('settings tabs', () => {
     await openTab('Retention');
     expect(screen.getByRole('spinbutton', { name: 'Days kept' })).toBeVisible();
     expect(screen.queryByRole('textbox', { name: 'Global shortcut' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the storage figures on their own tab and nowhere else', async () => {
+    render(<SettingsPanel gateway={makeGateway()} />);
+    await loadSettings();
+
+    // It used to render on every tab: the tab wrapping went around the six <section> elements
+    // and this one is a sibling component, so it slipped through. Asserting its absence
+    // elsewhere is the assertion that catches that; asserting its presence on its own tab would
+    // have passed the whole time it was wrong.
+    expect(screen.queryByRole('heading', { name: 'Data storage' })).not.toBeInTheDocument();
+
+    await openTab('Retention');
+    expect(screen.queryByRole('heading', { name: 'Data storage' })).not.toBeInTheDocument();
+
+    await openTab('Storage');
+    expect(await screen.findByRole('heading', { name: 'Data storage' })).toBeVisible();
   });
 
   it('moves between tabs with the arrows, so the strip is one stop and not six', async () => {

@@ -1364,7 +1364,9 @@
 }
 
 .settings-page__sheet {
-  max-width: 640px;
+  /* Seven tab labels do not fit in 640, so the strip wrapped to two rows whatever the window
+     width was: this is the constraint, not the window. */
+  max-width: 760px;
   margin: 0 auto;
   padding: 26px 24px 34px;
   display: flex;

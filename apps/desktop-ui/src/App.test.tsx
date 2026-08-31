@@ -16,11 +16,11 @@ it('opens the import wizard over the palette and returns focus to the search fie
   render(<App />);
   const search = screen.getByRole('searchbox');
 
-  await user.click(screen.getByRole('button', { name: 'Importuj archiwum' }));
+  await user.click(screen.getByRole('button', { name: 'Import an archive' }));
   expect(screen.getByRole('dialog', { name: 'Import history' })).toBeVisible();
   expect(screen.getByLabelText('Clipboard history palette')).toHaveAttribute('inert');
 
-  await user.click(screen.getByRole('button', { name: 'Zamknij import' }));
+  await user.click(screen.getByRole('button', { name: 'Close import' }));
   // The palette has one place a keyboard user works from, and a shortcut has
   // no button to hand focus back to.
   await waitFor(() => expect(search).toHaveFocus());

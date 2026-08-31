@@ -25,7 +25,7 @@ export const ImportProgress = ({
       <h2 id="import-progress-title">
         {phase === 'recovering'
           ? 'Odzyskiwanie uruchomionego importu…'
-          : 'Importowanie archiwum…'}
+          : 'Importing the archive…'}
       </h2>
       <div
         className="progress-track"

@@ -33,7 +33,7 @@ export const StorageStats = ({ stats, status }: StorageStatsProps): React.JSX.El
           <h2 id="storage-stats-title">Data storage</h2>
         </div>
       </div>
-      {status === 'loading' ? <p role="status">Obliczanie rozmiaru danych…</p> : null}
+      {status === 'loading' ? <p role="status">Calculating data size…</p> : null}
       {unavailable ? <p role="status">Storage figures are unavailable.</p> : null}
       {status === 'ready' && validated ? (
         <>

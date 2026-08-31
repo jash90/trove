@@ -271,21 +271,21 @@ export const ImportWizard = ({
               onClick={() => void analyze(() => gateway.chooseImportFile())}
             >
               <FileJson size={16} aria-hidden="true" />
-              Wybierz plik eksportu
+              Choose an export file
             </button>
             <button
               type="button"
               onClick={() => void analyze(() => gateway.chooseImportDirectory())}
             >
               <FolderOpen size={16} aria-hidden="true" />
-              Wybierz katalog eksportu
+              Choose an export folder
             </button>
           </div>
         ) : null}
 
         {phase.tag === 'analyzing' ? (
           <p className="workflow-pending" role="status">
-            Analizowanie archiwum…
+            Analysing the archive…
           </p>
         ) : null}
 
@@ -320,7 +320,7 @@ export const ImportWizard = ({
                 Odszyfruj i przeanalizuj
               </button>
               <button type="button" onClick={() => submitPassword(null)}>
-                Anuluj
+                Close
               </button>
             </div>
           </form>
@@ -335,7 +335,7 @@ export const ImportWizard = ({
                 disabled={phase.tag === 'cancelling'}
                 onClick={() => void cancel(phase.analysis)}
               >
-                {phase.tag === 'cancelling' ? 'Anulowanie…' : 'Anuluj import'}
+                {phase.tag === 'cancelling' ? 'Cancelling…' : 'Cancel import'}
               </button>
               <button
                 type="button"
@@ -384,11 +384,11 @@ export const ImportWizard = ({
         <button
           type="button"
           className="workflow-dismiss"
-          aria-label="Zamknij import"
+          aria-label="Close import"
           onClick={requestClose}
         >
           <X size={16} aria-hidden="true" />
-          Zamknij
+          Close
         </button>
       </div>
     </div>

@@ -87,9 +87,9 @@ describe('the palette end to end', () => {
     render(<App gateway={{ ...mockGateway, openSettingsWindow }} />);
     await settle();
 
-    await user.click(screen.getByRole('button', { name: 'Importuj archiwum' }));
+    await user.click(screen.getByRole('button', { name: 'Import an archive' }));
     expect(screen.getByRole('dialog', { name: 'Import history' })).toBeVisible();
-    await user.click(screen.getByRole('button', { name: 'Zamknij import' }));
+    await user.click(screen.getByRole('button', { name: 'Close import' }));
 
     // Settings are their own OS window, so the palette asks for it and keeps
     // showing the list rather than covering it.

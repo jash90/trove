@@ -103,14 +103,14 @@ describe('ImportWizard encrypted exports', () => {
     const user = userEvent.setup();
     const { container } = render(<ImportWizard gateway={gateway} />);
 
-    await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
+    await user.click(screen.getByRole('button', { name: 'Choose an export file' }));
 
     const field = await screen.findByLabelText('Export password');
     await user.type(field, SENTINEL_PASSWORD);
     await user.click(screen.getByRole('button', { name: 'Odszyfruj i przeanalizuj' }));
 
     expect(
-      await screen.findByRole('heading', { name: 'Archiwum gotowe do importu' }),
+      await screen.findByRole('heading', { name: 'Archive ready to import' }),
     ).toBeVisible();
     expect(analyzeImport).toHaveBeenLastCalledWith(ENCRYPTED_PATH, SENTINEL_PASSWORD);
     // Neither the password nor the path may survive into the rendered tree.
@@ -129,7 +129,7 @@ describe('ImportWizard encrypted exports', () => {
     const user = userEvent.setup();
     const { container } = render(<ImportWizard gateway={gateway} />);
 
-    await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
+    await user.click(screen.getByRole('button', { name: 'Choose an export file' }));
     await user.type(await screen.findByLabelText('Export password'), SENTINEL_PASSWORD);
     await user.click(screen.getByRole('button', { name: 'Odszyfruj i przeanalizuj' }));
 
@@ -145,7 +145,7 @@ describe('ImportWizard encrypted exports', () => {
     await user.click(screen.getByRole('button', { name: 'Odszyfruj i przeanalizuj' }));
 
     expect(
-      await screen.findByRole('heading', { name: 'Archiwum gotowe do importu' }),
+      await screen.findByRole('heading', { name: 'Archive ready to import' }),
     ).toBeVisible();
     // One pick, three analyses: the file was chosen once and only the password
     // changed between attempts.
@@ -166,11 +166,11 @@ describe('ImportWizard encrypted exports', () => {
     const user = userEvent.setup();
     render(<ImportWizard gateway={gateway} />);
 
-    await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
+    await user.click(screen.getByRole('button', { name: 'Choose an export file' }));
     await screen.findByLabelText('Export password');
-    await user.click(screen.getByRole('button', { name: 'Anuluj' }));
+    await user.click(screen.getByRole('button', { name: 'Close' }));
 
-    expect(await screen.findByRole('button', { name: 'Wybierz plik eksportu' })).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Choose an export file' })).toBeVisible();
     expect(analyzeImport).toHaveBeenCalledOnce();
   });
 
@@ -182,7 +182,7 @@ describe('ImportWizard encrypted exports', () => {
     const user = userEvent.setup();
     render(<ImportWizard gateway={gateway} />);
 
-    await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
+    await user.click(screen.getByRole('button', { name: 'Choose an export file' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('could not be analysed');
     expect(screen.queryByLabelText('Export password')).not.toBeInTheDocument();
@@ -228,7 +228,7 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
   }) as ClipboardGateway;
 
 const chooseFile = async (user: ReturnType<typeof userEvent.setup>): Promise<void> => {
-  await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
+  await user.click(screen.getByRole('button', { name: 'Choose an export file' }));
   await screen.findByRole('button', { name: 'Rozpocznij import' });
 };
 
@@ -247,11 +247,11 @@ describe('ImportWizard privacy and confirmation', () => {
     const user = userEvent.setup();
     render(<ImportWizard gateway={gateway} />);
 
-    expect(screen.getByRole('button', { name: 'Wybierz plik eksportu' })).toHaveFocus();
-    await user.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
+    expect(screen.getByRole('button', { name: 'Choose an export file' })).toHaveFocus();
+    await user.click(screen.getByRole('button', { name: 'Choose an export file' }));
 
     expect(analyzeImport).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Wybierz plik eksportu' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Choose an export file' })).toBeVisible();
   });
 
   it('passes the selected path once and never renders or sends it after analysis', async () => {
@@ -296,7 +296,7 @@ describe('ImportWizard privacy and confirmation', () => {
     const user = userEvent.setup();
     const { container } = render(<ImportWizard gateway={gateway} />);
 
-    await user.click(screen.getByRole('button', { name: 'Wybierz katalog eksportu' }));
+    await user.click(screen.getByRole('button', { name: 'Choose an export folder' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'The archive could not be analysed',
@@ -313,8 +313,8 @@ describe('ImportWizard privacy and confirmation', () => {
     render(<ImportWizard gateway={gateway} onClose={onClose} />);
     await chooseFile(user);
 
-    await user.click(screen.getByRole('button', { name: 'Anuluj import' }));
-    expect(screen.getByRole('button', { name: 'Anulowanie…' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Cancel import' }));
+    expect(screen.getByRole('button', { name: 'Cancelling…' })).toBeDisabled();
     expect(onClose).not.toHaveBeenCalled();
 
     await act(async () => discard.resolve());
@@ -333,7 +333,7 @@ describe('ImportWizard privacy and confirmation', () => {
     const { container } = render(<ImportWizard gateway={gateway} onClose={onClose} />);
     await chooseFile(user);
 
-    await user.click(screen.getByRole('button', { name: 'Anuluj import' }));
+    await user.click(screen.getByRole('button', { name: 'Cancel import' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'The prepared import could not be cancelled',
@@ -420,7 +420,7 @@ describe('ImportWizard start recovery and polling', () => {
     const gateway = makeGateway({ getImportStatus });
     const { unmount } = render(<ImportWizard gateway={gateway} pollIntervalMs={50} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Choose an export file' }));
     await act(async () => Promise.resolve());
     fireEvent.click(screen.getByRole('button', { name: 'Rozpocznij import' }));
     await act(async () => Promise.resolve());
@@ -446,7 +446,7 @@ describe('ImportWizard start recovery and polling', () => {
     const gateway = makeGateway({ getImportStatus });
     const { unmount } = render(<ImportWizard gateway={gateway} pollIntervalMs={5} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Wybierz plik eksportu' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Choose an export file' }));
     await screen.findByRole('button', { name: 'Rozpocznij import' });
     fireEvent.click(screen.getByRole('button', { name: 'Rozpocznij import' }));
     await waitFor(() => expect(getImportStatus).toHaveBeenCalledOnce());
@@ -482,8 +482,8 @@ describe('Import dialog accessibility', () => {
     const dialog = screen.getByRole('dialog', { name: 'Import history' });
     expect(dialog).toHaveAttribute('aria-modal', 'true');
     expect(dialog).toHaveAccessibleDescription(/archive may hold sensitive data/i);
-    const primary = screen.getByRole('button', { name: 'Wybierz plik eksportu' });
-    const close = screen.getByRole('button', { name: 'Zamknij import' });
+    const primary = screen.getByRole('button', { name: 'Choose an export file' });
+    const close = screen.getByRole('button', { name: 'Close import' });
     expect(primary).toHaveFocus();
 
     close.focus();

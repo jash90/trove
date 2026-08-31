@@ -589,7 +589,7 @@ describe('history actions', () => {
     await user.click(screen.getByRole('button', { name: 'Delete entry' }));
 
     const dialog = screen.getByRole('dialog', { name: 'Delete this entry from the history?' });
-    const cancel = screen.getByRole('button', { name: 'Anuluj usuwanie' });
+    const cancel = screen.getByRole('button', { name: 'Cancel deletion' });
     expect(dialog).toBeVisible();
     expect(cancel).toHaveFocus();
     expect(screen.getByRole('button', { name: 'Delete permanently' })).toBeVisible();
@@ -607,7 +607,7 @@ describe('history actions', () => {
     await settleInitialSearch();
 
     await user.click(screen.getByRole('button', { name: 'Delete entry' }));
-    const cancel = screen.getByRole('button', { name: 'Anuluj usuwanie' });
+    const cancel = screen.getByRole('button', { name: 'Cancel deletion' });
     const confirm = screen.getByRole('button', { name: 'Delete permanently' });
     expect(cancel).toHaveFocus();
 

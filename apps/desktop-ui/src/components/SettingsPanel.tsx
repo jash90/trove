@@ -130,13 +130,18 @@ export const vaultErrorCode = (error: unknown): string =>
 /** What to say when a pairing stops for a reason that is not success. */
 /** How long a pairing code is still good for, in words rather than a timestamp. */
 /// The settings, one tab each. Ordered by how often a setting is reached for, not by when it was
-/// written: the shortcut is the thing people come here to change.
+/// written: the shortcut is the thing people come here to change, and storage sits before export
+/// because one is a state and the other an action.
+///
+/// Labels are short because a tab label is not a heading — seven of them share one row, and the
+/// full names are in the section headings where there is room for them.
 const SETTINGS_TABS: readonly SettingsTab[] = [
   { id: 'shortcut', label: 'Shortcut' },
   { id: 'retention', label: 'Retention' },
-  { id: 'apps', label: 'Excluded apps' },
-  { id: 'links', label: 'Link previews' },
+  { id: 'apps', label: 'Apps' },
+  { id: 'links', label: 'Links' },
   { id: 'keyvault', label: 'Keyvault' },
+  { id: 'storage', label: 'Storage' },
   { id: 'export', label: 'Export' },
 ];
 
@@ -696,7 +701,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 </section>
               ) : null}
 
-              <StorageStats stats={stats} status={storageStatus} />
+              {activeTab === 'storage' ? (
+                <StorageStats stats={stats} status={storageStatus} />
+              ) : null}
 
               {activeTab === 'links' ? (
                 <section className="settings-section" aria-labelledby="settings-links-title">
@@ -921,7 +928,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
           onClick={onClose}
         >
           <X size={16} aria-hidden="true" />
-          Zamknij
+          Close
         </button>
       </main>
     </div>

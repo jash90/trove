@@ -14,13 +14,13 @@ export const ImportAnalysis = ({ analysis }: ImportAnalysisProps): React.JSX.Ele
     </div>
     <div>
       <span className="workflow-kicker">Analysis complete</span>
-      <h2 id="import-analysis-title">Archiwum gotowe do importu</h2>
+      <h2 id="import-analysis-title">Archive ready to import</h2>
       <p className="workflow-count">{formatCount(analysis.total)} records</p>
     </div>
     <dl className="count-ledger count-ledger--three">
       <div>
         <dt>
-          <CheckCircle2 size={14} aria-hidden="true" /> Gotowe
+          <CheckCircle2 size={14} aria-hidden="true" /> Ready
         </dt>
         <dd>{formatCount(analysis.candidateRecords)}</dd>
       </div>
