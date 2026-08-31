@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AppSettings, StorageStats } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
 import {
+  acceleratorFromKeyEvent,
   expiryLabel,
   normalizeDenylistEntries,
   normalizeExecutableDenylistEntry,
@@ -375,6 +376,64 @@ describe('Settings page and storage semantics', () => {
 
     expect(await screen.findByText('Storage figures are unavailable.')).toBeVisible();
     expect(screen.queryByText(`${Number.MAX_SAFE_INTEGER} B`)).not.toBeInTheDocument();
+  });
+});
+
+describe('recording a shortcut', () => {
+  const press = (code: string, mods: Partial<Record<'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey', boolean>> = {}) =>
+    acceleratorFromKeyEvent({
+      code,
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      ...mods,
+    });
+
+  it('turns a pressed combination into the accelerator the core stores', () => {
+    expect(press('KeyV', { metaKey: true, shiftKey: true })).toBe('CommandOrControl+Shift+V');
+    expect(press('Space', { metaKey: true })).toBe('CommandOrControl+Space');
+    expect(press('Digit1', { ctrlKey: true, altKey: true })).toBe('Control+Alt+1');
+    expect(press('F5', { metaKey: true })).toBe('CommandOrControl+F5');
+  });
+
+  it('records nothing without a primary modifier', () => {
+    // A global shortcut with no Command or Control would swallow ordinary typing in every other
+    // application, so pressing a bare key must leave the setting alone.
+    expect(press('KeyV')).toBeNull();
+    expect(press('KeyV', { shiftKey: true })).toBeNull();
+    expect(press('KeyV', { altKey: true })).toBeNull();
+  });
+
+  it('records nothing from modifiers alone or from a key it cannot name', () => {
+    // Holding modifiers is a combination in progress, not a combination.
+    expect(press('MetaLeft', { metaKey: true })).toBeNull();
+    expect(press('ShiftLeft', { shiftKey: true })).toBeNull();
+    expect(press('Enter', { metaKey: true })).toBeNull();
+
+    // Command and Control together would be two primaries, which is not one physical key.
+    expect(press('KeyV', { metaKey: true, ctrlKey: true })).toBeNull();
+  });
+
+  it('shows the recorded shortcut and refuses typed text', async () => {
+    const saveSettings = vi.fn<ClipboardGateway['saveSettings']>(async (settings) => settings);
+    const user = userEvent.setup();
+    render(<SettingsPanel gateway={makeGateway({ saveSettings })} />);
+    const field = await loadSettings();
+
+    // Typing used to be the only way to set this, and it meant knowing the accelerator syntax.
+    await user.type(field, 'nonsense');
+    expect(field).toHaveValue('CommandOrControl+Shift+V');
+
+    fireEvent.keyDown(field, { code: 'KeyK', metaKey: true, altKey: true });
+    expect(field).toHaveValue('CommandOrControl+Alt+K');
+
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ hotkey: 'CommandOrControl+Alt+K' }),
+      );
+    });
   });
 });
 

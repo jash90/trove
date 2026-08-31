@@ -1,3 +1,4 @@
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   useEffect,
   useMemo,
@@ -79,6 +80,36 @@ const ClipboardPalette = (): React.JSX.Element => {
   const focusSearch = (): void => searchInputRef.current?.focus();
   useEffect(() => {
     searchInputRef.current?.focus();
+  }, []);
+  useEffect(() => {
+    // The palette is hidden and shown, never destroyed, so the effect above runs once and never
+    // again — the second time it was summoned the caret was nowhere. Focus follows the window
+    // gaining focus instead, which covers all three ways it is summoned (the shortcut, the menu
+    // bar icon, and Show in its menu) without a new event to keep in step with them.
+    //
+    // Coming back by Cmd-Tab focuses the field too. That is right for this window: it is one you
+    // type into.
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    // try/catch around the call itself, not only the promise: outside a Tauri window
+    // getCurrentWindow throws where it stands, and a .catch() never gets the chance.
+    try {
+      void getCurrentWindow()
+        .onFocusChanged(({ payload: focused }) => {
+          if (focused) focusSearch();
+        })
+        .then((unlisten) => {
+          if (cancelled) unlisten();
+          else stop = unlisten;
+        })
+        .catch(() => undefined);
+    } catch {
+      /* no window to listen to; the palette works without this */
+    }
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
   }, []);
   const actions = useHistoryActions({
     gateway,

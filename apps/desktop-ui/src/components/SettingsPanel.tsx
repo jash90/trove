@@ -74,6 +74,51 @@ export const normalizePlatformHotkey = (value: string): string => {
 };
 
 /**
+ * The shortcut a key press describes, or nothing when it does not describe one yet.
+ *
+ * Reads `code` rather than `key`: with Alt held, macOS reports composed characters in `key`, so
+ * ⌥K arrives as `˚` and the shortcut would record a character nobody can type on purpose.
+ *
+ * Returns null while only modifiers are down — a combination is not finished until a real key
+ * joins it — and also when no primary modifier is held, because a global shortcut without ⌘ or ⌃
+ * would swallow ordinary typing in every other application.
+ *
+ * The candidate goes through {@link normalizePlatformHotkey} rather than being assembled into
+ * final form here, so there is one place that decides what a valid shortcut is.
+ */
+export const acceleratorFromKeyEvent = (event: {
+  code: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+}): string | null => {
+  const key = (() => {
+    if (/^Key[A-Z]$/u.test(event.code)) return event.code.slice(3);
+    if (/^Digit[0-9]$/u.test(event.code)) return event.code.slice(5);
+    if (event.code === 'Space') return 'SPACE';
+    if (/^F(?:[1-9]|1\d|2[0-4])$/u.test(event.code)) return event.code;
+    return null;
+  })();
+  if (key === null) return null;
+
+  // Both would be two primaries, which cannot be one physical key.
+  if (event.metaKey && event.ctrlKey) return null;
+  const primary = event.metaKey ? 'CommandOrControl' : event.ctrlKey ? 'Control' : null;
+  if (primary === null) return null;
+
+  const parts = [primary];
+  if (event.altKey) parts.push('Alt');
+  if (event.shiftKey) parts.push('Shift');
+  parts.push(key);
+  try {
+    return normalizePlatformHotkey(parts.join('+'));
+  } catch {
+    return null;
+  }
+};
+
+/**
  * Bundle identifiers and executable names share one rule so the same
  * application cannot be denied twice under two spellings. ASCII lowercase only:
  * locale-aware casing would fold differently per platform.
@@ -616,14 +661,25 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                       type="text"
                       autoComplete="off"
                       spellCheck={false}
+                      // Recorded, not typed: nobody should have to know the accelerator syntax
+                      // to change a shortcut. Read-only rather than a button so the field keeps
+                      // its textbox role and shows what is set.
+                      readOnly
                       value={hotkey}
-                      onChange={(event) => setHotkey(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') return;
+                        event.preventDefault();
+                        const recorded = acceleratorFromKeyEvent(event);
+                        if (recorded !== null) setHotkey(recorded);
+                      }}
                     />
                   </label>
                   <p className="settings-help">
-                    The application is summoned by <kbd>⌘⇧Space</kbd>; pressing it again
-                    hides it. Saving changes the active shortcut immediately. If the new one
-                    is already taken by another application, the previous one stays in force.
+                    Click the field and press the combination you want — hold <kbd>⌘</kbd> or
+                    <kbd>⌃</kbd> and press a key. A shortcut without one of those would swallow
+                    ordinary typing everywhere else, so it is not recorded. Saving changes the
+                    active shortcut immediately; if the new one is already taken by another
+                    application, the previous one stays in force.
                   </p>
                   <label className="settings-toggle" htmlFor="settings-autostart">
                     <input
