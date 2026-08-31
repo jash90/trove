@@ -63,10 +63,13 @@ export const normalizePlatformHotkey = (value: string): string => {
     if (secondary.has(asSecondary)) return invalid();
     secondary.add(asSecondary);
   }
-  if (primary === null) invalid();
+  // Alt on its own is enough — ⌥Space is an ordinary launcher shortcut, and the systems people
+  // compare this against bind exactly that. Shift on its own is not: Shift+A is how a capital A
+  // is typed, so a global binding on it would swallow ordinary typing everywhere.
+  if (primary === null && !secondary.has('Alt')) invalid();
 
   return [
-    primary,
+    ...(primary === null ? [] : [primary]),
     ...(secondary.has('Alt') ? ['Alt'] : []),
     ...(secondary.has('Shift') ? ['Shift'] : []),
     key,
@@ -80,8 +83,9 @@ export const normalizePlatformHotkey = (value: string): string => {
  * ⌥K arrives as `˚` and the shortcut would record a character nobody can type on purpose.
  *
  * Returns null while only modifiers are down — a combination is not finished until a real key
- * joins it — and also when no primary modifier is held, because a global shortcut without ⌘ or ⌃
- * would swallow ordinary typing in every other application.
+ * joins it — and when the only modifier held is Shift, because Shift+A is how a capital A is
+ * typed and a global binding on it would swallow ordinary typing everywhere else. ⌘, ⌃ and ⌥
+ * each stand on their own; ⌥Space is an ordinary launcher shortcut.
  *
  * The candidate goes through {@link normalizePlatformHotkey} rather than being assembled into
  * final form here, so there is one place that decides what a valid shortcut is.
@@ -105,9 +109,9 @@ export const acceleratorFromKeyEvent = (event: {
   // Both would be two primaries, which cannot be one physical key.
   if (event.metaKey && event.ctrlKey) return null;
   const primary = event.metaKey ? 'CommandOrControl' : event.ctrlKey ? 'Control' : null;
-  if (primary === null) return null;
+  if (primary === null && !event.altKey) return null;
 
-  const parts = [primary];
+  const parts = primary === null ? [] : [primary];
   if (event.altKey) parts.push('Alt');
   if (event.shiftKey) parts.push('Shift');
   parts.push(key);
@@ -675,9 +679,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                     />
                   </label>
                   <p className="settings-help">
-                    Click the field and press the combination you want — hold <kbd>⌘</kbd> or
-                    <kbd>⌃</kbd> and press a key. A shortcut without one of those would swallow
-                    ordinary typing everywhere else, so it is not recorded. Saving changes the
+                    Click the field and press the combination you want — hold <kbd>⌘</kbd>,
+                    <kbd>⌃</kbd> or <kbd>⌥</kbd> and press a key. Shift alone is not recorded: it
+                    would swallow ordinary typing everywhere else. Saving changes the
                     active shortcut immediately; if the new one is already taken by another
                     application, the previous one stays in force.
                   </p>
@@ -689,7 +693,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                       onChange={(event) => setAutostart(event.currentTarget.checked)}
                     />
                     <span>
-                      <Power size={14} aria-hidden="true" /> Uruchamiaj przy logowaniu
+                      <Power size={14} aria-hidden="true" /> Launch at login
                     </span>
                   </label>
                 </section>

@@ -112,6 +112,8 @@ describe('settings normalization', () => {
     ['commandorcontrol + shift + v', 'CommandOrControl+Shift+V'],
     ['control+alt+7', 'Control+Alt+7'],
     ['Command+Shift+F12', 'Command+Shift+F12'],
+    ['alt + space', 'Alt+Space'],
+    ['Alt+Shift+K', 'Alt+Shift+K'],
   ])('normalizes a conservative platform hotkey: %s', (input, expected) => {
     expect(normalizePlatformHotkey(input)).toBe(expected);
   });
@@ -123,6 +125,8 @@ describe('settings normalization', () => {
     'CommandOrControl+Shift+?',
     'CommandOrControl+Hyper+V',
     'CommandOrControl+',
+    // Shift is not a modifier a global binding can stand on: this is how a capital V is typed.
+    'Shift+V',
   ])('rejects an unsupported hotkey: %s', (input) => {
     expect(() => normalizePlatformHotkey(input)).toThrow('invalid_hotkey');
   });
@@ -236,7 +240,7 @@ describe('SettingsPanel validation and transactions', () => {
     );
     await loadSettings();
 
-    await user.click(screen.getByRole('checkbox', { name: 'Uruchamiaj przy logowaniu' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Launch at login' }));
     await user.click(screen.getByRole('button', { name: 'Save settings' }));
 
     expect(await screen.findByRole('status')).toHaveTextContent('Settings saved');
@@ -258,7 +262,7 @@ describe('SettingsPanel validation and transactions', () => {
     );
     await loadSettings();
 
-    await user.click(screen.getByRole('checkbox', { name: 'Uruchamiaj przy logowaniu' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Launch at login' }));
     await user.click(screen.getByRole('button', { name: 'Save settings' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
@@ -286,7 +290,7 @@ describe('SettingsPanel validation and transactions', () => {
     );
     await loadSettings();
 
-    await user.click(screen.getByRole('checkbox', { name: 'Uruchamiaj przy logowaniu' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Launch at login' }));
     await user.click(screen.getByRole('button', { name: 'Save settings' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
@@ -294,7 +298,7 @@ describe('SettingsPanel validation and transactions', () => {
     );
     expect(setAutostartEnabled.mock.calls).toEqual([[true], [false]]);
     expect(isAutostartEnabled).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole('checkbox', { name: 'Uruchamiaj przy logowaniu' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Launch at login' })).toBeChecked();
     expect(container).not.toHaveTextContent('/private/settings.json');
   });
 
@@ -397,12 +401,17 @@ describe('recording a shortcut', () => {
     expect(press('F5', { metaKey: true })).toBe('CommandOrControl+F5');
   });
 
-  it('records nothing without a primary modifier', () => {
-    // A global shortcut with no Command or Control would swallow ordinary typing in every other
-    // application, so pressing a bare key must leave the setting alone.
+  it('accepts Alt as a modifier in its own right', () => {
+    // ⌥Space is the shortcut people arrive expecting, so Alt has to stand without ⌘ or ⌃.
+    expect(press('Space', { altKey: true })).toBe('Alt+Space');
+    expect(press('KeyK', { altKey: true, shiftKey: true })).toBe('Alt+Shift+K');
+  });
+
+  it('records nothing when no modifier, or only Shift, is held', () => {
+    // A bare key or Shift+key is ordinary typing — binding one globally would swallow it in every
+    // other application, so pressing it must leave the setting alone.
     expect(press('KeyV')).toBeNull();
     expect(press('KeyV', { shiftKey: true })).toBeNull();
-    expect(press('KeyV', { altKey: true })).toBeNull();
   });
 
   it('records nothing from modifiers alone or from a key it cannot name', () => {
