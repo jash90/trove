@@ -584,3 +584,48 @@ fn a_file_that_is_not_an_object_is_refused_rather_than_replaced() {
         Some(KeyvaultError::DeviceIdentityInvalid)
     );
 }
+
+// -------------------------------------------------------- pasting a code in --
+
+#[test]
+fn a_pasted_code_is_taken_whole_or_out_of_a_link() {
+    const CODE: &str = "MTwN3esmvZrfRTqyl2hnBIl-2lUQSpXyuaXFr7MhXZ0";
+
+    // What someone copies is whatever is in front of them. Deciding which half of it mattered is
+    // not their job.
+    assert_eq!(
+        crate::pairing::code_from_pasted(CODE).as_deref(),
+        Some(CODE)
+    );
+    assert_eq!(
+        crate::pairing::code_from_pasted(&format!("  {CODE}  ")).as_deref(),
+        Some(CODE)
+    );
+    assert_eq!(
+        crate::pairing::code_from_pasted(&format!(
+            "https://keyvault-dusky.vercel.app/pair?code={CODE}"
+        ))
+        .as_deref(),
+        Some(CODE)
+    );
+}
+
+#[test]
+fn something_that_is_not_a_code_is_refused_rather_than_tried() {
+    for input in [
+        "",
+        "   ",
+        // A link to the right page with no code in it.
+        "https://keyvault-dusky.vercel.app/pair",
+        // Characters outside base64url: this was never a code, and asking the vault about it
+        // would only turn a typo into a round trip.
+        "not a code!",
+        "kod z polskimi znakami: łódź",
+    ] {
+        assert_eq!(
+            crate::pairing::code_from_pasted(input),
+            None,
+            "should not have accepted: {input:?}"
+        );
+    }
+}

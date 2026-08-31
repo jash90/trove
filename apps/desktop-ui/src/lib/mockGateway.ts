@@ -118,7 +118,12 @@ export const mockGateway: ClipboardGateway = {
   keyvaultCopySecret: async () => undefined,
   // The mock pairs instantly. Nothing here talks to a vault, and a fake that made callers wait
   // would only teach the tests to tolerate a spinner.
-  keyvaultPairStart: async () => 'A1B2-C3D4',
+  keyvaultPairStart: async () => ({
+    fingerprint: 'A1B2-C3D4',
+    url: 'https://vault.example.invalid/pair?code=synthetic-code',
+    code: 'synthetic-code',
+    expiresAt: Date.now() + 30 * 60 * 1000,
+  }),
   keyvaultPairPoll: async () => ({ status: 'paired' as const }),
   keyvaultPairCancel: async () => undefined,
   keyvaultIdentity: async () => ({ paired: false, url: null }),

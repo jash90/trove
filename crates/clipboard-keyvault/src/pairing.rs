@@ -28,6 +28,12 @@ pub struct PairingStart {
     pub code: String,
     /// Shown to the person approving, so they can tell this pairing from someone else's.
     pub fingerprint: String,
+    /// When the vault stops accepting this code, in milliseconds since the epoch.
+    ///
+    /// Worth carrying because a pairing is no longer something you finish in the window that
+    /// opened by itself: the link can be taken to another browser, and how long that link is good
+    /// for is the first thing anyone doing that needs to know.
+    pub expires_at: i64,
 }
 
 /// Where a pairing has got to. `Pending` is the ordinary answer while the browser is still open.
@@ -247,10 +253,42 @@ pub async fn start(
         .get("fingerprint")
         .and_then(|v| v.as_str())
         .ok_or(KeyvaultError::BadResponse)?;
+    let expires_at = value
+        .get("expiresAt")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or(KeyvaultError::BadResponse)?;
     Ok(PairingStart {
         code: code.to_owned(),
         fingerprint: fingerprint.to_owned(),
+        expires_at,
     })
+}
+
+/// The pairing code out of whatever someone pasted.
+///
+/// Accepts the bare code and the whole link, because a person copies what is in front of them and
+/// deciding which half of it mattered is not their job. Codes are base64url, which is what makes
+/// telling one from a URL a matter of looking for a scheme rather than guessing.
+pub fn code_from_pasted(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let candidate = if trimmed.contains("://") {
+        let parsed = url::Url::parse(trimmed).ok()?;
+        parsed
+            .query_pairs()
+            .find(|(key, _)| key == "code")
+            .map(|(_, value)| value.into_owned())?
+    } else {
+        trimmed.to_owned()
+    };
+    let valid = !candidate.is_empty()
+        && candidate.len() <= 512
+        && candidate
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    valid.then_some(candidate)
 }
 
 /// Asks once whether the pairing has been approved, and opens the result if it has.

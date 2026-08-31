@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEventHandler, type KeyboardEventH
 import type {
   AppSettings,
   KeyvaultIdentity,
+  PairingStarted,
   ExportSummary as ExportSummaryContract,
   KeyvaultSecret,
   StorageStats as StorageStatsContract,
@@ -126,6 +127,14 @@ export const vaultErrorCode = (error: unknown): string =>
 
 /** One plain sentence per vault denial. Codes only reach here; never values. */
 /** What to say when a pairing stops for a reason that is not success. */
+/** How long a pairing code is still good for, in words rather than a timestamp. */
+export const expiryLabel = (expiresAt: number, now: number): string => {
+  const minutes = Math.floor((expiresAt - now) / 60_000);
+  if (minutes <= 0) return 'This code has expired. Press Connect again.';
+  if (minutes === 1) return 'This code works for about a minute more.';
+  return `This code works for about ${minutes} more minutes.`;
+};
+
 export const pairingMessage = (status: string): string => {
   switch (status) {
     case 'paired':
@@ -203,7 +212,11 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [linkPreviews, setLinkPreviews] = useState(true);
   const [vaultUrl, setVaultUrl] = useState('');
   const [vaultSecrets, setVaultSecrets] = useState<KeyvaultSecret[] | null>(null);
-  const [pairFingerprint, setPairFingerprint] = useState<string | null>(null);
+  const [pairing, setPairing] = useState<PairingStarted | null>(null);
+  // Ticked by the poll below, so the time left is honest rather than frozen at whatever it was
+  // when the pairing started.
+  const [now, setNow] = useState(() => Date.now());
+  const [copied, setCopied] = useState(false);
   const [pairNotice, setPairNotice] = useState<string | null>(null);
   // What the device actually knows, as opposed to what the settings row remembers. The row has
   // been wrong before, and showing a value nobody is using is how the last confusion started.
@@ -361,7 +374,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
    * key is ever pasted here, because the key this device will use does not exist until this runs.
    */
   const connectToVault = async (): Promise<void> => {
-    if (vaultBusy || pairFingerprint !== null) return;
+    if (vaultBusy || pairing !== null) return;
     // Blank is the ordinary case after the first pairing: the core knows where the vault is and
     // refusing here is what made re-pairing impossible, since pairing clears this very field.
     const address = vaultUrl.trim();
@@ -369,7 +382,8 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
     setPairNotice(null);
     setVaultError(null);
     try {
-      setPairFingerprint(await gateway.keyvaultPairStart(address));
+      setPairing(await gateway.keyvaultPairStart(address));
+      setCopied(false);
     } catch (error) {
       setVaultError(keyvaultErrorMessage(vaultErrorCode(error)));
     }
@@ -400,7 +414,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   };
 
   const cancelPairing = async (): Promise<void> => {
-    setPairFingerprint(null);
+    setPairing(null);
     setPairNotice(null);
     await gateway.keyvaultPairCancel();
   };
@@ -410,14 +424,15 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   // Every answer other than "pending" ends the pairing, so the interval is torn down with it —
   // a finished pairing that went on being polled would keep asking a question already answered.
   useEffect(() => {
-    if (pairFingerprint === null) return;
+    if (pairing === null) return;
     let stopped = false;
     const timer = setInterval(() => {
       void (async () => {
+        setNow(Date.now());
         try {
           const { status } = await gateway.keyvaultPairPoll();
           if (stopped || status === 'pending') return;
-          setPairFingerprint(null);
+          setPairing(null);
           setPairNotice(pairingMessage(status));
           // A pairing that worked leaves this install configured, so the list it could not fetch
           // a moment ago is worth fetching now.
@@ -446,7 +461,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
           }
         } catch (error) {
           if (stopped) return;
-          setPairFingerprint(null);
+          setPairing(null);
           setVaultError(keyvaultErrorMessage(vaultErrorCode(error)));
         }
       })();
@@ -455,7 +470,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       stopped = true;
       clearInterval(timer);
     };
-  }, [pairFingerprint, gateway]);
+  }, [pairing, gateway]);
 
   const testVaultConnection = async (): Promise<void> => {
     if (vaultBusy) return;
@@ -723,15 +738,15 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 <button
                   type="button"
                   onClick={() => void connectToVault()}
-                  disabled={vaultBusy || pending || paired || pairFingerprint !== null}
+                  disabled={vaultBusy || pending || paired || pairing !== null}
                 >
-                  {pairFingerprint !== null ? 'Waiting for approval…' : 'Connect'}
+                  {pairing !== null ? 'Waiting for approval…' : 'Connect'}
                 </button>
                 {paired ? (
                   <button
                     type="button"
                     onClick={() => void resetPairing()}
-                    disabled={vaultBusy || pending || pairFingerprint !== null}
+                    disabled={vaultBusy || pending || pairing !== null}
                   >
                     Reset
                   </button>
@@ -744,16 +759,50 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                   {vaultBusy ? 'Talking to the vault…' : 'Test connection'}
                 </button>
               </div>
-              {pairFingerprint !== null ? (
-                <div className="workflow-status" role="status">
+              {pairing !== null ? (
+                <div className="workflow-status settings-pairing" role="status">
                   <p>
-                    Approve this in the browser. Check that the page shows the same code — it is
-                    what ties that page to this application.
+                    A browser was opened to approve this. It is your <strong>default</strong>
+                    browser, which may not be the one you are signed into the vault in — if the
+                    page asks you to sign in again, copy the link below and open it where you
+                    already are.
                   </p>
-                  <p className="settings-pair-fingerprint">{pairFingerprint}</p>
-                  <button type="button" className="link" onClick={() => void cancelPairing()}>
-                    Cancel
-                  </button>
+
+                  <label className="settings-field" htmlFor="settings-pairing-url">
+                    <span>Pairing link</span>
+                    <input id="settings-pairing-url" readOnly value={pairing.url} />
+                  </label>
+                  <div className="workflow-actions workflow-actions--start">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // Best effort: a refused clipboard leaves the link on screen to select by
+                        // hand, which is worse but not a dead end.
+                        void navigator.clipboard
+                          ?.writeText(pairing.url)
+                          .then(() => setCopied(true))
+                          .catch(() => setCopied(false));
+                      }}
+                    >
+                      {copied ? 'Copied' : 'Copy link'}
+                    </button>
+                    <button type="button" onClick={() => void cancelPairing()}>
+                      Cancel
+                    </button>
+                  </div>
+
+                  <p className="settings-help">
+                    Or open <code>/pair</code> on your vault and paste this code:
+                  </p>
+                  <p className="settings-pair-code">{pairing.code}</p>
+
+                  <p className="settings-help">
+                    Check the page shows this fingerprint — it is what ties that page to this
+                    application.
+                  </p>
+                  <p className="settings-pair-fingerprint">{pairing.fingerprint}</p>
+
+                  <p className="settings-help">{expiryLabel(pairing.expiresAt, now)}</p>
                 </div>
               ) : null}
               {pairNotice !== null ? (

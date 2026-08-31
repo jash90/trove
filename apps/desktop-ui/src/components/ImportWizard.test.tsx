@@ -214,7 +214,12 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
     getStorageStats: vi.fn(async () => stats),
     keyvaultList: vi.fn(async () => []),
     keyvaultCopySecret: vi.fn(async () => undefined),
-    keyvaultPairStart: vi.fn(async () => 'A1B2-C3D4'),
+    keyvaultPairStart: vi.fn(async () => ({
+      fingerprint: 'A1B2-C3D4',
+      url: 'https://vault.example.invalid/pair?code=synthetic-code',
+      code: 'synthetic-code',
+      expiresAt: Date.now() + 30 * 60 * 1000,
+    })),
     keyvaultPairPoll: vi.fn(async () => ({ status: 'paired' as const })),
     keyvaultPairCancel: vi.fn(async () => undefined),
     keyvaultIdentity: vi.fn(async () => ({ paired: false, url: null })),

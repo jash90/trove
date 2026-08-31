@@ -34,7 +34,8 @@ pub use envelope::{AgentEnvelope, MAX_ENVELOPE_BYTES};
 pub use http::{ReqwestSecretTransport, SecretResponse, SecretTransport};
 pub use pairing::{
     DeviceKey, PairingOutcome, PairingStart, api_from_document, claim as claim_pairing,
-    generate_device_key, page_url as pairing_page_url, resolve_api, start as start_pairing,
+    code_from_pasted, generate_device_key, page_url as pairing_page_url, resolve_api,
+    start as start_pairing,
 };
 
 /// Every failure this crate can report, as a stable code.

@@ -24,6 +24,7 @@ import {
   type StorageStats,
   type Thumbnail,
   type KeyvaultIdentity,
+  type PairingStarted,
   type PairingStatus,
 } from './contracts';
 import { mockGateway } from './mockGateway';
@@ -63,7 +64,7 @@ export interface ClipboardGateway {
    * The fingerprint is not decoration: it is the only thing tying the page being approved to
    * this application, so the interface must show it and say what it is for.
    */
-  keyvaultPairStart(url: string): Promise<string>;
+  keyvaultPairStart(url: string): Promise<PairingStarted>;
   keyvaultPairPoll(): Promise<{ status: PairingStatus }>;
   keyvaultPairCancel(): Promise<void>;
   /** Whether this device is paired and which vault it knows. A file read, not a request. */
@@ -173,7 +174,7 @@ export const tauriGateway: ClipboardGateway = {
   exportHistory: (directory) => invoke<ExportSummary>('export_history', { directory }),
   keyvaultList: () => invoke<KeyvaultSecret[]>('keyvault_list'),
   keyvaultCopySecret: (slug) => invoke<void>('keyvault_copy_secret', { slug }),
-  keyvaultPairStart: (url) => invoke<string>('keyvault_pair_start', { url }),
+  keyvaultPairStart: (url) => invoke<PairingStarted>('keyvault_pair_start', { url }),
   keyvaultPairPoll: () => invoke<{ status: PairingStatus }>('keyvault_pair_poll'),
   keyvaultPairCancel: () => invoke<void>('keyvault_pair_cancel'),
   keyvaultIdentity: () => invoke<KeyvaultIdentity>('keyvault_identity'),

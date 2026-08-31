@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AppSettings, StorageStats } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
 import {
+  expiryLabel,
   normalizeDenylistEntries,
   normalizeExecutableDenylistEntry,
   normalizePlatformHotkey,
@@ -79,7 +80,12 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
     getStorageStats: vi.fn(async () => storageStats),
     keyvaultList: vi.fn(async () => vaultSecrets.map((secret) => ({ ...secret }))),
     keyvaultCopySecret: vi.fn(async () => undefined),
-    keyvaultPairStart: vi.fn(async () => 'A1B2-C3D4'),
+    keyvaultPairStart: vi.fn(async () => ({
+      fingerprint: 'A1B2-C3D4',
+      url: 'https://vault.example.invalid/pair?code=synthetic-code',
+      code: 'synthetic-code',
+      expiresAt: Date.now() + 30 * 60 * 1000,
+    })),
     keyvaultPairPoll: vi.fn(async () => ({ status: 'paired' as const })),
     keyvaultPairCancel: vi.fn(async () => undefined),
     keyvaultIdentity: vi.fn(async () => ({ paired: false, url: null })),
@@ -487,6 +493,44 @@ describe('keyvault section', () => {
     expect(await screen.findByText(/Nothing here names a vault yet/u)).toBeVisible();
   });
 
+  it('shows a copyable link and the bare code, because the browser that opens may be the wrong one', async () => {
+    const writeText = vi.fn(async () => undefined);
+    // Restored below: left in place it would follow every later test in this file, and a global
+    // this test installed is not a fact about the others.
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    try {
+      await copyableLinkIsShown(writeText);
+    } finally {
+      if (original) Object.defineProperty(navigator, 'clipboard', original);
+      else Reflect.deleteProperty(navigator as unknown as Record<string, unknown>, 'clipboard');
+    }
+  });
+
+  const copyableLinkIsShown = async (writeText: ReturnType<typeof vi.fn>): Promise<void> => {
+    const gateway = makeGateway();
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    await userEvent.type(screen.getByLabelText(/Vault address/u), 'https://vault.example.invalid');
+    await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    // The app opens the default browser, which is not necessarily the one holding the vault
+    // session — a session lives in one browser's storage. Without something to copy, a pairing
+    // started in the wrong browser is a dead end, which is exactly what happened.
+    const link = await screen.findByLabelText(/Pairing link/u);
+    expect(link).toHaveValue('https://vault.example.invalid/pair?code=synthetic-code');
+    expect(screen.getByText('synthetic-code')).toBeVisible();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Copy link' }));
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith(
+        'https://vault.example.invalid/pair?code=synthetic-code',
+      );
+    });
+    expect(await screen.findByRole('button', { name: 'Copied' })).toBeVisible();
+  };
+
   it('shows the fingerprint while waiting, because approving without it proves nothing', async () => {
     const gateway = makeGateway();
     render(<SettingsPanel gateway={gateway} />);
@@ -541,5 +585,15 @@ describe('keyvault section', () => {
     expect(
       await screen.findByText('The token was refused — create a new one in the vault.'),
     ).toBeVisible();
+  });
+});
+
+describe('expiryLabel', () => {
+  it('counts down in words and says plainly when the code is spent', () => {
+    const now = 1_775_000_000_000;
+    expect(expiryLabel(now + 29 * 60_000, now)).toContain('29 more minutes');
+    expect(expiryLabel(now + 90_000, now)).toContain('a minute more');
+    // A dead code needs an instruction, not a number: the button is right there.
+    expect(expiryLabel(now - 1, now)).toContain('Press Connect again');
   });
 });

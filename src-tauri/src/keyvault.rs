@@ -154,6 +154,20 @@ fn pending() -> &'static Mutex<Option<PendingPairing>> {
     PENDING.get_or_init(|| Mutex::new(None))
 }
 
+/// What a started pairing gives the interface to show.
+///
+/// The link and the code are here because the browser that opened may not be the one someone is
+/// signed into — `/usr/bin/open` uses the default, and a session lives in one browser's storage.
+/// Without something to copy, a pairing started in the wrong browser is a dead end.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingStartedDto {
+    pub fingerprint: String,
+    pub url: String,
+    pub code: String,
+    pub expires_at: i64,
+}
+
 /// Where a pairing stands, in the words the interface shows.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,7 +186,7 @@ impl PairingStatusDto {
 /// Returns the fingerprint, which the interface must show. It is the only thing tying the page
 /// someone is about to approve to the application that asked — without comparing it, approving
 /// means trusting whatever code happens to be in the address bar.
-pub async fn pair_start_service(base_url: String) -> Result<String, String> {
+pub async fn pair_start_service(base_url: String) -> Result<PairingStartedDto, String> {
     // The typed address overrides; it is not a requirement. Pairing clears that field on success,
     // so demanding it made the second pairing impossible: the act of pairing removed the only
     // thing the next one could read. The device already knows where its vault is.
@@ -215,12 +229,19 @@ pub async fn pair_start_service(base_url: String) -> Result<String, String> {
             .expect("the pairing slot is only held briefly");
         *slot = Some(PendingPairing {
             base_url,
-            code: started.code,
+            code: started.code.clone(),
             private_jwk: key.private_jwk,
         });
     }
-    open_in_browser(&url)?;
-    Ok(started.fingerprint)
+    // Opened as a convenience, and its failure is not the end of the pairing: the interface shows
+    // the link, which is the way through when the default browser is the wrong one.
+    let _ = open_in_browser(&url);
+    Ok(PairingStartedDto {
+        fingerprint: started.fingerprint,
+        url,
+        code: started.code,
+        expires_at: started.expires_at,
+    })
 }
 
 /// Asks once whether the browser has approved, and records the result if it has.

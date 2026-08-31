@@ -1188,7 +1188,9 @@ pub async fn keyvault_reset_pairing(state: tauri::State<'_, AppState>) -> Result
 /// Not throttled like the read path: this is one deliberate click, and the two seconds it spends
 /// generating a keypair are their own rate limit.
 #[tauri::command]
-pub async fn keyvault_pair_start(url: String) -> Result<String, String> {
+pub async fn keyvault_pair_start(
+    url: String,
+) -> Result<crate::keyvault::PairingStartedDto, String> {
     crate::keyvault::pair_start_service(url).await
 }
 
