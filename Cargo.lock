@@ -609,7 +609,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clipboard-bench"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "clap",
  "clipboard-core",
@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "clipboard-core"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "allocation-counter",
  "bitflags 2.13.1",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "clipboard-history-app"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "clipboard-images"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "base64 0.23.1",
  "image",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "clipboard-import"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "aes",
  "allocation-counter",
@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "clipboard-import-cli"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "aes",
  "allocation-counter",
@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "clipboard-keyvault"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "clipboard-launcher"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "clipboard-core",
  "directories",
@@ -758,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "clipboard-link-preview"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "encoding_rs",
  "image",
@@ -771,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "clipboard-search"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "clipboard-core",
  "clipboard-store",
@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "clipboard-store"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "allocation-counter",
  "blake3",
@@ -814,7 +814,7 @@ dependencies = [
 
 [[package]]
 name = "clipboard-zstd-bound"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "zstd-sys",
 ]
@@ -3428,14 +3428,14 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform-linux"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "clipboard-core",
 ]
 
 [[package]]
 name = "platform-macos"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "clipboard-core",
  "image",
@@ -3448,7 +3448,7 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "clipboard-core",
  "windows 0.62.2",
