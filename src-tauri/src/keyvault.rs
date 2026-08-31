@@ -182,7 +182,16 @@ impl PairingStatusDto {
 /// someone is about to approve to the application that asked — without comparing it, approving
 /// means trusting whatever code happens to be in the address bar.
 pub async fn pair_start_service(base_url: String) -> Result<String, String> {
-    let base_url = base_url.trim().to_owned();
+    // The typed address overrides; it is not a requirement. Pairing clears that field on success,
+    // so demanding it made the second pairing impossible: the act of pairing removed the only
+    // thing the next one could read. The device already knows where its vault is.
+    let typed = base_url.trim().to_owned();
+    let base_url = if typed.is_empty() {
+        clipboard_keyvault::known_base_url(clipboard_keyvault::CONSUMER)
+            .ok_or_else(|| clipboard_keyvault::KeyvaultError::NoVaultAddress.to_string())?
+    } else {
+        typed
+    };
     clipboard_keyvault::validate_base_url(&base_url).map_err(|error| error.to_string())?;
 
     // Asked before anything is generated: a deployment with no published interface cannot be

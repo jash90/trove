@@ -171,6 +171,37 @@ pub fn parse(raw: &str, consumer: &str) -> Result<KeyvaultConfig, KeyvaultError>
     Ok(config)
 }
 
+/// The vault address this device already knows, without needing a usable token.
+///
+/// Deliberately not [`load`]: that refuses when the consumer has no token, and a missing or
+/// revoked token is exactly the situation in which someone needs to pair again. Requiring a
+/// working credential in order to obtain a new one is a circle, and it is the circle that made
+/// re-pairing impossible — pairing clears the address field, and the address was then only ever
+/// read back from that field.
+pub fn known_base_url(consumer: &str) -> Option<String> {
+    let path = agent_file_path()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    known_base_url_in(&raw, consumer)
+}
+
+/// The parsing half, separated so tests need neither a filesystem nor the process environment.
+pub fn known_base_url_in(raw: &str, consumer: &str) -> Option<String> {
+    let file: AgentFile = serde_json::from_str(raw).ok()?;
+
+    let non_blank = |value: &str| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+    // This consumer's own address first: an install pointed at a second vault keeps pointing
+    // there when it re-pairs, rather than silently drifting back to the shared one.
+    file.devices
+        .get(consumer)
+        .and_then(|entry| entry.url.as_deref())
+        .and_then(non_blank)
+        .or_else(|| file.url.as_deref().and_then(non_blank))
+        .filter(|url| crate::validate_base_url(url).is_ok())
+}
+
 /// Records what a pairing produced, leaving everything else in the file as it was.
 ///
 /// Read-modify-write rather than a rewrite: the file is shared with the MCP server, and pairing

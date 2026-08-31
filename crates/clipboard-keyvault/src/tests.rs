@@ -410,3 +410,56 @@ fn a_broken_identity_file_is_named_as_broken_rather_than_missing() {
         );
     }
 }
+
+#[test]
+fn a_paired_device_still_knows_its_vault_without_a_usable_token() {
+    let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+    let jwk = jwk_for(&key);
+
+    // The state after one pairing: a device entry naming its vault. The token is beside the
+    // point here — a revoked one is exactly when someone needs to pair again, and requiring a
+    // working credential to obtain a new one is the circle that made that impossible.
+    let raw = json!({
+        "url": "https://shared.convex.site",
+        "devices": {
+            "clipboard-history": {
+                "privateJwk": serde_json::from_str::<serde_json::Value>(&jwk).unwrap(),
+                "token": TOKEN,
+                "url": BASE,
+            }
+        },
+    })
+    .to_string();
+    assert_eq!(
+        crate::device::known_base_url_in(&raw, crate::device::CONSUMER).as_deref(),
+        Some(BASE),
+        "a consumer pointed at its own vault must keep pointing there when it re-pairs"
+    );
+}
+
+#[test]
+fn the_shared_address_answers_a_consumer_that_has_none_of_its_own() {
+    let raw = json!({ "url": BASE, "tokens": { "mcp": TOKEN } }).to_string();
+    assert_eq!(
+        crate::device::known_base_url_in(&raw, crate::device::CONSUMER).as_deref(),
+        Some(BASE)
+    );
+}
+
+#[test]
+fn an_address_that_could_not_be_one_is_not_offered() {
+    // Better to say nothing is known and let someone type it than to open a browser at a value
+    // the request layer would refuse anyway.
+    for raw in [
+        json!({ "url": "http://vault.example.com" }).to_string(),
+        json!({ "url": "   " }).to_string(),
+        json!({ "tokens": { "mcp": TOKEN } }).to_string(),
+        "{ not json".to_owned(),
+    ] {
+        assert_eq!(
+            crate::device::known_base_url_in(&raw, crate::device::CONSUMER),
+            None,
+            "should not have offered an address from: {raw}"
+        );
+    }
+}

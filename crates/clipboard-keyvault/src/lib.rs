@@ -26,7 +26,9 @@ use thiserror::Error;
 pub use client::{KeyvaultClient, SecretRef};
 pub use config::{KeyvaultConfig, MAX_TOKEN_BYTES, validate_base_url, validate_token};
 pub use decrypt::{PrivateKey, decrypt_envelope, parse_private_jwk};
-pub use device::{CONSUMER, agent_file_path, load as load_device_identity, save_paired};
+pub use device::{
+    CONSUMER, agent_file_path, known_base_url, load as load_device_identity, save_paired,
+};
 pub use envelope::{AgentEnvelope, MAX_ENVELOPE_BYTES};
 pub use http::{ReqwestSecretTransport, SecretResponse, SecretTransport};
 pub use pairing::{
@@ -63,6 +65,11 @@ pub enum KeyvaultError {
     /// a bad response in general because it points at the vault's own page, not at the network.
     #[error("keyvault_pairing_payload_invalid")]
     PairingPayloadInvalid,
+    /// Nothing on this device names a vault, and nothing was typed. Distinct from an invalid
+    /// URL: "I do not know where the vault is" and "that is not an address" lead somewhere
+    /// different.
+    #[error("keyvault_no_vault_address")]
+    NoVaultAddress,
     #[error("keyvault_invalid_slug")]
     InvalidSlug,
     #[error("keyvault_unauthorized")]

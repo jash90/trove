@@ -401,6 +401,15 @@ describe('keyvault section', () => {
   });
 
   it('clears the fields once pairing has replaced what was in them', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await clearsFieldsAfterPairing();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  const clearsFieldsAfterPairing = async (): Promise<void> => {
     const gateway = makeGateway();
     // The core clears the overrides as part of pairing, so the settings it hands back afterwards
     // no longer carry them.
@@ -418,16 +427,16 @@ describe('keyvault section', () => {
 
     // The poll reports success; the pane must stop showing text the database no longer holds,
     // or a later Save writes it back and breaks the pairing for real.
-    // The pane polls every two seconds, so this waits past one full cycle rather than the
-    // default second — the assertion is about what the poll does, not about how fast it runs.
-    await waitFor(
-      () => {
-        expect(screen.getByLabelText(/Vault address/u)).toHaveValue('');
-      },
-      { timeout: 4000 },
-    );
+    // Driven rather than waited out. The pane polls every two seconds, and a test that sits
+    // through that on the wall clock fails whenever the suite runs the file under load — which
+    // it did. Advancing the timers asserts what the poll does without depending on how long the
+    // machine takes to get there.
+    await vi.advanceTimersByTimeAsync(2500);
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Vault address/u)).toHaveValue('');
+    });
     expect(screen.queryByText(/override the paired device identity/u)).not.toBeInTheDocument();
-  });
+  };
 
   it('says plainly when a leftover override is what the vault is being asked with', async () => {
     const gateway = makeGateway();
@@ -445,15 +454,35 @@ describe('keyvault section', () => {
     expect(await screen.findByText(/override the paired device identity/u)).toBeVisible();
   });
 
-  it('refuses to connect without an address rather than opening a browser at nothing', async () => {
+  it('connects with an empty address, because after the first pairing there is none to type', async () => {
     const gateway = makeGateway();
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    // Pairing clears this field on success, so blank is the ordinary state of a paired install.
+    // Refusing here is what made a second pairing impossible: the act of pairing removed the only
+    // thing the next one could have read. The core resolves the address from the device identity.
+    expect(screen.getByLabelText(/Vault address/u)).toHaveValue('');
+    await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    await waitFor(() => {
+      expect(gateway.keyvaultPairStart).toHaveBeenCalledWith('');
+    });
+  });
+
+  it('explains itself when nothing on the device names a vault', async () => {
+    const gateway = makeGateway();
+    gateway.keyvaultPairStart = vi.fn(async () => {
+      throw new Error('keyvault_no_vault_address');
+    }) as typeof gateway.keyvaultPairStart;
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
 
     await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
 
-    expect(await screen.findByText(/Enter the vault address above/u)).toBeVisible();
-    expect(gateway.keyvaultPairStart).not.toHaveBeenCalled();
+    // Distinct from a malformed address on purpose: this one is fixed by typing something, and
+    // saying so beats a generic refusal.
+    expect(await screen.findByText(/Nothing here names a vault yet/u)).toBeVisible();
   });
 
   it('shows the fingerprint while waiting, because approving without it proves nothing', async () => {

@@ -142,6 +142,8 @@ export const pairingMessage = (status: string): string => {
 
 export const keyvaultErrorMessage = (code: string): string => {
   switch (code) {
+    case 'keyvault_no_vault_address':
+      return 'Nothing here names a vault yet. Type its address above, then connect.';
     case 'keyvault_pairing_page_unknown':
       return 'This vault has not published where its web interface lives, so there is nowhere to send you to approve.';
     case 'keyvault_browser_failed':
@@ -355,11 +357,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
    */
   const connectToVault = async (): Promise<void> => {
     if (vaultBusy || pairFingerprint !== null) return;
+    // Blank is the ordinary case after the first pairing: the core knows where the vault is and
+    // refusing here is what made re-pairing impossible, since pairing clears this very field.
     const address = vaultUrl.trim();
-    if (!address) {
-      setPairNotice('Enter the vault address above, then connect.');
-      return;
-    }
     setVaultBusy(true);
     setPairNotice(null);
     setVaultError(null);
@@ -684,7 +684,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
               <p className="settings-help">
                 <strong>Connect</strong> pairs this device: it generates a key here, sends only
                 the public half, and the browser hands back a token of its own — nothing is
-                pasted, and the key never leaves this machine. Both fields below are optional:
+                pasted, and the key never leaves this machine. The address below is needed only
+                the first time, or to point this install at a different vault; once paired,
+                connecting again needs nothing typed at all. Both fields are optional:
                 leave them blank and this application uses the
                 device’s shared vault identity at <code>~/.config/keyvault/agent.json</code>,
                 which is also where the private key lives — it is never stored here. Fill one in
