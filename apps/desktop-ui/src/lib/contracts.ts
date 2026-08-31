@@ -108,7 +108,12 @@ export interface PairingStarted {
   fingerprint: string;
   url: string;
   code: string;
-  expiresAt: number;
+  /**
+   * When the code stops working, if the vault said. Optional because it is a nicety: a countdown
+   * that can fail a pairing is worse than no countdown, which is what happened when this was
+   * required and the value arrived as a float.
+   */
+  expiresAt: number | null;
 }
 
 /** Whether this device has paired, and which vault it knows. */

@@ -165,7 +165,7 @@ pub struct PairingStartedDto {
     pub fingerprint: String,
     pub url: String,
     pub code: String,
-    pub expires_at: i64,
+    pub expires_at: Option<i64>,
 }
 
 /// Where a pairing stands, in the words the interface shows.

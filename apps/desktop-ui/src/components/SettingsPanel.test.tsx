@@ -595,5 +595,7 @@ describe('expiryLabel', () => {
     expect(expiryLabel(now + 90_000, now)).toContain('a minute more');
     // A dead code needs an instruction, not a number: the button is right there.
     expect(expiryLabel(now - 1, now)).toContain('Press Connect again');
+    // Absent is not an error: the line simply is not shown, and the pairing is unaffected.
+    expect(expiryLabel(null, now)).toBeNull();
   });
 });

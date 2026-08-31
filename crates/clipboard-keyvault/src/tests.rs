@@ -629,3 +629,54 @@ fn something_that_is_not_a_code_is_refused_rather_than_tried() {
         );
     }
 }
+
+// ------------------------------------------- reading what the vault answered --
+
+#[test]
+fn a_real_createpairing_reply_is_read_whole() {
+    // Copied verbatim off the wire. Convex numbers are float64, so the expiry arrives as
+    // `1788213223705.0` — and an integer-only read of it turned every pairing into "the vault
+    // replied in a shape this version does not understand". This body is the test that was
+    // missing: exercising the chain through Node proved the vault was fine and nothing about
+    // whether this code could read it.
+    let body: serde_json::Value = serde_json::from_str(
+        r#"{"code":"wEGq9T__GKl0DfvCME8kqRuokwNHwp9rmUMrPAVvdUs",
+            "expiresAt":1788213223705.0,
+            "fingerprint":"0840-C7CC"}"#,
+    )
+    .unwrap();
+
+    let started = crate::pairing::start_from_value(&body).unwrap();
+    assert_eq!(started.code, "wEGq9T__GKl0DfvCME8kqRuokwNHwp9rmUMrPAVvdUs");
+    assert_eq!(started.fingerprint, "0840-C7CC");
+    assert_eq!(started.expires_at, Some(1_788_213_223_705));
+}
+
+#[test]
+fn a_missing_or_unreadable_expiry_costs_the_countdown_and_nothing_else() {
+    // The countdown is a nicety. A nicety that can fail a pairing is worse than no countdown,
+    // which is precisely the mistake this pair of tests exists to prevent from returning.
+    for body in [
+        serde_json::json!({ "code": "abc", "fingerprint": "0840-C7CC" }),
+        serde_json::json!({ "code": "abc", "fingerprint": "0840-C7CC", "expiresAt": null }),
+        serde_json::json!({ "code": "abc", "fingerprint": "0840-C7CC", "expiresAt": "soon" }),
+    ] {
+        let started = crate::pairing::start_from_value(&body).expect("pairing must survive this");
+        assert_eq!(started.expires_at, None);
+        assert_eq!(started.code, "abc");
+    }
+}
+
+#[test]
+fn a_reply_without_a_code_is_still_a_failure() {
+    // Tolerant about the trimmings, strict about the two things a pairing cannot proceed without.
+    for body in [
+        serde_json::json!({ "fingerprint": "0840-C7CC" }),
+        serde_json::json!({ "code": "abc" }),
+    ] {
+        assert_eq!(
+            crate::pairing::start_from_value(&body).err(),
+            Some(KeyvaultError::BadResponse)
+        );
+    }
+}

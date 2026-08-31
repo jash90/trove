@@ -30,10 +30,12 @@ pub struct PairingStart {
     pub fingerprint: String,
     /// When the vault stops accepting this code, in milliseconds since the epoch.
     ///
-    /// Worth carrying because a pairing is no longer something you finish in the window that
-    /// opened by itself: the link can be taken to another browser, and how long that link is good
-    /// for is the first thing anyone doing that needs to know.
-    pub expires_at: i64,
+    /// Optional on purpose. It is worth showing — a link you carry to another browser is worth a
+    /// countdown — but it is a nicety, and a nicety must never be able to fail a pairing. Making
+    /// it required is exactly what broke one: Convex numbers are float64 and arrive as
+    /// `1788213223705.0`, which is not an integer to `as_i64`, so every pairing reported a reply
+    /// the application could not understand.
+    pub expires_at: Option<i64>,
 }
 
 /// Where a pairing has got to. `Pending` is the ordinary answer while the browser is still open.
@@ -245,6 +247,16 @@ pub async fn start(
         serde_json::json!({ "appPublicJwk": public_jwk, "label": label }),
     )
     .await?;
+    start_from_value(&value)
+}
+
+/// Reads what `createPairing` answered.
+///
+/// Separated from the request so it can be tested against a real reply. It was not, and the
+/// consequence shipped: the expiry arrives as a float and an integer-only read turned every
+/// pairing into "the vault replied in a shape this version does not understand". A round trip
+/// through Node proves nothing about this code — only this code does.
+pub fn start_from_value(value: &serde_json::Value) -> Result<PairingStart, KeyvaultError> {
     let code = value
         .get("code")
         .and_then(|v| v.as_str())
@@ -253,15 +265,23 @@ pub async fn start(
         .get("fingerprint")
         .and_then(|v| v.as_str())
         .ok_or(KeyvaultError::BadResponse)?;
-    let expires_at = value
-        .get("expiresAt")
-        .and_then(serde_json::Value::as_i64)
-        .ok_or(KeyvaultError::BadResponse)?;
     Ok(PairingStart {
         code: code.to_owned(),
         fingerprint: fingerprint.to_owned(),
-        expires_at,
+        expires_at: expiry_from(value.get("expiresAt")),
     })
+}
+
+/// Reads a millisecond timestamp that may arrive as an integer or as a float.
+///
+/// Convex numbers are float64 and serialize as `1788213223705.0`, so an integer-only read finds
+/// nothing. Anything unreadable is simply absent: the countdown disappears, and the pairing —
+/// which never needed this — carries on.
+fn expiry_from(value: Option<&serde_json::Value>) -> Option<i64> {
+    let value = value?;
+    value
+        .as_i64()
+        .or_else(|| value.as_f64().map(|seconds| seconds as i64))
 }
 
 /// The pairing code out of whatever someone pasted.

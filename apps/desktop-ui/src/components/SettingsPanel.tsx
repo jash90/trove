@@ -128,7 +128,8 @@ export const vaultErrorCode = (error: unknown): string =>
 /** One plain sentence per vault denial. Codes only reach here; never values. */
 /** What to say when a pairing stops for a reason that is not success. */
 /** How long a pairing code is still good for, in words rather than a timestamp. */
-export const expiryLabel = (expiresAt: number, now: number): string => {
+export const expiryLabel = (expiresAt: number | null, now: number): string | null => {
+  if (expiresAt === null) return null;
   const minutes = Math.floor((expiresAt - now) / 60_000);
   if (minutes <= 0) return 'This code has expired. Press Connect again.';
   if (minutes === 1) return 'This code works for about a minute more.';
@@ -802,7 +803,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                   </p>
                   <p className="settings-pair-fingerprint">{pairing.fingerprint}</p>
 
-                  <p className="settings-help">{expiryLabel(pairing.expiresAt, now)}</p>
+                  {expiryLabel(pairing.expiresAt, now) !== null ? (
+                    <p className="settings-help">{expiryLabel(pairing.expiresAt, now)}</p>
+                  ) : null}
                 </div>
               ) : null}
               {pairNotice !== null ? (
