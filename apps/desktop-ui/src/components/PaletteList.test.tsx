@@ -296,7 +296,7 @@ describe('TypeFilter', () => {
     ['Images', 'roadmap app:Editor type:image'],
     ['Files', 'roadmap app:Editor type:file'],
     ['Pinned', 'roadmap app:Editor is:pinned'],
-    ['Wszystkie', 'roadmap app:Editor'],
+    ['All', 'roadmap app:Editor'],
   ])('emits the supported query for the %s filter', async (label, expectedQuery) => {
     const user = userEvent.setup();
     const handleQueryChange = vi.fn();
@@ -307,7 +307,7 @@ describe('TypeFilter', () => {
       />,
     );
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Filtr typu' }), label);
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Type filter' }), label);
 
     expect(handleQueryChange).toHaveBeenCalledWith(expectedQuery);
   });
@@ -317,7 +317,7 @@ describe('TypeFilter', () => {
     const handleQueryChange = vi.fn();
     render(<TypeFilter query="type:color app:Editor" onQueryChange={handleQueryChange} />);
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Filtr typu' }), 'Wszystkie');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Type filter' }), 'All');
 
     expect(handleQueryChange).toHaveBeenCalledWith('app:Editor');
   });
@@ -345,7 +345,7 @@ describe('clipboard palette states', () => {
       await vi.advanceTimersByTimeAsync(150);
     });
     await act(async () => {
-      const filter = screen.getByRole('combobox', { name: 'Filtr typu' }) as HTMLSelectElement;
+      const filter = screen.getByRole('combobox', { name: 'Type filter' }) as HTMLSelectElement;
       filter.value = 'image';
       filter.dispatchEvent(new Event('change', { bubbles: true }));
       await vi.advanceTimersByTimeAsync(150);
@@ -394,7 +394,7 @@ describe('clipboard palette states', () => {
     await screen.findByRole('listbox', { name: 'Applications, secrets and history results' });
     const search = screen.getByRole('searchbox', { name: 'Search applications, secrets and history' });
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Filtr typu' }), 'Images');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Type filter' }), 'Images');
 
     expect(search).toHaveFocus();
   });

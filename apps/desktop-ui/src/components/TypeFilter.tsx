@@ -12,7 +12,7 @@ interface FilterDefinition {
 }
 
 const FILTERS: FilterDefinition[] = [
-  { id: 'all', label: 'Wszystkie', token: null },
+  { id: 'all', label: 'All', token: null },
   { id: 'text', label: 'Text', token: 'type:text' },
   { id: 'link', label: 'Links', token: 'type:link' },
   { id: 'image', label: 'Images', token: 'type:image' },
@@ -28,7 +28,7 @@ const queryWithoutPaletteFilters = (query: string): string =>
 /// Which filter the query currently expresses.
 ///
 /// Returns nothing for an operator the palette has no control for — `type:code`
-/// typed by hand is a real filter, and showing "Wszystkie" as selected would
+/// typed by hand is a real filter, and showing "All" as selected would
 /// claim the opposite.
 const activeFilterForQuery = (query: string): FilterId | null => {
   const match = query.match(/(?:^|\s)(type:(?:text|link|image|file|color|code|html)|is:pinned)(?=\s|$)/iu)?.[1];
@@ -53,7 +53,7 @@ export const TypeFilter = ({
   return (
     <div className="type-filter">
       <label className="sr-only" htmlFor="history-type-filter">
-        Filtr typu
+        Type filter
       </label>
       <select
         id="history-type-filter"

@@ -96,6 +96,15 @@ const makeGateway = (overrides: Partial<ClipboardGateway> = {}): ClipboardGatewa
 const loadSettings = async (): Promise<HTMLInputElement> =>
   screen.findByRole('textbox', { name: 'Global shortcut' });
 
+/// Brings a settings tab into view.
+///
+/// Only the selected tab is rendered, so a test that reaches for a field on another one finds
+/// nothing. That is the shape of the component now, and asking for the tab first is what a person
+/// does too.
+const openTab = async (name: string): Promise<void> => {
+  await userEvent.click(screen.getByRole('tab', { name }));
+};
+
 describe('settings normalization', () => {
   it.each([
     ['commandorcontrol + shift + space', 'CommandOrControl+Shift+Space'],
@@ -163,8 +172,9 @@ describe('SettingsPanel validation and transactions', () => {
     const user = userEvent.setup();
     render(<SettingsPanel gateway={makeGateway({ saveSettings })} />);
     await loadSettings();
+    await openTab('Retention');
 
-    const retention = screen.getByRole('spinbutton', { name: 'Dni przechowywania' });
+    const retention = screen.getByRole('spinbutton', { name: 'Days kept' });
     await user.clear(retention);
     await user.type(retention, days);
     await user.click(screen.getByRole('button', { name: 'Save settings' }));
@@ -178,8 +188,9 @@ describe('SettingsPanel validation and transactions', () => {
     const user = userEvent.setup();
     render(<SettingsPanel gateway={makeGateway({ saveSettings })} />);
     await loadSettings();
+    await openTab('Retention');
 
-    const retention = screen.getByRole('spinbutton', { name: 'Dni przechowywania' });
+    const retention = screen.getByRole('spinbutton', { name: 'Days kept' });
     await user.clear(retention);
     await user.type(retention, days);
     await user.click(screen.getByRole('button', { name: 'Save settings' }));
@@ -193,9 +204,10 @@ describe('SettingsPanel validation and transactions', () => {
     const user = userEvent.setup();
     render(<SettingsPanel gateway={makeGateway({ saveSettings })} />);
     await loadSettings();
+    await openTab('Retention');
 
     await user.click(screen.getByRole('checkbox', { name: 'Bez limitu retencji' }));
-    expect(screen.getByRole('spinbutton', { name: 'Dni przechowywania' })).toBeDisabled();
+    expect(screen.getByRole('spinbutton', { name: 'Days kept' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: 'Save settings' }));
 
     await waitFor(() => expect(saveSettings).toHaveBeenCalled());
@@ -294,8 +306,8 @@ describe('SettingsPanel validation and transactions', () => {
 
     const submit = screen.getByRole('button', { name: 'Save settings' });
     await user.click(submit);
-    expect(screen.getByRole('button', { name: 'Zapisywanie…' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Zapisywanie…' }));
+    expect(screen.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Saving…' }));
     expect(saveSettings).toHaveBeenCalledOnce();
 
     await act(async () => save.resolve(persistedSettings));
@@ -365,11 +377,71 @@ describe('Settings page and storage semantics', () => {
   });
 });
 
+describe('settings tabs', () => {
+  it('shows one section at a time and names the selected tab', async () => {
+    render(<SettingsPanel gateway={makeGateway()} />);
+    await loadSettings();
+
+    const tabs = screen.getAllByRole('tab');
+    expect(tabs).toHaveLength(6);
+    expect(screen.getByRole('tab', { name: 'Shortcut' })).toHaveAttribute('aria-selected', 'true');
+
+    // The point of tabs: the other five sections are not on screen competing for the eye.
+    expect(screen.getByRole('textbox', { name: 'Global shortcut' })).toBeVisible();
+    expect(screen.queryByRole('spinbutton', { name: 'Days kept' })).not.toBeInTheDocument();
+
+    await openTab('Retention');
+    expect(screen.getByRole('spinbutton', { name: 'Days kept' })).toBeVisible();
+    expect(screen.queryByRole('textbox', { name: 'Global shortcut' })).not.toBeInTheDocument();
+  });
+
+  it('moves between tabs with the arrows, so the strip is one stop and not six', async () => {
+    const user = userEvent.setup();
+    render(<SettingsPanel gateway={makeGateway()} />);
+    await loadSettings();
+
+    const shortcut = screen.getByRole('tab', { name: 'Shortcut' });
+    shortcut.focus();
+    await user.keyboard('{ArrowRight}');
+
+    const retention = screen.getByRole('tab', { name: 'Retention' });
+    expect(retention).toHaveAttribute('aria-selected', 'true');
+    // Focus follows the selection, or the next arrow press would start from somewhere else.
+    expect(retention).toHaveFocus();
+
+    await user.keyboard('{End}');
+    expect(screen.getByRole('tab', { name: 'Export' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('keeps an edit made on one tab when another is opened and saved', async () => {
+    const saveSettings = vi.fn<ClipboardGateway['saveSettings']>(async (settings) => settings);
+    const user = userEvent.setup();
+    render(<SettingsPanel gateway={makeGateway({ saveSettings })} />);
+    await loadSettings();
+
+    // Hidden tabs are unmounted, so their inputs are gone from the document. The values live in
+    // the panel's own state — and this is the assertion that keeps them there, because losing an
+    // edit on tab switch is the quiet way tabs go wrong.
+    await openTab('Retention');
+    const retention = screen.getByRole('spinbutton', { name: 'Days kept' });
+    await user.clear(retention);
+    await user.type(retention, '90');
+
+    await openTab('Shortcut');
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledWith(expect.objectContaining({ retentionDays: 90 }));
+    });
+  });
+});
+
 describe('keyvault section', () => {
   it('remembers the address and never asks for a token or a key', async () => {
     const gateway = makeGateway();
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
+    await openTab('Keyvault');
 
     // Neither belongs to this pane. The key was never ours; the token comes from pairing, and a
     // pasted one only ever shadowed it — which is how a successful pairing reported a refusal.
@@ -392,6 +464,7 @@ describe('keyvault section', () => {
     const gateway = makeGateway();
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
+    await openTab('Keyvault');
 
     fireEvent.submit(screen.getByRole('button', { name: 'Save settings' }).closest('form')!);
 
@@ -423,6 +496,7 @@ describe('keyvault section', () => {
     })) as typeof gateway.getSettings;
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
+    await openTab('Keyvault');
 
     await userEvent.type(screen.getByLabelText(/Vault address/u), 'https://old.example.invalid');
 
@@ -448,6 +522,7 @@ describe('keyvault section', () => {
     })) as typeof gateway.keyvaultIdentity;
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
+    await openTab('Keyvault');
 
     // Shown, so it is obvious which vault this is, and locked, because editing it would change
     // nothing: reads go to the pairing. A field that looks editable and is ignored is the trap
@@ -466,6 +541,7 @@ describe('keyvault section', () => {
     const gateway = makeGateway();
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
+    await openTab('Keyvault');
 
     // Pairing clears this field on success, so blank is the ordinary state of a paired install.
     // Refusing here is what made a second pairing impossible: the act of pairing removed the only
@@ -485,6 +561,7 @@ describe('keyvault section', () => {
     }) as typeof gateway.keyvaultPairStart;
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
+    await openTab('Keyvault');
 
     await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
 
@@ -511,6 +588,7 @@ describe('keyvault section', () => {
     const gateway = makeGateway();
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
+    await openTab('Keyvault');
 
     await userEvent.type(screen.getByLabelText(/Vault address/u), 'https://vault.example.invalid');
     await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
@@ -529,12 +607,20 @@ describe('keyvault section', () => {
       );
     });
     expect(await screen.findByRole('button', { name: 'Copied' })).toBeVisible();
+
+    // The block used to live in .workflow-status, which is display:flex in row direction and
+    // built for one short line. Every child became a squeezed column and the code broke one
+    // character per line. Naming the container here is what stops that returning.
+    const code = screen.getByText('synthetic-code');
+    expect(code.closest('.workflow-status')).toBeNull();
+    expect(code.closest('.settings-pairing')).not.toBeNull();
   };
 
   it('shows the fingerprint while waiting, because approving without it proves nothing', async () => {
     const gateway = makeGateway();
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
+    await openTab('Keyvault');
 
     await userEvent.type(screen.getByLabelText(/Vault address/u), 'https://vault.example.invalid');
     await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
@@ -553,6 +639,7 @@ describe('keyvault section', () => {
     const gateway = makeGateway();
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
+    await openTab('Keyvault');
 
     await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
 
@@ -579,6 +666,7 @@ describe('keyvault section', () => {
     });
     render(<SettingsPanel gateway={gateway} />);
     await loadSettings();
+    await openTab('Keyvault');
 
     await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
 

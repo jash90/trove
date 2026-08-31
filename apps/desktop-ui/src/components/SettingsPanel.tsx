@@ -10,6 +10,7 @@ import type {
   StorageStats as StorageStatsContract,
 } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
+import { SettingsTabs, type SettingsTab } from './SettingsTabs';
 import { StorageStats } from './StorageStats';
 
 const MAX_DENYLIST_ENTRIES = 200;
@@ -128,6 +129,17 @@ export const vaultErrorCode = (error: unknown): string =>
 /** One plain sentence per vault denial. Codes only reach here; never values. */
 /** What to say when a pairing stops for a reason that is not success. */
 /** How long a pairing code is still good for, in words rather than a timestamp. */
+/// The settings, one tab each. Ordered by how often a setting is reached for, not by when it was
+/// written: the shortcut is the thing people come here to change.
+const SETTINGS_TABS: readonly SettingsTab[] = [
+  { id: 'shortcut', label: 'Shortcut' },
+  { id: 'retention', label: 'Retention' },
+  { id: 'apps', label: 'Excluded apps' },
+  { id: 'links', label: 'Link previews' },
+  { id: 'keyvault', label: 'Keyvault' },
+  { id: 'export', label: 'Export' },
+];
+
 export const expiryLabel = (expiresAt: number | null, now: number): string | null => {
   if (expiresAt === null) return null;
   const minutes = Math.floor((expiresAt - now) / 60_000);
@@ -218,6 +230,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   // when the pairing started.
   const [now, setNow] = useState(() => Date.now());
   const [copied, setCopied] = useState(false);
+  const [activeTab, setActiveTab] = useState<string>(SETTINGS_TABS[0]!.id);
   const [pairNotice, setPairNotice] = useState<string | null>(null);
   // What the device actually knows, as opposed to what the settings row remembers. The row has
   // been wrong before, and showing a value nobody is using is how the last confusion started.
@@ -542,7 +555,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       >
         <header className="workflow-dialog__header">
           <div>
-            <span className="workflow-kicker">Konfiguracja lokalna</span>
+            <span className="workflow-kicker">Local configuration</span>
             <h1 id="settings-dialog-title">Settings</h1>
           </div>
         </header>
@@ -575,307 +588,327 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
               </p>
             ) : null}
 
-            <section className="settings-section" aria-labelledby="settings-hotkey-title">
-              <div className="settings-section-heading">
-                <span className="settings-section-icon" aria-hidden="true">
-                  <KeyRound size={16} />
-                </span>
-                <h2 id="settings-hotkey-title">Shortcut and startup</h2>
-              </div>
-              <label className="settings-field" htmlFor="settings-hotkey">
-                <span>Global shortcut</span>
-                <input
-                  ref={hotkeyRef}
-                  id="settings-hotkey"
-                  type="text"
-                  autoComplete="off"
-                  spellCheck={false}
-                  value={hotkey}
-                  onChange={(event) => setHotkey(event.currentTarget.value)}
-                />
-              </label>
-              <p className="settings-help">
-                The application is summoned by <kbd>⌘⇧Space</kbd>; pressing it again
-                hides it. Saving changes the active shortcut immediately. If the new one
-                is already taken by another application, the previous one stays in force.
-              </p>
-              <label className="settings-toggle" htmlFor="settings-autostart">
-                <input
-                  id="settings-autostart"
-                  type="checkbox"
-                  checked={autostart}
-                  onChange={(event) => setAutostart(event.currentTarget.checked)}
-                />
-                <span>
-                  <Power size={14} aria-hidden="true" /> Uruchamiaj przy logowaniu
-                </span>
-              </label>
-            </section>
-
-            <section className="settings-section" aria-labelledby="settings-retention-title">
-              <div className="settings-section-heading">
-                <span className="settings-section-icon" aria-hidden="true">
-                  <Timer size={16} />
-                </span>
-                <h2 id="settings-retention-title">History retention</h2>
-              </div>
-              <label className="settings-toggle" htmlFor="settings-retention-unlimited">
-                <input
-                  id="settings-retention-unlimited"
-                  type="checkbox"
-                  checked={unlimitedRetention}
-                  onChange={(event) => setUnlimitedRetention(event.currentTarget.checked)}
-                />
-                <span>Bez limitu retencji</span>
-              </label>
-              <label className="settings-field" htmlFor="settings-retention-days">
-                <span>Dni przechowywania</span>
-                <input
-                  id="settings-retention-days"
-                  type="number"
-                  min={MIN_RETENTION_DAYS}
-                  max={MAX_RETENTION_DAYS}
-                  step={1}
-                  disabled={unlimitedRetention}
-                  value={retentionDays}
-                  onChange={(event) => setRetentionDays(event.currentTarget.value)}
-                />
-              </label>
-              <p className="settings-help">
-                History is unlimited by default. Turning retention on permanently deletes
-                entries older than the given number of days.
-              </p>
-            </section>
-
-            <section className="settings-section" aria-labelledby="settings-denylist-title">
-              <div className="settings-section-heading">
-                <span className="settings-section-icon" aria-hidden="true">
-                  <ShieldBan size={16} />
-                </span>
-                <h2 id="settings-denylist-title">Aplikacje wykluczone</h2>
-              </div>
-              <label className="settings-field" htmlFor="settings-denylist">
-                <span>Bundle identifiers or executable names</span>
-                <textarea
-                  id="settings-denylist"
-                  rows={4}
-                  spellCheck={false}
-                  value={denylist}
-                  onChange={(event) => setDenylist(event.currentTarget.value)}
-                />
-              </label>
-              <p className="settings-help">
-                One entry per line, at most {MAX_DENYLIST_ENTRIES}. Content copied
-                in these applications never reaches the history.
-              </p>
-            </section>
-
-            <StorageStats stats={stats} status={storageStatus} />
-
-            <section className="workflow-section" aria-labelledby="settings-links-title">
-              <h2 id="settings-links-title">
-                <Globe size={15} aria-hidden="true" />
-                Preview stron
-              </h2>
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={linkPreviews}
-                  onChange={(event) => setLinkPreviews(event.currentTarget.checked)}
-                />
-                Fetch the page title and icon
-              </label>
-              <p className="settings-help">
-                This is the only place the application talks to the network. On, it
-                means opening the palette queries the pages visible in the list —
-                each of them then learns that you are looking at your clipboard. The result
-                is remembered, so the same page is asked once. Local and private
-                addresses are never queried.
-              </p>
-            </section>
-
-            <section className="workflow-section" aria-labelledby="settings-keyvault-title">
-              <h2 id="settings-keyvault-title">
-                <Vault size={15} aria-hidden="true" />
-                Keyvault
-              </h2>
-              <label className="settings-field" htmlFor="settings-keyvault-url">
-                <span>Vault address</span>
-                <input
-                  id="settings-keyvault-url"
-                  type="url"
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="https://your-vault.example.com"
-                  // Locked once paired, and showing what the device actually uses rather than
-                  // what the settings row remembers. Editing it would change nothing — reads go
-                  // to the pairing — and a field that looks editable and is ignored is precisely
-                  // the trap this pane used to be.
-                  value={paired ? (identity?.url ?? '') : vaultUrl}
-                  disabled={paired}
-                  onChange={(event) => setVaultUrl(event.currentTarget.value)}
-                />
-              </label>
-              <p className="settings-help">
-                {paired ? (
-                  <>
-                    This device is paired. It has its own key and its own token, and neither can
-                    be typed in here. <strong>Reset</strong> forgets the pairing so you can
-                    connect again — it only forgets it locally, so the device stays listed in the
-                    vault until the next pairing retires it or you revoke it there.
-                  </>
-                ) : (
-                  <>
-                    <strong>Connect</strong> pairs this device: it generates a key here, sends
-                    only the public half, and the browser hands back a token of its own — nothing
-                    is pasted, and the key never leaves this machine. Put in the address you open
-                    your vault at in a browser. The vault answers with sealed envelopes; a copied
-                    key goes to the clipboard without ever being recorded in the history or shown
-                    here.
-                  </>
-                )}
-              </p>
-              <div className="workflow-actions workflow-actions--start">
-                <button
-                  type="button"
-                  onClick={() => void connectToVault()}
-                  disabled={vaultBusy || pending || paired || pairing !== null}
-                >
-                  {pairing !== null ? 'Waiting for approval…' : 'Connect'}
-                </button>
-                {paired ? (
-                  <button
-                    type="button"
-                    onClick={() => void resetPairing()}
-                    disabled={vaultBusy || pending || pairing !== null}
-                  >
-                    Reset
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={() => void testVaultConnection()}
-                  disabled={vaultBusy || pending}
-                >
-                  {vaultBusy ? 'Talking to the vault…' : 'Test connection'}
-                </button>
-              </div>
-              {pairing !== null ? (
-                <div className="workflow-status settings-pairing" role="status">
-                  <p>
-                    A browser was opened to approve this. It is your <strong>default</strong>
-                    browser, which may not be the one you are signed into the vault in — if the
-                    page asks you to sign in again, copy the link below and open it where you
-                    already are.
-                  </p>
-
-                  <label className="settings-field" htmlFor="settings-pairing-url">
-                    <span>Pairing link</span>
-                    <input id="settings-pairing-url" readOnly value={pairing.url} />
+            <SettingsTabs tabs={SETTINGS_TABS} active={activeTab} onSelect={setActiveTab} />
+            <div
+              className="settings-panel"
+              role="tabpanel"
+              id={`settings-panel-${activeTab}`}
+              aria-labelledby={`settings-tab-${activeTab}`}
+            >
+              {activeTab === 'shortcut' ? (
+                <section className="settings-section" aria-labelledby="settings-hotkey-title">
+                  <div className="settings-section-heading">
+                    <span className="settings-section-icon" aria-hidden="true">
+                      <KeyRound size={16} />
+                    </span>
+                    <h2 id="settings-hotkey-title">Shortcut and startup</h2>
+                  </div>
+                  <label className="settings-field" htmlFor="settings-hotkey">
+                    <span>Global shortcut</span>
+                    <input
+                      ref={hotkeyRef}
+                      id="settings-hotkey"
+                      type="text"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={hotkey}
+                      onChange={(event) => setHotkey(event.currentTarget.value)}
+                    />
                   </label>
+                  <p className="settings-help">
+                    The application is summoned by <kbd>⌘⇧Space</kbd>; pressing it again
+                    hides it. Saving changes the active shortcut immediately. If the new one
+                    is already taken by another application, the previous one stays in force.
+                  </p>
+                  <label className="settings-toggle" htmlFor="settings-autostart">
+                    <input
+                      id="settings-autostart"
+                      type="checkbox"
+                      checked={autostart}
+                      onChange={(event) => setAutostart(event.currentTarget.checked)}
+                    />
+                    <span>
+                      <Power size={14} aria-hidden="true" /> Uruchamiaj przy logowaniu
+                    </span>
+                  </label>
+                </section>
+              ) : null}
+
+              {activeTab === 'retention' ? (
+                <section className="settings-section" aria-labelledby="settings-retention-title">
+                  <div className="settings-section-heading">
+                    <span className="settings-section-icon" aria-hidden="true">
+                      <Timer size={16} />
+                    </span>
+                    <h2 id="settings-retention-title">History retention</h2>
+                  </div>
+                  <label className="settings-toggle" htmlFor="settings-retention-unlimited">
+                    <input
+                      id="settings-retention-unlimited"
+                      type="checkbox"
+                      checked={unlimitedRetention}
+                      onChange={(event) => setUnlimitedRetention(event.currentTarget.checked)}
+                    />
+                    <span>Bez limitu retencji</span>
+                  </label>
+                  <label className="settings-field" htmlFor="settings-retention-days">
+                    <span>Days kept</span>
+                    <input
+                      id="settings-retention-days"
+                      type="number"
+                      min={MIN_RETENTION_DAYS}
+                      max={MAX_RETENTION_DAYS}
+                      step={1}
+                      disabled={unlimitedRetention}
+                      value={retentionDays}
+                      onChange={(event) => setRetentionDays(event.currentTarget.value)}
+                    />
+                  </label>
+                  <p className="settings-help">
+                    History is unlimited by default. Turning retention on permanently deletes
+                    entries older than the given number of days.
+                  </p>
+                </section>
+              ) : null}
+
+              {activeTab === 'apps' ? (
+                <section className="settings-section" aria-labelledby="settings-denylist-title">
+                  <div className="settings-section-heading">
+                    <span className="settings-section-icon" aria-hidden="true">
+                      <ShieldBan size={16} />
+                    </span>
+                    <h2 id="settings-denylist-title">Excluded applications</h2>
+                  </div>
+                  <label className="settings-field" htmlFor="settings-denylist">
+                    <span>Bundle identifiers or executable names</span>
+                    <textarea
+                      id="settings-denylist"
+                      rows={4}
+                      spellCheck={false}
+                      value={denylist}
+                      onChange={(event) => setDenylist(event.currentTarget.value)}
+                    />
+                  </label>
+                  <p className="settings-help">
+                    One entry per line, at most {MAX_DENYLIST_ENTRIES}. Content copied
+                    in these applications never reaches the history.
+                  </p>
+                </section>
+              ) : null}
+
+              <StorageStats stats={stats} status={storageStatus} />
+
+              {activeTab === 'links' ? (
+                <section className="settings-section" aria-labelledby="settings-links-title">
+                  <h2 id="settings-links-title">
+                    <Globe size={15} aria-hidden="true" />
+                    Link previews
+                  </h2>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={linkPreviews}
+                      onChange={(event) => setLinkPreviews(event.currentTarget.checked)}
+                    />
+                    Fetch the page title and icon
+                  </label>
+                  <p className="settings-help">
+                    This is the only place the application talks to the network. On, it
+                    means opening the palette queries the pages visible in the list —
+                    each of them then learns that you are looking at your clipboard. The result
+                    is remembered, so the same page is asked once. Local and private
+                    addresses are never queried.
+                  </p>
+                </section>
+              ) : null}
+
+              {activeTab === 'keyvault' ? (
+                <section className="settings-section" aria-labelledby="settings-keyvault-title">
+                  <h2 id="settings-keyvault-title">
+                    <Vault size={15} aria-hidden="true" />
+                    Keyvault
+                  </h2>
+                  <label className="settings-field" htmlFor="settings-keyvault-url">
+                    <span>Vault address</span>
+                    <input
+                      id="settings-keyvault-url"
+                      type="url"
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="https://your-vault.example.com"
+                      // Locked once paired, and showing what the device actually uses rather than
+                      // what the settings row remembers. Editing it would change nothing — reads go
+                      // to the pairing — and a field that looks editable and is ignored is precisely
+                      // the trap this pane used to be.
+                      value={paired ? (identity?.url ?? '') : vaultUrl}
+                      disabled={paired}
+                      onChange={(event) => setVaultUrl(event.currentTarget.value)}
+                    />
+                  </label>
+                  <p className="settings-help">
+                    {paired ? (
+                      <>
+                        This device is paired. It has its own key and its own token, and neither can
+                        be typed in here. <strong>Reset</strong> forgets the pairing so you can
+                        connect again — it only forgets it locally, so the device stays listed in the
+                        vault until the next pairing retires it or you revoke it there.
+                      </>
+                    ) : (
+                      <>
+                        <strong>Connect</strong> pairs this device: it generates a key here, sends
+                        only the public half, and the browser hands back a token of its own — nothing
+                        is pasted, and the key never leaves this machine. Put in the address you open
+                        your vault at in a browser. The vault answers with sealed envelopes; a copied
+                        key goes to the clipboard without ever being recorded in the history or shown
+                        here.
+                      </>
+                    )}
+                  </p>
                   <div className="workflow-actions workflow-actions--start">
                     <button
                       type="button"
-                      onClick={() => {
-                        // Best effort: a refused clipboard leaves the link on screen to select by
-                        // hand, which is worse but not a dead end.
-                        void navigator.clipboard
-                          ?.writeText(pairing.url)
-                          .then(() => setCopied(true))
-                          .catch(() => setCopied(false));
-                      }}
+                      onClick={() => void connectToVault()}
+                      disabled={vaultBusy || pending || paired || pairing !== null}
                     >
-                      {copied ? 'Copied' : 'Copy link'}
+                      {pairing !== null ? 'Waiting for approval…' : 'Connect'}
                     </button>
-                    <button type="button" onClick={() => void cancelPairing()}>
-                      Cancel
+                    {paired ? (
+                      <button
+                        type="button"
+                        onClick={() => void resetPairing()}
+                        disabled={vaultBusy || pending || pairing !== null}
+                      >
+                        Reset
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => void testVaultConnection()}
+                      disabled={vaultBusy || pending}
+                    >
+                      {vaultBusy ? 'Talking to the vault…' : 'Test connection'}
                     </button>
                   </div>
+                  {pairing !== null ? (
+                    <div className="settings-pairing" role="status">
+                      <p>
+                        A browser was opened to approve this. It is your <strong>default</strong>
+                        browser, which may not be the one you are signed into the vault in — if the
+                        page asks you to sign in again, copy the link below and open it where you
+                        already are.
+                      </p>
 
-                  <p className="settings-help">
-                    Or open <code>/pair</code> on your vault and paste this code:
-                  </p>
-                  <p className="settings-pair-code">{pairing.code}</p>
-
-                  <p className="settings-help">
-                    Check the page shows this fingerprint — it is what ties that page to this
-                    application.
-                  </p>
-                  <p className="settings-pair-fingerprint">{pairing.fingerprint}</p>
-
-                  {expiryLabel(pairing.expiresAt, now) !== null ? (
-                    <p className="settings-help">{expiryLabel(pairing.expiresAt, now)}</p>
-                  ) : null}
-                </div>
-              ) : null}
-              {pairNotice !== null ? (
-                <p className="workflow-status" role="status">
-                  {pairNotice}
-                </p>
-              ) : null}
-              {vaultError ? (
-                <p className="workflow-alert" role="alert">
-                  {vaultError}
-                </p>
-              ) : null}
-              {vaultCopiedSlug !== null ? (
-                <p className="workflow-status" role="status">
-                  {vaultCopiedSlug} is on the clipboard. Paste it where it is needed.
-                </p>
-              ) : null}
-              {vaultSecrets !== null ? (
-                vaultSecrets.length === 0 ? (
-                  <p className="workflow-status" role="status">
-                    The token can read no secrets.
-                  </p>
-                ) : (
-                  <ul className="settings-keyvault-list" aria-label="Vault secrets">
-                    {vaultSecrets.map((secret) => (
-                      <li key={secret.slug}>
-                        <span>{secret.name}</span>
-                        <span className="settings-keyvault-slug">{secret.slug}</span>
+                      <label className="settings-field" htmlFor="settings-pairing-url">
+                        <span>Pairing link</span>
+                        <input id="settings-pairing-url" readOnly value={pairing.url} />
+                      </label>
+                      <div className="workflow-actions workflow-actions--start">
                         <button
                           type="button"
-                          aria-label={`Copy ${secret.slug}`}
-                          disabled={vaultBusy || pending}
-                          onClick={() => void copyVaultSecret(secret.slug)}
+                          onClick={() => {
+                            // Best effort: a refused clipboard leaves the link on screen to select by
+                            // hand, which is worse but not a dead end.
+                            void navigator.clipboard
+                              ?.writeText(pairing.url)
+                              .then(() => setCopied(true))
+                              .catch(() => setCopied(false));
+                          }}
                         >
-                          Copy
+                          {copied ? 'Copied' : 'Copy link'}
                         </button>
-                      </li>
-                    ))}
-                  </ul>
-                )
-              ) : null}
-            </section>
+                        <button type="button" onClick={() => void cancelPairing()}>
+                          Cancel
+                        </button>
+                      </div>
 
-            <section className="workflow-section" aria-labelledby="settings-export-title">
-              <h2 id="settings-export-title">
-                <Download size={15} aria-hidden="true" />
-                History export
-              </h2>
-              <p className="settings-help">
-                Writes the whole history in SuperCmd format — {'clipboard.json'},
-                {' clipboard.csv'} i katalog {'images'} z obrazami. Ten sam format
-                importer czyta z powrotem.
-              </p>
-              <div className="workflow-actions workflow-actions--start">
-                <button type="button" onClick={() => void runExport()} disabled={exporting}>
-                  {exporting ? 'Exporting…' : 'Export history'}
-                </button>
-              </div>
-              {exportSummary ? (
-                <p className="workflow-status" role="status">
-                  Wrote {exportSummary.records} entries, of which {exportSummary.images}{' '}
-                  carry an image. {exportSummary.withoutPayload} bez zapisanej contents —
-                  were exported as metadata only.
-                </p>
+                      <p className="settings-help">
+                        Or open <code>/pair</code> on your vault and paste this code:
+                      </p>
+                      <p className="settings-pair-code">{pairing.code}</p>
+
+                      <p className="settings-help">
+                        Check the page shows this fingerprint — it is what ties that page to this
+                        application.
+                      </p>
+                      <p className="settings-pair-fingerprint">{pairing.fingerprint}</p>
+
+                      {expiryLabel(pairing.expiresAt, now) !== null ? (
+                        <p className="settings-help">{expiryLabel(pairing.expiresAt, now)}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {pairNotice !== null ? (
+                    <p className="workflow-status" role="status">
+                      {pairNotice}
+                    </p>
+                  ) : null}
+                  {vaultError ? (
+                    <p className="workflow-alert" role="alert">
+                      {vaultError}
+                    </p>
+                  ) : null}
+                  {vaultCopiedSlug !== null ? (
+                    <p className="workflow-status" role="status">
+                      {vaultCopiedSlug} is on the clipboard. Paste it where it is needed.
+                    </p>
+                  ) : null}
+                  {vaultSecrets !== null ? (
+                    vaultSecrets.length === 0 ? (
+                      <p className="workflow-status" role="status">
+                        The token can read no secrets.
+                      </p>
+                    ) : (
+                      <ul className="settings-keyvault-list" aria-label="Vault secrets">
+                        {vaultSecrets.map((secret) => (
+                          <li key={secret.slug}>
+                            <span>{secret.name}</span>
+                            <span className="settings-keyvault-slug">{secret.slug}</span>
+                            <button
+                              type="button"
+                              aria-label={`Copy ${secret.slug}`}
+                              disabled={vaultBusy || pending}
+                              onClick={() => void copyVaultSecret(secret.slug)}
+                            >
+                              Copy
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )
+                  ) : null}
+                </section>
               ) : null}
-            </section>
+
+              {activeTab === 'export' ? (
+                <section className="settings-section" aria-labelledby="settings-export-title">
+                  <h2 id="settings-export-title">
+                    <Download size={15} aria-hidden="true" />
+                    History export
+                  </h2>
+                  <p className="settings-help">
+                    Writes the whole history in SuperCmd format — {'clipboard.json'},
+                    {' clipboard.csv'} i katalog {'images'} z obrazami. Ten sam format
+                    importer czyta z powrotem.
+                  </p>
+                  <div className="workflow-actions workflow-actions--start">
+                    <button type="button" onClick={() => void runExport()} disabled={exporting}>
+                      {exporting ? 'Exporting…' : 'Export history'}
+                    </button>
+                  </div>
+                  {exportSummary ? (
+                    <p className="workflow-status" role="status">
+                      Wrote {exportSummary.records} entries, of which {exportSummary.images}{' '}
+                      carry an image. {exportSummary.withoutPayload} bez zapisanej contents —
+                      were exported as metadata only.
+                    </p>
+                  ) : null}
+                </section>
+              ) : null}
+            </div>
 
             <div className="workflow-actions">
               <button type="submit" className="workflow-primary" disabled={pending}>
-                {pending ? 'Zapisywanie…' : 'Save settings'}
+                {pending ? 'Saving…' : 'Save settings'}
               </button>
             </div>
           </form>

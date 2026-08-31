@@ -68,11 +68,40 @@ button {
 .settings-pair-code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.95rem;
-  word-break: break-all;
   user-select: all;
   margin: 0.35rem 0;
 }
 
+/* The pairing block: a stack, not a row.
+ *
+ * It lived in .workflow-status, which is display:flex in row direction and built for one short
+ * line beside an icon. A paragraph, a link field, two buttons, a code and a fingerprint each
+ * became a column a few pixels wide, with the code breaking one character per line. A container
+ * meant for a sentence is not a container for a block. */
+.settings-pairing {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px;
+  background: var(--panel-2, #f6f5f0);
+  border: 1px solid var(--line, #d8d4c8);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.settings-pairing p {
+  margin: 0;
+}
+
 .settings-pairing .settings-field input[readonly] {
   user-select: all;
+}
+
+/* Long, unbreakable strings. `break-all` would be right in a wide column and is exactly what
+ * shredded the code when the column was narrow; `anywhere` breaks only when it must. */
+.settings-pair-code,
+.settings-pair-fingerprint {
+  overflow-wrap: anywhere;
+  word-break: normal;
 }

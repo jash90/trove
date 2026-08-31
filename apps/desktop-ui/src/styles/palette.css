@@ -1502,3 +1502,50 @@
   width: 27px;
   height: 27px;
 }
+
+/* The settings tab strip. Same visual language as the palette's controls: paper ground, a
+   strong hairline, and the accent reserved for what is selected. */
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.settings-tabs__tab {
+  padding: 7px 12px;
+  cursor: pointer;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.settings-tabs__tab:hover {
+  color: var(--ink);
+}
+
+.settings-tabs__tab.is-selected {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--line-strong);
+}
+
+.settings-tabs__tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* One section shows at a time, so the sheet is already the surface. A card inside a card only
+   adds a second border to look at. */
+.settings-panel .settings-section {
+  padding: 0;
+  background: none;
+  border: none;
+}
