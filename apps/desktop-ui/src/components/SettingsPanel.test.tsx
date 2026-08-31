@@ -400,6 +400,35 @@ describe('keyvault section', () => {
     });
   });
 
+  it('clears the fields once pairing has replaced what was in them', async () => {
+    const gateway = makeGateway();
+    // The core clears the overrides as part of pairing, so the settings it hands back afterwards
+    // no longer carry them.
+    gateway.getSettings = vi.fn(async () => ({
+      ...persistedSettings,
+      keyvault: { url: null, token: null },
+    })) as typeof gateway.getSettings;
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    await userEvent.type(screen.getByLabelText(/Vault address/u), 'https://old.example.invalid');
+    expect(await screen.findByText(/override the paired device identity/u)).toBeVisible();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    // The poll reports success; the pane must stop showing text the database no longer holds,
+    // or a later Save writes it back and breaks the pairing for real.
+    // The pane polls every two seconds, so this waits past one full cycle rather than the
+    // default second — the assertion is about what the poll does, not about how fast it runs.
+    await waitFor(
+      () => {
+        expect(screen.getByLabelText(/Vault address/u)).toHaveValue('');
+      },
+      { timeout: 4000 },
+    );
+    expect(screen.queryByText(/override the paired device identity/u)).not.toBeInTheDocument();
+  });
+
   it('says plainly when a leftover override is what the vault is being asked with', async () => {
     const gateway = makeGateway();
     render(<SettingsPanel gateway={gateway} />);

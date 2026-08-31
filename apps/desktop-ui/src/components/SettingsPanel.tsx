@@ -394,6 +394,18 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
           // A pairing that worked leaves this install configured, so the list it could not fetch
           // a moment ago is worth fetching now.
           if (status === 'paired') {
+            // Pairing clears the overrides in the database, so the fields on screen are now
+            // showing values nobody stored. Left alone they keep warning that they outrank the
+            // pairing that just replaced them, which is the opposite of true — and if anyone
+            // then presses Save, the stale text is written back and really does break it.
+            try {
+              const settings = await gateway.getSettings();
+              setPersisted(settings);
+              setVaultUrl(settings.keyvault.url ?? '');
+              setVaultToken(settings.keyvault.token ?? '');
+            } catch {
+              /* the pairing stands regardless; the next open reloads these anyway */
+            }
             try {
               setVaultSecrets(await gateway.keyvaultList());
               setVaultError(null);
