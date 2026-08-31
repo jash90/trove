@@ -142,6 +142,8 @@ export const pairingMessage = (status: string): string => {
 
 export const keyvaultErrorMessage = (code: string): string => {
   switch (code) {
+    case 'keyvault_vault_api_not_advertised':
+      return 'That address answers, but nothing there says where its vault is. Check the address, or update the vault so its page advertises one.';
     case 'keyvault_no_vault_address':
       return 'Nothing here names a vault yet. Type its address above, then connect.';
     case 'keyvault_pairing_page_unknown':
@@ -659,7 +661,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                   type="url"
                   autoComplete="off"
                   spellCheck={false}
-                  placeholder="https://your-vault.convex.site"
+                  placeholder="https://your-vault.example.com"
                   value={vaultUrl}
                   onChange={(event) => setVaultUrl(event.currentTarget.value)}
                 />
@@ -684,10 +686,11 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
               <p className="settings-help">
                 <strong>Connect</strong> pairs this device: it generates a key here, sends only
                 the public half, and the browser hands back a token of its own — nothing is
-                pasted, and the key never leaves this machine. The address below is needed only
-                the first time, or to point this install at a different vault; once paired,
-                connecting again needs nothing typed at all. Both fields are optional:
-                leave them blank and this application uses the
+                pasted, and the key never leaves this machine. The address below is the one you
+                open your vault at in a browser, and it is needed only the first time — once
+                paired, connecting again needs nothing typed at all, so there is no reason to
+                leave anything in these fields. Both are optional: leave them blank and this
+                application uses the
                 device’s shared vault identity at <code>~/.config/keyvault/agent.json</code>,
                 which is also where the private key lives — it is never stored here. Fill one in
                 only to point this install at a different vault. The vault answers with sealed

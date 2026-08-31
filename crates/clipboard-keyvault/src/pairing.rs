@@ -136,6 +136,77 @@ async fn call(
         .unwrap_or(serde_json::Value::Null))
 }
 
+/// Most bytes read while looking for the API advertisement.
+///
+/// The address is typed by a person and may name any host at all, so the answer is capped rather
+/// than trusted to be a page. The tag sits in `<head>`; anything past this is not the tag.
+const MAX_DISCOVERY_BYTES: usize = 64 * 1024;
+
+/// Pulls the advertised API address out of a page.
+///
+/// A deliberate scan rather than an HTML parser: this reads one attribute out of a document we
+/// publish ourselves, and pulling a parser into a crate kept this narrow would cost more than it
+/// answers. Separated from the request so it can be tested without a network.
+pub fn api_from_document(document: &str) -> Option<String> {
+    let head = &document[..document.len().min(MAX_DISCOVERY_BYTES)];
+    let tag_start = head.find(r#"name="keyvault-api""#)?;
+    let rest = &head[tag_start..];
+    // Bounded to this tag: a `content` belonging to some later tag is not this one's.
+    let tag_end = rest.find('>')?;
+    let tag = &rest[..tag_end];
+    let content_start = tag.find(r#"content=""#)? + r#"content=""#.len();
+    let value = &tag[content_start..];
+    let value = &value[..value.find('"')?];
+    // A build with no VITE_CONVEX_URL leaves the literal in place; it is not an address, and the
+    // ordinary refusal below is the right answer for it.
+    crate::validate_base_url(value).ok()?;
+    Some(value.trim_end_matches('/').to_owned())
+}
+
+/// Turns whatever someone typed into the vault's API address.
+///
+/// The API and the web interface sit on different hosts and neither can be derived from the
+/// other, so a page has to say where its API is. Typing the address you visit is the reasonable
+/// thing to do — it is the address of your vault — and before this it produced "the vault could
+/// not be reached", because a static host answers a POST with 405.
+///
+/// A Convex host is taken as the API directly: the path that already worked costs no extra
+/// request.
+pub async fn resolve_api(address: &str) -> Result<String, KeyvaultError> {
+    crate::validate_base_url(address)?;
+    let parsed = url::Url::parse(address.trim()).map_err(|_| KeyvaultError::InvalidUrl)?;
+    let host = parsed.host_str().unwrap_or_default();
+    if host.ends_with(".convex.site") || host.ends_with(".convex.cloud") {
+        return client_api(address);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|_| KeyvaultError::Transport)?;
+    let mut response = client
+        .get(address.trim().trim_end_matches('/'))
+        .send()
+        .await
+        .map_err(|_| KeyvaultError::Transport)?;
+    if !response.status().is_success() {
+        return Err(KeyvaultError::VaultApiNotAdvertised);
+    }
+
+    // Read a bounded prefix rather than the whole body: the tag is in `<head>`, and the host is
+    // whatever was typed.
+    let mut body = Vec::new();
+    while body.len() < MAX_DISCOVERY_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+            Ok(None) => break,
+            Err(_) => return Err(KeyvaultError::Transport),
+        }
+    }
+    let text = String::from_utf8_lossy(&body);
+    api_from_document(&text).ok_or(KeyvaultError::VaultApiNotAdvertised)
+}
+
 /// Asks the deployment where its web interface lives.
 ///
 /// The API and the interface sit on different hosts and neither can be derived from the other, so

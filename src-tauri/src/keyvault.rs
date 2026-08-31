@@ -190,7 +190,12 @@ pub async fn pair_start_service(base_url: String) -> Result<String, String> {
         clipboard_keyvault::known_base_url(clipboard_keyvault::CONSUMER)
             .ok_or_else(|| clipboard_keyvault::KeyvaultError::NoVaultAddress.to_string())?
     } else {
-        typed
+        // Whatever was typed, resolved to the API. The address someone knows is the one they
+        // visit, and that is a different host from the API — asking them to know the second is
+        // asking them to know a deployment detail.
+        clipboard_keyvault::resolve_api(&typed)
+            .await
+            .map_err(|error| error.to_string())?
     };
     clipboard_keyvault::validate_base_url(&base_url).map_err(|error| error.to_string())?;
 

@@ -32,8 +32,8 @@ pub use device::{
 pub use envelope::{AgentEnvelope, MAX_ENVELOPE_BYTES};
 pub use http::{ReqwestSecretTransport, SecretResponse, SecretTransport};
 pub use pairing::{
-    DeviceKey, PairingOutcome, PairingStart, claim as claim_pairing, generate_device_key,
-    page_url as pairing_page_url, start as start_pairing,
+    DeviceKey, PairingOutcome, PairingStart, api_from_document, claim as claim_pairing,
+    generate_device_key, page_url as pairing_page_url, resolve_api, start as start_pairing,
 };
 
 /// Every failure this crate can report, as a stable code.
@@ -70,6 +70,11 @@ pub enum KeyvaultError {
     /// different.
     #[error("keyvault_no_vault_address")]
     NoVaultAddress,
+    /// The address answers, but nothing there says where the vault's API is. Distinct from being
+    /// unreachable: that is a connection to check, this is an address to correct or a vault to
+    /// update.
+    #[error("keyvault_vault_api_not_advertised")]
+    VaultApiNotAdvertised,
     #[error("keyvault_invalid_slug")]
     InvalidSlug,
     #[error("keyvault_unauthorized")]

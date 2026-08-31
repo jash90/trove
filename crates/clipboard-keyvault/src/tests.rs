@@ -463,3 +463,67 @@ fn an_address_that_could_not_be_one_is_not_offered() {
         );
     }
 }
+
+// ------------------------------------------------------ discovering the API --
+
+fn page_advertising(api: &str) -> String {
+    format!(
+        r#"<!doctype html><html><head><meta charset="UTF-8" />
+        <meta name="keyvault-api" content="{api}" />
+        <title>KeyVault</title></head><body><div id="root"></div></body></html>"#
+    )
+}
+
+#[test]
+fn a_vault_page_says_where_its_api_is() {
+    assert_eq!(
+        crate::pairing::api_from_document(&page_advertising(
+            "https://trustworthy-eagle-783.convex.cloud"
+        ))
+        .as_deref(),
+        Some("https://trustworthy-eagle-783.convex.cloud")
+    );
+    // A local vault advertises a loopback address, which the config rules already allow.
+    assert_eq!(
+        crate::pairing::api_from_document(&page_advertising("http://127.0.0.1:3210")).as_deref(),
+        Some("http://127.0.0.1:3210")
+    );
+}
+
+#[test]
+fn a_build_that_never_substituted_the_variable_is_not_an_address() {
+    // Vite leaves the literal when VITE_CONVEX_URL is unset. Connecting to it would be absurd,
+    // and the ordinary "nothing here advertises an API" refusal is the honest answer.
+    assert_eq!(
+        crate::pairing::api_from_document(&page_advertising("%VITE_CONVEX_URL%")),
+        None
+    );
+}
+
+#[test]
+fn a_page_that_advertises_nothing_usable_is_refused() {
+    for document in [
+        "<!doctype html><html><head><title>Something else</title></head></html>".to_owned(),
+        // Present but empty, and present but not a URL.
+        page_advertising(""),
+        page_advertising("not a url"),
+        // http off loopback: the transport would refuse it later anyway, so refuse it here.
+        page_advertising("http://vault.example.com"),
+        String::new(),
+    ] {
+        assert_eq!(
+            crate::pairing::api_from_document(&document),
+            None,
+            "should not have accepted: {document}"
+        );
+    }
+}
+
+#[test]
+fn a_content_belonging_to_a_later_tag_is_not_taken_for_this_one() {
+    // The scan is bounded to the advertising tag. Without that bound the first `content=` after
+    // it anywhere in the document would be read as the API address.
+    let document = r#"<head><meta name="keyvault-api" />
+        <meta name="description" content="https://impostor.example.com" /></head>"#;
+    assert_eq!(crate::pairing::api_from_document(document), None);
+}
