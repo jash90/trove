@@ -1,9 +1,9 @@
 CREATE TABLE schema_identity (
-  identity TEXT PRIMARY KEY CHECK(identity = 'trove-store'),
+  identity TEXT PRIMARY KEY CHECK(identity = 'clipboard-store'),
   revision INTEGER NOT NULL CHECK(revision = 2)
 );
 
-INSERT INTO schema_identity(identity, revision) VALUES ('trove-store', 2);
+INSERT INTO schema_identity(identity, revision) VALUES ('clipboard-store', 2);
 
 CREATE TABLE content (
   content_id INTEGER PRIMARY KEY,

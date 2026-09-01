@@ -366,7 +366,7 @@ fn option_string_bytes(value: &Option<String>) -> usize {
 
 fn duplicate_event_fingerprint(base_fingerprint: [u8; 32], ordinal: u64) -> [u8; 32] {
     let mut hasher = FramedHasher::new();
-    hasher.add_optional(Some(b"trove-import.record-fingerprint.duplicate-v1"));
+    hasher.add_optional(Some(b"clipboard-import.record-fingerprint.duplicate-v1"));
     hasher.add_optional(Some(&base_fingerprint));
     hasher.add_optional(Some(&ordinal.to_be_bytes()));
     hasher.finish()

@@ -46,18 +46,31 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      # Through env, never interpolated into the script body. A workflow_dispatch
+      # input is attacker-controllable text, and this job holds the signing
+      # certificate and the notarisation key — `v1$(...)` in the tag box would
+      # otherwise run as code with both in reach. Validating here also settles
+      # it for every later step, which all read these outputs.
       - name: Read the version from the tag
         id: version
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG="${INPUT_TAG:-$REF_NAME}"
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::refusing a tag that is not vMAJOR.MINOR.PATCH: $TAG"; exit 1 ;;
+          esac
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       # The tag and the manifests have to agree. They are bumped by hand, and a
       # release built from a mismatch would ship a version nobody can trace.
       - name: Check the tag matches the manifests
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
           for f in Cargo.toml src-tauri/tauri.conf.json apps/desktop-ui/package.json; do
             grep -q "\"\?version\"\? *[:=] *\"$VERSION\"" "$f" \
               || { echo "::error::$f does not declare version $VERSION"; exit 1; }
@@ -139,13 +152,15 @@ jobs:
       # sleeping at zero CPU with no connection, printing nothing, never
       # registering a submission. A zip has nothing to mount.
       - name: Notarise and staple the application
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           APP="target/release/bundle/macos/Trove.app"
           ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/Trove.zip"
           xcrun notarytool submit "$RUNNER_TEMP/Trove.zip" \
             --key "$RUNNER_TEMP/notary.p8" \
-            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
-            --issuer "${{ secrets.APPLE_API_ISSUER }}" \
+            --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" \
             --wait --timeout 30m
           xcrun stapler staple "$APP"
 
@@ -157,8 +172,9 @@ jobs:
       # carries its ticket and opens without an online Gatekeeper check.
       - name: Build the disk image
         id: dmg
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
           DMG="$RUNNER_TEMP/Trove_${VERSION}_aarch64.dmg"
           STAGE="$RUNNER_TEMP/dmg-stage"
           rm -rf "$STAGE"; mkdir -p "$STAGE"
@@ -171,31 +187,34 @@ jobs:
       - name: Sign, notarise and staple the disk image
         env:
           IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          DMG: ${{ steps.dmg.outputs.path }}
         run: |
-          DMG="${{ steps.dmg.outputs.path }}"
           codesign --force --timestamp --keychain "$KEYCHAIN" --sign "$IDENTITY" "$DMG"
           # --timeout so a stalled upload ends by itself rather than burning the
           # job's whole budget with nothing to show for it.
           xcrun notarytool submit "$DMG" \
             --key "$RUNNER_TEMP/notary.p8" \
-            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
-            --issuer "${{ secrets.APPLE_API_ISSUER }}" \
+            --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" \
             --wait --timeout 30m
           xcrun stapler staple "$DMG"
 
       # The one check that speaks for the person downloading this: both the
       # image and the application inside it must come back as notarised.
       - name: Verify Gatekeeper accepts both
+        env:
+          DMG: ${{ steps.dmg.outputs.path }}
         run: |
-          spctl -a -vv -t open --context context:primary-signature "${{ steps.dmg.outputs.path }}"
+          spctl -a -vv -t open --context context:primary-signature "$DMG"
           spctl -a -vv "target/release/bundle/macos/Trove.app"
 
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          DMG: ${{ steps.dmg.outputs.path }}
         run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          DMG="${{ steps.dmg.outputs.path }}"
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" "$DMG" --clobber
           else

@@ -1273,7 +1273,7 @@ fn valid_content_flags(value: i64) -> Option<ContentFlags> {
 
 fn missing_content_hash(kind: ContentKind, primary_mime: &str, missing_ref: &str) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"trove-store.missing-primary-v1");
+    hasher.update(b"clipboard-store.missing-primary-v1");
     for component in [
         kind.as_str().as_bytes(),
         primary_mime.as_bytes(),

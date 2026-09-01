@@ -1855,7 +1855,7 @@ fn prepared_snapshot_fingerprint(
     report: &ImportParseReport,
 ) -> Result<[u8; 32], ImportError> {
     let mut hasher = FramedHasher::new();
-    hasher.add_optional(Some(b"trove-import.prepared-snapshot-v1"));
+    hasher.add_optional(Some(b"clipboard-import.prepared-snapshot-v1"));
     hasher.add_optional(Some(source.as_str().as_bytes()));
     hasher.add_optional(Some(&manifest_fingerprint));
     hasher.add_optional(Some(&total_records.to_be_bytes()));
