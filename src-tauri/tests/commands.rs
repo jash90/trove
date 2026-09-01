@@ -2131,12 +2131,13 @@ async fn clearing_overrides_that_are_not_there_writes_nothing() {
     assert_eq!(state.store.get_setting("app").unwrap(), before);
 }
 
-/// The palette is summoned over whatever the user is working in, so it has to
-/// come out in front of it. Asserted against the configuration file itself
-/// because that is where the window level is decided — the test harness builds
-/// its windows from a mock context and would never see this flag.
+/// Each window is opened over something it must not disappear behind: the
+/// palette over whatever the user is working in, settings over the palette.
+/// Asserted against the configuration file itself because that is where the
+/// window level is decided — the test harness builds its windows from a mock
+/// context and would never see this flag.
 #[test]
-fn the_palette_floats_above_the_window_it_was_summoned_over() {
+fn both_windows_float_above_whatever_they_were_summoned_over() {
     let config: serde_json::Value =
         serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
     let windows = config["app"]["windows"].as_array().unwrap();
@@ -2154,11 +2155,14 @@ fn the_palette_floats_above_the_window_it_was_summoned_over() {
         "the palette must not open behind the window it is meant to paste into"
     );
 
-    // Settings is read and edited slowly, in its own window, and a panel that
-    // hovers over every other application while that happens is a nuisance
-    // rather than a convenience.
-    assert!(
-        window_named("settings").get("alwaysOnTop").is_none(),
-        "settings is an ordinary window and should stay one"
+    // Settings had been left at the ordinary level on the reasoning that a
+    // panel hovering over every other application is a nuisance. True in the
+    // abstract, and wrong here: the palette is the window settings is opened
+    // from, and a floating palette covered it. A settings window nobody can
+    // see is worse than one that hovers.
+    assert_eq!(
+        window_named("settings")["alwaysOnTop"],
+        serde_json::json!(true),
+        "settings is opened from the palette and must come out above it"
     );
 }
