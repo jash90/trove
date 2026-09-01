@@ -30,6 +30,7 @@ pub fn run() {
                 eprintln!("clipboard-history: global shortcut unavailable");
             }
             app.manage(hotkey::PasteTarget::new());
+            app.manage(hotkey::PastePrompt::new());
             app.manage(hotkey::ActiveShortcut::default());
             let control = monitor::MonitorControl::new();
             app.manage(control.clone());
@@ -45,10 +46,7 @@ pub fn run() {
             // without being activated, the palette stayed a blank rectangle
             // until something brought it forward. Asking for focus once at
             // startup is what a manually launched application does anyway.
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            hotkey::show_palette(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {

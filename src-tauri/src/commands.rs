@@ -48,6 +48,7 @@ macro_rules! clipboard_history_command_registry {
             launch_app => $crate::commands::launch_app,
             get_app_icon => $crate::commands::get_app_icon,
             open_settings_window => $crate::commands::open_settings_window,
+            open_accessibility_settings_window => $crate::commands::open_accessibility_settings_window,
             export_history => $crate::commands::export_history,
             get_link_preview => $crate::commands::get_link_preview,
             keyvault_list => $crate::commands::keyvault_list,
@@ -607,37 +608,133 @@ pub async fn copy_event<R: tauri::Runtime>(
         .write_text(text)
         .map_err(|_| "clipboard_unavailable".to_owned())?;
     let mode = if paste {
-        paste_into_previous_window(&app)
+        paste_into_previous_window(&app).await
     } else {
         CopyModeDto::Copied
     };
     Ok(CopyResultDto { mode, plain_text })
 }
 
+/// How long the target is given to come forward before the keystroke is posted.
+///
+/// Activation is a request to the window server, not a function call that has
+/// finished when it returns: post immediately and the keystroke arrives while
+/// the target still has no key window, which routes it nowhere. Long enough to
+/// win that race, short enough that nobody sees a pause.
+const ACTIVATION_SETTLE: std::time::Duration = std::time::Duration::from_millis(90);
+
 /// Sends the entry to the window the user was in before the palette appeared.
 ///
 /// The entry is already on the clipboard, so every refusal below still leaves
 /// the user able to paste by hand. Saying which refusal happened is the point:
 /// a silent no-op is indistinguishable from a broken application.
-fn paste_into_previous_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> CopyModeDto {
+async fn paste_into_previous_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> CopyModeDto {
     let target = app
         .try_state::<crate::hotkey::PasteTarget>()
-        .and_then(|target| target.take());
+        .and_then(|target| target.current());
+    // Unconditionally, and before the readiness check rather than after it: the
+    // entry is on the clipboard whatever happens next, and a palette left
+    // standing in front of the window the user meant to paste into is a worse
+    // answer than a refusal they can read once they come back.
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
     match paste_readiness(target) {
-        Some(mode) => mode,
-        None => {
-            // Hide first: the keystroke goes to the window that had focus, and
-            // leaving the palette in front would send it into a dead end.
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.hide();
+        Some(mode) => {
+            if mode == CopyModeDto::CopiedOnlyPermissionRequired {
+                ask_for_paste_permission(app);
             }
+            mode
+        }
+        None => {
             let pid = target.unwrap_or_default();
+            // Hiding our window does not hand activation back — an application
+            // with no window on screen stays the active one — and a process
+            // that does not own the key window has nowhere to route Command-V.
+            // So the target is asked for the front explicitly and given a
+            // moment to take it.
+            //
+            // A refusal here is the same fact `readiness` refuses a missing pid
+            // for: the application we meant to paste into has quit or cannot be
+            // activated, and firing Command-V anyway would type into whatever
+            // happened to be in front instead. Better to say the target is gone
+            // than to report a paste that landed somewhere nobody asked for.
+            if !activate_paste_target(pid) {
+                return CopyModeDto::CopiedOnlyTargetLost;
+            }
+            tokio::time::sleep(ACTIVATION_SETTLE).await;
             if paste_keystroke(pid) {
                 CopyModeDto::Pasted
             } else {
                 CopyModeDto::CopiedOnlyPlatformLimit
             }
         }
+    }
+}
+
+/// Asks for Accessibility permission, at most once per run.
+///
+/// The system dialog only appears while it has no answer on record for this
+/// application, and never twice in one launch — so on the machine that has
+/// already answered "no", the ask the user would see is nothing at all. That is
+/// why a refused prompt falls through to opening the settings pane, which works
+/// whatever the system has recorded.
+///
+/// Once per run rather than once per refusal: bringing System Settings forward
+/// on every Enter would be nagging, and after the first time the palette's own
+/// message carries a button to the same place.
+fn ask_for_paste_permission<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let Some(prompt) = app.try_state::<crate::hotkey::PastePrompt>() else {
+        return;
+    };
+    if !prompt.claim_first_ask() {
+        return;
+    }
+    if !request_paste_trust() {
+        open_accessibility_settings();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn request_paste_trust() -> bool {
+    platform_macos::request_trust()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn request_paste_trust() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn open_accessibility_settings() -> bool {
+    platform_macos::open_accessibility_settings()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_accessibility_settings() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn activate_paste_target(pid: i32) -> bool {
+    platform_macos::activate_pid(pid)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate_paste_target(_pid: i32) -> bool {
+    false
+}
+
+/// Opens the Accessibility list in System Settings, on request.
+///
+/// The palette offers this next to the refusal it reports, so the fix is one
+/// click from the message explaining why pasting did not happen.
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_accessibility_settings_window() -> Result<(), String> {
+    if open_accessibility_settings() {
+        Ok(())
+    } else {
+        Err("accessibility_settings_unavailable".to_owned())
     }
 }
 

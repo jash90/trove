@@ -571,6 +571,26 @@
   line-height: 1.35;
 }
 
+/* Sits inside the message rather than beside it: the sentence explains the
+   refusal and the button is the end of that sentence. */
+.action-feedback__fix {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  margin-left: 8px;
+  padding: 2px 7px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.action-feedback__fix:hover {
+  border-color: var(--ink-soft, var(--muted));
+}
+
 .confirmation-backdrop {
   position: fixed;
   z-index: 20;

@@ -589,6 +589,7 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "launch_app",
             "get_app_icon",
             "open_settings_window",
+            "open_accessibility_settings_window",
             "export_history",
             "get_link_preview",
             "keyvault_list",

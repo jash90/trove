@@ -20,7 +20,16 @@ const copyFeedback = (mode: CopyMode, intent: HistoryActionIntent): string => {
     }
     return 'Copied to the clipboard.';
   }
-  return 'Copied. Automatic pasting is not available.';
+  // The three refusals used to share one sentence, which made the one that has
+  // a fix look the same as the two that do not. Only the first is something the
+  // user can act on, and it is by far the most common.
+  if (mode === 'copied_only_permission_required') {
+    return 'Copied. Pasting needs Accessibility permission.';
+  }
+  if (mode === 'copied_only_target_lost') {
+    return 'Copied. The window you were in is no longer there.';
+  }
+  return 'Copied. This system cannot paste automatically.';
 };
 
 interface UseHistoryActionsOptions {
@@ -36,6 +45,11 @@ interface UseHistoryActionsResult {
   deleteTargetId: number | null;
   deletePending: boolean;
   feedback: string | null;
+  /**
+   * The outcome the feedback describes, so the interface can offer the one
+   * refusal that has a fix a way to reach it. Null whenever `feedback` is.
+   */
+  feedbackMode: CopyMode | null;
   clearFeedback: () => void;
   copy: (eventId: number, intent: HistoryActionIntent) => void;
   togglePin: (item: HistoryItem) => void;
@@ -56,6 +70,18 @@ export const useHistoryActions = ({
   const [deleteTargetId, setDeleteTargetId] = useState<number | null>(null);
   const [deletePending, setDeletePending] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [feedbackMode, setFeedbackMode] = useState<CopyMode | null>(null);
+
+  const clearFeedback = (): void => {
+    setFeedback(null);
+    setFeedbackMode(null);
+  };
+
+  /** A message with no paste outcome behind it, so no offer of a fix. */
+  const report = (message: string): void => {
+    setFeedback(message);
+    setFeedbackMode(null);
+  };
 
   const visibleItems = useMemo(
     () =>
@@ -70,11 +96,14 @@ export const useHistoryActions = ({
 
   const copy = (eventId: number, intent: HistoryActionIntent): void => {
     const plainText = intent === 'pastePlain';
-    setFeedback(null);
+    clearFeedback();
     void gateway
       .copyEvent(eventId, plainText, intent !== 'copy')
-      .then((result) => setFeedback(copyFeedback(result.mode, intent)))
-      .catch(() => setFeedback('The entry could not be copied.'));
+      .then((result) => {
+        setFeedback(copyFeedback(result.mode, intent));
+        setFeedbackMode(result.mode);
+      })
+      .catch(() => report('The entry could not be copied.'));
   };
 
   const togglePin = (item: HistoryItem): void => {
@@ -82,20 +111,20 @@ export const useHistoryActions = ({
     const eventId = item.eventId;
     const previousPinned = item.pinned;
     const nextPinned = !previousPinned;
-    setFeedback(null);
+    clearFeedback();
     setPinPendingId(eventId);
     setPinOverrides((current) => ({ ...current, [eventId]: nextPinned }));
     void gateway
       .setPinned(eventId, nextPinned)
       .catch(() => {
         setPinOverrides((current) => ({ ...current, [eventId]: previousPinned }));
-        setFeedback('The pin could not be changed.');
+        report('The pin could not be changed.');
       })
       .finally(() => setPinPendingId(null));
   };
 
   const requestDelete = (eventId: number): void => {
-    setFeedback(null);
+    clearFeedback();
     onOpenPreview();
     setDeleteTargetId(eventId);
   };
@@ -115,11 +144,11 @@ export const useHistoryActions = ({
       .then(() => {
         setDeletedIds((current) => new Set([...current, eventId]));
         setDeleteTargetId(null);
-        setFeedback('Entry deleted from the history.');
+        report('Entry deleted from the history.');
       })
       .catch(() => {
         setDeleteTargetId(null);
-        setFeedback('The entry could not be deleted.');
+        report('The entry could not be deleted.');
       })
       .finally(() => {
         setDeletePending(false);
@@ -133,7 +162,8 @@ export const useHistoryActions = ({
     deleteTargetId,
     deletePending,
     feedback,
-    clearFeedback: () => setFeedback(null),
+    feedbackMode,
+    clearFeedback,
     copy,
     togglePin,
     requestDelete,

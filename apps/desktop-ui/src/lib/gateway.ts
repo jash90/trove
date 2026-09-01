@@ -104,6 +104,11 @@ export interface ClipboardGateway {
    * draw — the row keeps its glyph and carries on.
    */
   getAppIcon(path: string): Promise<Thumbnail | null>;
+  /**
+   * Opens the Accessibility list in System Settings — the one switch that
+   * decides whether an entry can be pasted rather than only copied.
+   */
+  openAccessibilitySettings(): Promise<void>;
 }
 
 /**
@@ -190,6 +195,7 @@ export const tauriGateway: ClipboardGateway = {
   listApps: () => invoke<AppEntry[]>('list_apps').then(validateAppCatalog),
   launchApp: (path) => invoke<void>('launch_app', { path }),
   getAppIcon: (path) => invoke<Thumbnail | null>('get_app_icon', { path }),
+  openAccessibilitySettings: () => invoke<void>('open_accessibility_settings_window'),
 };
 
 interface GatewayProviderProps {

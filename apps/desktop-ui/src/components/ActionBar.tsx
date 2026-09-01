@@ -1,14 +1,17 @@
-import { ClipboardCopy, Pin, PinOff, Trash2, Type } from 'lucide-react';
+import { ClipboardCopy, Pin, PinOff, ShieldCheck, Trash2, Type } from 'lucide-react';
 import { useRef, type KeyboardEventHandler } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useModalFocus } from '../hooks/useModalFocus';
+import type { CopyMode } from '../lib/contracts';
 
 interface ActionBarProps {
   pinned: boolean;
   pinPending: boolean;
   deletePending: boolean;
   feedback: string | null;
+  /** The outcome `feedback` describes, when a copy or paste produced it. */
+  feedbackMode: CopyMode | null;
   deleteConfirmationOpen: boolean;
   onPaste: () => void;
   onPastePlainText: () => void;
@@ -16,6 +19,7 @@ interface ActionBarProps {
   onRequestDelete: () => void;
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
+  onGrantPastePermission: () => void;
 }
 
 export const ActionBar = ({
@@ -23,6 +27,7 @@ export const ActionBar = ({
   pinPending,
   deletePending,
   feedback,
+  feedbackMode,
   deleteConfirmationOpen,
   onPaste,
   onPastePlainText,
@@ -30,6 +35,7 @@ export const ActionBar = ({
   onRequestDelete,
   onCancelDelete,
   onConfirmDelete,
+  onGrantPastePermission,
 }: ActionBarProps): React.JSX.Element => {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const deleteInvokerRef = useRef<HTMLButtonElement>(null);
@@ -132,6 +138,18 @@ export const ActionBar = ({
       {feedback ? (
         <p className="action-feedback" role="status" aria-live="polite">
           {feedback}
+          {/* The only refusal the user can do something about, so it is the
+              only one that carries a way to do it. */}
+          {feedbackMode === 'copied_only_permission_required' ? (
+            <button
+              type="button"
+              className="action-feedback__fix"
+              onClick={onGrantPastePermission}
+            >
+              <ShieldCheck size={14} aria-hidden="true" />
+              <span>Open System Settings</span>
+            </button>
+          ) : null}
         </p>
       ) : null}
       {confirmation && typeof document !== 'undefined'

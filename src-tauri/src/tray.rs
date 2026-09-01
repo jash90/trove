@@ -6,7 +6,7 @@
 //! the way.
 
 use tauri::{
-    AppHandle, Manager, Runtime,
+    AppHandle, Runtime,
     image::Image,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -97,7 +97,7 @@ fn on_menu_event<R: Runtime>(
     pause_item: &MenuItem<R>,
 ) {
     match event.id().as_ref() {
-        SHOW_ID => show_palette(app),
+        SHOW_ID => crate::hotkey::show_palette(app),
         SETTINGS_ID => crate::hotkey::show_settings(app),
         PAUSE_ID => {
             let paused = !control.is_paused();
@@ -106,13 +106,6 @@ fn on_menu_event<R: Runtime>(
         }
         QUIT_ID => app.exit(0),
         _ => {}
-    }
-}
-
-fn show_palette<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
     }
 }
 
