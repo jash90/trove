@@ -2130,3 +2130,35 @@ async fn clearing_overrides_that_are_not_there_writes_nothing() {
         .unwrap();
     assert_eq!(state.store.get_setting("app").unwrap(), before);
 }
+
+/// The palette is summoned over whatever the user is working in, so it has to
+/// come out in front of it. Asserted against the configuration file itself
+/// because that is where the window level is decided — the test harness builds
+/// its windows from a mock context and would never see this flag.
+#[test]
+fn the_palette_floats_above_the_window_it_was_summoned_over() {
+    let config: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let windows = config["app"]["windows"].as_array().unwrap();
+    let window_named = |label: &str| {
+        windows
+            .iter()
+            .find(|w| w["label"] == label)
+            .unwrap_or_else(|| panic!("no window labelled {label}"))
+            .clone()
+    };
+
+    assert_eq!(
+        window_named("main")["alwaysOnTop"],
+        serde_json::json!(true),
+        "the palette must not open behind the window it is meant to paste into"
+    );
+
+    // Settings is read and edited slowly, in its own window, and a panel that
+    // hovers over every other application while that happens is a nuisance
+    // rather than a convenience.
+    assert!(
+        window_named("settings").get("alwaysOnTop").is_none(),
+        "settings is an ordinary window and should stay one"
+    );
+}
