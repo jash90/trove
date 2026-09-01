@@ -161,6 +161,69 @@ describe('the unified palette', () => {
     expect(copyEvent).toHaveBeenCalledWith(expect.any(Number), false, true);
   });
 
+  it('names the Accessibility refusal and offers the way to fix it', async () => {
+    const user = userEvent.setup();
+    const copyEvent = vi.fn(async () => ({
+      mode: 'copied_only_permission_required',
+      plainText: false,
+    }));
+    const openAccessibilitySettings = vi.fn(async () => undefined);
+    render(
+      <App
+        gateway={
+          { ...mockGateway, copyEvent, openAccessibilitySettings } as ClipboardGateway
+        }
+      />,
+    );
+
+    await settleApps();
+    await settleHistory();
+
+    await user.type(screen.getByRole('searchbox'), 'project note');
+    await waitFor(() =>
+      expect(historyResults().getAllByRole('option').length).toBeGreaterThan(0),
+    );
+    await user.keyboard('{Enter}');
+
+    // The three refusals used to share one sentence, which hid the only one
+    // the user can act on behind the two they cannot.
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Pasting needs Accessibility permission/),
+      ).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Open System Settings' }));
+    expect(openAccessibilitySettings).toHaveBeenCalled();
+  });
+
+  it('offers no fix for a refusal the user cannot act on', async () => {
+    const user = userEvent.setup();
+    const copyEvent = vi.fn(async () => ({
+      mode: 'copied_only_target_lost',
+      plainText: false,
+    }));
+    render(<App gateway={{ ...mockGateway, copyEvent } as ClipboardGateway} />);
+
+    await settleApps();
+    await settleHistory();
+
+    await user.type(screen.getByRole('searchbox'), 'project note');
+    await waitFor(() =>
+      expect(historyResults().getAllByRole('option').length).toBeGreaterThan(0),
+    );
+    await user.keyboard('{Enter}');
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/The window you were in is no longer there/),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Open System Settings' }),
+    ).not.toBeInTheDocument();
+  });
+
   it('opens the preview only for a selected history entry', async () => {
     const user = userEvent.setup();
     render(<App />);

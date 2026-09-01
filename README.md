@@ -218,9 +218,18 @@ or `TransientType`; that is how password managers mark theirs. It also refuses
 anything from an application on the exclusion list.
 
 `Enter` and `⌘⇧V` ask for a paste into the window you were in before the palette
-opened. That needs the Accessibility permission (System Settings → Privacy &
-Security → Accessibility). Without it the entry still reaches the clipboard, and
-the application says why it did not paste instead of staying silent.
+opened: the entry goes on the clipboard, the palette puts itself away, the window
+you came from is brought back to the front, and Command-V is sent to it.
+
+That last step needs the Accessibility permission (System Settings → Privacy &
+Security → Accessibility). Without it the entry still reaches the clipboard and
+the palette still puts itself away — what changes is that the application says
+which of the three things went wrong instead of only that something did, and the
+one you can fix carries a button to the setting that fixes it. It also brings
+that setting up by itself, once per run: macOS shows its own permission dialog at
+most once per launch and never at all once you have answered, so an application
+that only asked the system to ask would, on the machine that needs this most, ask
+nobody anything.
 
 ## Grouped entries
 

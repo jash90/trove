@@ -224,6 +224,11 @@ const ClipboardPalette = (): React.JSX.Element => {
   const handleRequestDelete = (): void => {
     if (selectedHistoryId !== null) actions.requestDelete(selectedHistoryId);
   };
+  // A refusal to open the settings pane is not worth a second error next to the
+  // first one: the message already names the permission and where it lives.
+  const handleGrantPastePermission = (): void => {
+    void gateway.openAccessibilitySettings().catch(() => undefined);
+  };
   const handlePaletteKeyDown: KeyboardEventHandler<HTMLElement> = (event) => {
     if (shortcutIsBlocked(event, modalOpen)) return;
     const key = event.key.toLocaleLowerCase('en-US');
@@ -270,6 +275,7 @@ const ClipboardPalette = (): React.JSX.Element => {
       pinPending={actions.pinPendingId === selectedHistoryItem.eventId}
       deletePending={actions.deletePending}
       feedback={actions.feedback}
+      feedbackMode={actions.feedbackMode}
       deleteConfirmationOpen={actions.deleteTargetId !== null}
       onPaste={handlePaste}
       onPastePlainText={handlePastePlainText}
@@ -277,6 +283,7 @@ const ClipboardPalette = (): React.JSX.Element => {
       onRequestDelete={handleRequestDelete}
       onCancelDelete={actions.cancelDelete}
       onConfirmDelete={actions.confirmDelete}
+      onGrantPastePermission={handleGrantPastePermission}
     />
   ) : null;
 

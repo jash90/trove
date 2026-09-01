@@ -12,7 +12,10 @@ pub mod pasteboard;
 
 pub use icons::application_icon_png;
 pub use markers::{MarkerPolicy, classify_types};
-pub use paste::{PasteReadiness, is_trusted, post_paste_to, readiness};
+pub use paste::{
+    PasteReadiness, is_trusted, open_accessibility_settings, post_paste_to, readiness,
+    request_trust,
+};
 pub use pasteboard::{MAX_CAPTURED_PAYLOAD_BYTES, PollOutcome, snapshot_from_types};
 
 use std::time::Duration;
@@ -26,7 +29,9 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use objc2_app_kit::{NSPasteboard, NSWorkspace};
+    use objc2_app_kit::{
+        NSApplicationActivationOptions, NSPasteboard, NSRunningApplication, NSWorkspace,
+    };
 
     use clipboard_core::PlatformError;
 
@@ -126,6 +131,23 @@ mod platform {
         (pid > 0).then_some(pid)
     }
 
+    /// Brings the application with this process id back to the front.
+    ///
+    /// A synthesized Command-V goes to a process, but a process only routes it
+    /// to a text field when it owns the key window. Hiding our palette does not
+    /// reliably hand activation back in time, so the target is asked for it
+    /// explicitly before the keystroke is posted.
+    pub fn activate_pid(pid: i32) -> bool {
+        let Some(application) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        else {
+            return false;
+        };
+        // All windows rather than just the last one: the user is returning to
+        // the document they were typing in, not to whichever panel that
+        // application happened to raise last.
+        application.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows)
+    }
+
     /// The application in front when the copy happened.
     ///
     /// This is a guess, not a declaration — hence `SourceConfidence::Inferred`
@@ -153,4 +175,4 @@ mod platform {
 }
 
 #[cfg(target_os = "macos")]
-pub use platform::{MacPasteboardWatcher, frontmost_pid};
+pub use platform::{MacPasteboardWatcher, activate_pid, frontmost_pid};

@@ -52,13 +52,56 @@ impl PasteTarget {
         Self::default()
     }
 
+    /// Records where the user was, unless that is us.
+    ///
+    /// The frontmost application is not always somebody else: a palette shown
+    /// from the menu bar while it already had focus would record our own
+    /// process, and `readiness` would then happily paste into the palette. The
+    /// previous target is worth more than that, so a self-reference is dropped
+    /// rather than stored.
     pub fn remember(&self, pid: Option<i32>) {
+        if pid == Some(std::process::id() as i32) {
+            return;
+        }
         self.pid.store(pid.unwrap_or_default(), Ordering::Relaxed);
     }
 
-    pub fn take(&self) -> Option<i32> {
-        let pid = self.pid.swap(0, Ordering::Relaxed);
+    /// The target as it stands, left in place.
+    ///
+    /// Reading used to consume: the first Enter after a summon pasted and every
+    /// one after it reported that the target was gone, because the pid had been
+    /// swapped out from under it. The target belongs to the summon, not to a
+    /// single paste, so it is cleared when the palette goes away instead.
+    pub fn current(&self) -> Option<i32> {
+        let pid = self.pid.load(Ordering::Relaxed);
         (pid > 0).then_some(pid)
+    }
+
+    /// Drops the target, because the palette is no longer standing in front of
+    /// anything. The next summon records where the user actually was.
+    pub fn forget(&self) {
+        self.pid.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Whether the system has already been asked for Accessibility permission.
+///
+/// macOS shows its Accessibility dialog at most once per launch and silently
+/// skips it afterwards, so asking again would be a no-op the user reads as the
+/// application ignoring them. One ask per run, then the settings pane instead.
+#[derive(Clone, Debug, Default)]
+pub struct PastePrompt {
+    asked: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PastePrompt {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// True the first time it is called in a process, false forever after.
+    pub fn claim_first_ask(&self) -> bool {
+        !self.asked.swap(true, Ordering::Relaxed)
     }
 }
 
@@ -161,13 +204,33 @@ pub fn toggle_palette<R: Runtime>(app: &AppHandle<R>) {
     let is_frontmost = window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false);
     if is_frontmost {
         let _ = window.hide();
+        forget_paste_target(app);
         return;
     }
+    show_palette(app);
+}
+
+/// Brings the palette up, recording where the user was on the way in.
+///
+/// Every path that puts the palette on screen goes through here. The menu bar
+/// item had its own copy that skipped the recording, so a palette opened from
+/// the menu had nothing to paste into and Enter could only copy.
+pub fn show_palette<R: Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window(PALETTE_WINDOW) else {
+        return;
+    };
     if let Some(target) = app.try_state::<PasteTarget>() {
         target.remember(current_frontmost_pid());
     }
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+/// Clears the recorded paste target, for when the palette goes away.
+pub fn forget_paste_target<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(target) = app.try_state::<PasteTarget>() {
+        target.forget();
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -192,6 +255,9 @@ pub fn hide_instead_of_closing<R: Runtime>(
     if should_hide_instead_of_closing(window.label()) {
         api.prevent_close();
         let _ = window.hide();
+        if window.label() == PALETTE_WINDOW {
+            forget_paste_target(&window.app_handle().clone());
+        }
     }
 }
 
@@ -222,5 +288,47 @@ mod tests {
 
         // Not a blanket rule: a window added later should say so itself.
         assert!(!should_hide_instead_of_closing("some-future-window"));
+    }
+
+    #[test]
+    fn the_paste_target_survives_being_read() {
+        // Reading used to consume the pid, so the first Enter after a summon
+        // pasted and every one after it reported that the target was gone.
+        let target = PasteTarget::new();
+        target.remember(Some(4242));
+        assert_eq!(target.current(), Some(4242));
+        assert_eq!(target.current(), Some(4242));
+
+        target.forget();
+        assert_eq!(target.current(), None);
+    }
+
+    #[test]
+    fn the_palette_is_never_its_own_paste_target() {
+        // Shown while it already had focus, the palette would record its own
+        // process and then paste Command-V into itself.
+        let target = PasteTarget::new();
+        target.remember(Some(4242));
+        target.remember(Some(std::process::id() as i32));
+        assert_eq!(target.current(), Some(4242));
+    }
+
+    #[test]
+    fn nothing_in_front_clears_the_target_rather_than_keeping_a_stale_one() {
+        let target = PasteTarget::new();
+        target.remember(Some(4242));
+        target.remember(None);
+        assert_eq!(target.current(), None);
+    }
+
+    #[test]
+    fn the_system_is_asked_for_permission_once_per_run() {
+        // macOS shows its Accessibility dialog at most once per launch and
+        // silently skips it after that, so a second ask would be a no-op the
+        // user reads as being ignored.
+        let prompt = PastePrompt::new();
+        assert!(prompt.claim_first_ask());
+        assert!(!prompt.claim_first_ask());
+        assert!(!prompt.claim_first_ask());
     }
 }

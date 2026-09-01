@@ -162,4 +162,7 @@ export const mockGateway: ClipboardGateway = {
   // rejecting keeps the palette's flow walkable where Tauri is absent.
   launchApp: async () => undefined,
   getAppIcon: async () => ({ ...SYNTHETIC_APP_ICON }),
+  // There is no System Settings to open outside Tauri; resolving keeps the
+  // browser preview walkable, same as launching an application does.
+  openAccessibilitySettings: async () => undefined,
 };

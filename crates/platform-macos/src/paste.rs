@@ -93,9 +93,9 @@ mod tests {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use objc2_core_graphics::{
-        CGEvent, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
-    };
+    use objc2::rc::Retained;
+    use objc2_core_graphics::{CGEvent, CGEventFlags, CGEventSource, CGEventSourceStateID};
+    use objc2_foundation::{NSDictionary, NSNumber, NSString};
 
     /// Virtual key code for `V` on any layout, since the shortcut is defined by
     /// position rather than by the letter printed on the key.
@@ -111,8 +111,48 @@ mod platform {
         unsafe { AXIsProcessTrusted() }
     }
 
+    /// Asks the system for Accessibility permission, showing its dialog.
+    ///
+    /// Best-effort by nature, and the reason `open_accessibility_settings` exists
+    /// beside it: macOS shows this dialog only while the application has no
+    /// decision recorded against it. Once the user has answered — including by
+    /// turning the switch back off — the call answers `false` and shows nothing,
+    /// because the system will not ask twice on our behalf. So a caller that
+    /// wants the user to actually get somewhere must fall back to opening the
+    /// settings pane rather than trusting the prompt to appear.
+    pub fn request_trust() -> bool {
+        let value = NSNumber::new_bool(true);
+        // SAFETY: `kAXTrustedCheckOptionPrompt` is a CFStringRef constant, and
+        // CFString is toll-free bridged with NSString, so it may be used as a
+        // dictionary key of that type.
+        let key: &NSString = unsafe { &*kAXTrustedCheckOptionPrompt.cast::<NSString>() };
+        let options: Retained<NSDictionary<NSString, NSNumber>> =
+            NSDictionary::from_slices(&[key], &[&*value]);
+        // SAFETY: NSDictionary is toll-free bridged with CFDictionary, and the
+        // dictionary outlives the call.
+        unsafe { AXIsProcessTrustedWithOptions(Retained::as_ptr(&options).cast()) }
+    }
+
+    /// Opens the Accessibility list in System Settings.
+    ///
+    /// The reliable half of asking: unlike the prompt, this works whatever the
+    /// system has already recorded, and it lands the user on the one switch
+    /// that decides whether pasting works.
+    pub fn open_accessibility_settings() -> bool {
+        // Passed as a single argument and never through a shell, exactly like
+        // every other `open` in this application.
+        std::process::Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
         fn AXIsProcessTrusted() -> bool;
+        fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+        static kAXTrustedCheckOptionPrompt: *const std::ffi::c_void;
     }
 
     /// Sends Command-V to one process.
@@ -120,7 +160,11 @@ mod platform {
     /// Posted to the target's own event queue rather than to the system tap, so
     /// the keystroke cannot land in a window that came forward in between.
     pub fn post_paste_to(pid: i32) -> bool {
-        let Some(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        // A private source rather than the HID one: an HID-state source merges
+        // the modifier keys that are physically down right now, so the Shift of
+        // a Command-Shift-V shortcut rode along into the synthesized chord and
+        // the target received Command-Shift-V instead of Command-V.
+        let Some(source) = CGEventSource::new(CGEventSourceStateID::Private) else {
             return false;
         };
         let Some(key_down) = CGEvent::new_keyboard_event(Some(&source), KEY_V, true) else {
@@ -133,16 +177,25 @@ mod platform {
         CGEvent::set_flags(Some(&key_up), CGEventFlags::MaskCommand);
         CGEvent::post_to_pid(pid, Some(&key_down));
         CGEvent::post_to_pid(pid, Some(&key_up));
-        let _ = CGEventTapLocation::HIDEventTap;
         true
     }
 }
 
 #[cfg(target_os = "macos")]
-pub use platform::{is_trusted, post_paste_to};
+pub use platform::{is_trusted, open_accessibility_settings, post_paste_to, request_trust};
 
 #[cfg(not(target_os = "macos"))]
 pub fn is_trusted() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_trust() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_accessibility_settings() -> bool {
     false
 }
 
