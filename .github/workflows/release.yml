@@ -1,0 +1,209 @@
+# Cuts a release from a tag: build, sign, notarise, staple, publish.
+#
+# This existed as a page of notes and a person following them, which is how
+# 0.4.11 lost two hours to a disk image left attached by a cancelled upload.
+# Every step below is one of those notes, in the order that works.
+#
+# The commit a tag points at is expected to be green: CI runs the gates on
+# every push to main, and tags are cut from main. This workflow therefore
+# builds rather than re-tests, and fails loudly if signing or notarisation
+# does not hold.
+#
+# Required repository secrets:
+#   MACOS_CERTIFICATE           base64 of the Developer ID Application .p12
+#   MACOS_CERTIFICATE_PASSWORD  password that .p12 was exported with
+#   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_API_KEY               base64 of the App Store Connect .p8
+#   APPLE_API_KEY_ID            the key id
+#   APPLE_API_ISSUER            the issuer id
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # So a failed publish can be retried without moving the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish, e.g. v0.4.12"
+        required: true
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Read the version from the tag
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      # The tag and the manifests have to agree. They are bumped by hand, and a
+      # release built from a mismatch would ship a version nobody can trace.
+      - name: Check the tag matches the manifests
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          for f in Cargo.toml src-tauri/tauri.conf.json apps/desktop-ui/package.json; do
+            grep -q "\"\?version\"\? *[:=] *\"$VERSION\"" "$f" \
+              || { echo "::error::$f does not declare version $VERSION"; exit 1; }
+          done
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # A keychain of our own, deleted at the end. The runner's login keychain
+      # is shared with everything else on the box and outlives the job.
+      - name: Import the signing certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          # Without this codesign stops for a UI prompt nobody can answer.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+
+      - name: Build
+        run: pnpm tauri build
+
+      # Signing after the build, never before: tauri regenerates the bundle and
+      # would undo it, and its own bundle fails `codesign --deep --strict` with
+      # "code has no resources but signature indicates they must be present".
+      #
+      # By name here, unlike locally, where two certificates share this name and
+      # signing by name fails as ambiguous. The runner's keychain holds one.
+      - name: Sign the application
+        env:
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          APP="target/release/bundle/macos/Trove.app"
+          codesign --force --deep --timestamp --options runtime \
+            --keychain "$KEYCHAIN" --sign "$IDENTITY" "$APP"
+          # The exit code is not enough: a failed sign can leave the previous
+          # signature in place, so the identity itself is what gets checked.
+          codesign -dvv "$APP" 2>&1 | grep -q "TeamIdentifier=" \
+            || { echo "::error::the bundle is not signed with a Developer ID"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Write the notarisation key
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          echo "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+
+      # The application is notarised as a zip rather than inside the image.
+      # notarytool mounts a .dmg to inspect it before uploading, and a mount
+      # left behind by an interrupted run deadlocks every attempt after it —
+      # sleeping at zero CPU with no connection, printing nothing, never
+      # registering a submission. A zip has nothing to mount.
+      - name: Notarise and staple the application
+        run: |
+          APP="target/release/bundle/macos/Trove.app"
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/Trove.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/Trove.zip" \
+            --key "$RUNNER_TEMP/notary.p8" \
+            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
+            --issuer "${{ secrets.APPLE_API_ISSUER }}" \
+            --wait --timeout 30m
+          xcrun stapler staple "$APP"
+
+      # Built by hand from a staged copy. Tauri's own dmg step drives Finder to
+      # style the volume and cannot unmount it when anything else holds a disk
+      # image, and it would regenerate the .app and undo the signature above.
+      #
+      # From the stapled application, so the copy someone drags to /Applications
+      # carries its ticket and opens without an online Gatekeeper check.
+      - name: Build the disk image
+        id: dmg
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DMG="$RUNNER_TEMP/Trove_${VERSION}_aarch64.dmg"
+          STAGE="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$STAGE"; mkdir -p "$STAGE"
+          ditto "target/release/bundle/macos/Trove.app" "$STAGE/Trove.app"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "Trove" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          echo "path=$DMG" >> "$GITHUB_OUTPUT"
+          echo "name=Trove_${VERSION}_aarch64.dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Sign, notarise and staple the disk image
+        env:
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          DMG="${{ steps.dmg.outputs.path }}"
+          codesign --force --timestamp --keychain "$KEYCHAIN" --sign "$IDENTITY" "$DMG"
+          # --timeout so a stalled upload ends by itself rather than burning the
+          # job's whole budget with nothing to show for it.
+          xcrun notarytool submit "$DMG" \
+            --key "$RUNNER_TEMP/notary.p8" \
+            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
+            --issuer "${{ secrets.APPLE_API_ISSUER }}" \
+            --wait --timeout 30m
+          xcrun stapler staple "$DMG"
+
+      # The one check that speaks for the person downloading this: both the
+      # image and the application inside it must come back as notarised.
+      - name: Verify Gatekeeper accepts both
+        run: |
+          spctl -a -vv -t open --context context:primary-signature "${{ steps.dmg.outputs.path }}"
+          spctl -a -vv "target/release/bundle/macos/Trove.app"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          DMG="${{ steps.dmg.outputs.path }}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$DMG" --clobber
+          else
+            gh release create "$TAG" "$DMG" --title "$TAG" --generate-notes
+          fi
+
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/notary.p8"
+          security delete-keychain "$KEYCHAIN" || true
