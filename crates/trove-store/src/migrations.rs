@@ -9,7 +9,15 @@ const BLOB_REFERENCE_INDEX_MIGRATION: &str =
 const LINK_PREVIEW_MIGRATION: &str = include_str!("migrations/004_link_preview.sql");
 const LINK_PREVIEW_IMAGE_MIGRATION: &str = include_str!("migrations/005_link_preview_image.sql");
 const LATEST_SCHEMA_VERSION: i64 = 5;
-const SCHEMA_IDENTITY: &str = "trove-store";
+/// The database format's own name, which is not the application's.
+///
+/// Deliberately left behind by the rename to Trove. Every database already on
+/// disk carries this string, and `validate` looks a row up by it — so changing
+/// it would not rename anything, it would find no row and report every existing
+/// history as an incompatible schema. The same reasoning keeps the hash domains
+/// in `writer.rs` and the fingerprint domains in the importer: a value written
+/// into a database is a format, and a format does not follow a product name.
+const SCHEMA_IDENTITY: &str = "clipboard-store";
 const SCHEMA_REVISION: i64 = 6;
 
 pub struct Migrations;
@@ -157,7 +165,7 @@ mod tests {
             .unwrap();
         let revision: i64 = connection
             .query_row(
-                "SELECT revision FROM schema_identity WHERE identity = 'trove-store'",
+                "SELECT revision FROM schema_identity WHERE identity = 'clipboard-store'",
                 [],
                 |row| row.get(0),
             )

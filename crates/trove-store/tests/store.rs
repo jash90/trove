@@ -397,7 +397,7 @@ async fn import_search_derives_primary_and_ocr_inside_the_writer() {
 fn search_derivation_test_hash(value: &str) -> [u8; 32] {
     let normalized = trove_core::normalize_search_text(&format!("shared bounded payload\n{value}"));
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"trove-store.search-derivation-v1");
+    hasher.update(b"clipboard-store.search-derivation-v1");
     hasher.update(&(normalized.len() as u64).to_be_bytes());
     hasher.update(normalized.as_bytes());
     *hasher.finalize().as_bytes()

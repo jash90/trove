@@ -1564,7 +1564,7 @@ fn initial_failure_fingerprint(
             .ok_or(StoreError::InvalidImportInput)?;
     }
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"trove-store.import-initial-failures-v1");
+    hasher.update(b"clipboard-store.import-initial-failures-v1");
     hasher.update(&(canonical.len() as u64).to_be_bytes());
     for (reason, count) in canonical {
         hasher.update(&(reason.len() as u64).to_be_bytes());
@@ -2417,7 +2417,7 @@ fn bounded_preview(value: &str) -> String {
 
 fn search_derivation_hash(normalized_text: &str) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"trove-store.search-derivation-v1");
+    hasher.update(b"clipboard-store.search-derivation-v1");
     hasher.update(&(normalized_text.len() as u64).to_be_bytes());
     hasher.update(normalized_text.as_bytes());
     *hasher.finalize().as_bytes()
@@ -2757,7 +2757,7 @@ fn utf8_boundary_at_or_before(value: &str, max_bytes: usize) -> usize {
 
 fn missing_content_hash(kind: ContentKind, primary_mime: &str, missing_ref: &str) -> ContentHash {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"trove-store.missing-primary-v1");
+    hasher.update(b"clipboard-store.missing-primary-v1");
     for component in [
         kind.as_str().as_bytes(),
         primary_mime.as_bytes(),

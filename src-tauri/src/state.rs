@@ -6,7 +6,7 @@ use serde::Serialize;
 use tauri::Manager;
 use trove_import::ImportService;
 use trove_launcher::AppBundle;
-use trove_store::{StoreConfig, StoreHandle};
+use trove_store::{DATABASE_FILENAME, StoreConfig, StoreHandle};
 
 /// How long a launcher catalog stays answerable without a rescan. Scanning a
 /// few hundred plists costs tens of milliseconds the palette should not pay
@@ -151,23 +151,43 @@ fn legacy_data_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
 
 const LEGACY_IDENTIFIER: &str = "pl.local.clipboard-history";
 
-/// Picks the directory to open, moving the old one across when it is the only
-/// one that exists.
+/// Whether a directory is the one holding a history, rather than merely there.
+///
+/// The question the migration has to answer is not "does this path exist" —
+/// an empty directory is trivially made, by a run that got as far as resolving
+/// its data directory and no further — but "is the history in it". Deciding on
+/// existence alone opened an empty store beside a full one and reported an
+/// empty history, which looks exactly like losing it.
+fn holds_history(dir: &Path) -> bool {
+    dir.join(DATABASE_FILENAME).is_file()
+}
+
+/// Picks the directory to open, moving the old one across when it is the one
+/// with the history in it.
 ///
 /// A rename within a volume is atomic, so this either happens completely or not
-/// at all. When it cannot happen — a different volume, a permission, anything —
-/// the legacy path is returned as it stands. Reading the history from its old
-/// home is worth more than a tidy directory name, and copying gigabytes to get
-/// the name would risk the copy failing halfway.
+/// at all. When it cannot happen — a different volume, a permission, a current
+/// directory holding something this has no business deleting — the legacy path
+/// is returned as it stands. Reading the history from its old home is worth
+/// more than a tidy directory name, and copying gigabytes to get the name would
+/// risk the copy failing halfway.
 fn adopt_legacy_data_dir(current: PathBuf, legacy: Option<PathBuf>) -> PathBuf {
-    if current.exists() {
+    if holds_history(&current) {
         return current;
     }
     let Some(legacy) = legacy else {
         return current;
     };
-    if !legacy.is_dir() {
+    if !holds_history(&legacy) {
         return current;
+    }
+    // `rename` will not land on an occupied directory, and an empty one left by
+    // an earlier run is the whole case this exists for. `remove_dir` refuses
+    // anything that is not empty, which is exactly the guard wanted here: if
+    // something is in there, it is not ours to delete, and the history is read
+    // where it already lies instead.
+    if current.exists() && std::fs::remove_dir(&current).is_err() {
+        return legacy;
     }
     match std::fs::rename(&legacy, &current) {
         Ok(()) => current,
@@ -178,6 +198,11 @@ fn adopt_legacy_data_dir(current: PathBuf, legacy: Option<PathBuf>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_history(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(DATABASE_FILENAME), b"history").unwrap();
+    }
 
     #[test]
     fn a_fresh_install_uses_the_current_directory() {
@@ -191,40 +216,76 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_directory_is_never_replaced_by_the_old_one() {
-        // Both present means the move already happened, or the user has run
-        // both versions. Touching the live directory here could only lose data.
+    fn a_live_history_is_never_replaced_by_the_old_one() {
+        // Both present means the move already happened, or both versions have
+        // run. Touching the live directory here could only lose data.
         let root = tempfile::tempdir().unwrap();
         let current = root.path().join("pl.local.trove");
         let legacy = root.path().join("pl.local.clipboard-history");
-        std::fs::create_dir(&current).unwrap();
-        std::fs::create_dir(&legacy).unwrap();
-        std::fs::write(legacy.join("clipboard.db"), b"old").unwrap();
+        with_history(&current);
+        with_history(&legacy);
 
         assert_eq!(
             adopt_legacy_data_dir(current.clone(), Some(legacy.clone())),
             current
         );
-        assert!(legacy.join("clipboard.db").exists());
+        assert!(legacy.join(DATABASE_FILENAME).exists());
     }
 
     #[test]
-    fn the_history_moves_across_when_only_the_old_directory_exists() {
+    fn the_history_moves_across_when_only_the_old_directory_has_one() {
         // The rename this whole function exists for: the application was called
         // something else yesterday, and the database is not backed up anywhere.
         let root = tempfile::tempdir().unwrap();
         let current = root.path().join("pl.local.trove");
         let legacy = root.path().join("pl.local.clipboard-history");
-        std::fs::create_dir(&legacy).unwrap();
-        std::fs::write(legacy.join("clipboard.db"), b"history").unwrap();
+        with_history(&legacy);
 
         let chosen = adopt_legacy_data_dir(current.clone(), Some(legacy.clone()));
         assert_eq!(chosen, current);
         assert_eq!(
-            std::fs::read(current.join("clipboard.db")).unwrap(),
+            std::fs::read(current.join(DATABASE_FILENAME)).unwrap(),
             b"history"
         );
         assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn an_empty_current_directory_does_not_shadow_the_history() {
+        // Deciding on existence alone lost the history to a directory some
+        // earlier run had created and left empty: the store opened there,
+        // reported nothing, and the real history sat untouched next to it.
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("pl.local.trove");
+        let legacy = root.path().join("pl.local.clipboard-history");
+        std::fs::create_dir(&current).unwrap();
+        with_history(&legacy);
+
+        let chosen = adopt_legacy_data_dir(current.clone(), Some(legacy.clone()));
+        assert_eq!(chosen, current);
+        assert_eq!(
+            std::fs::read(current.join(DATABASE_FILENAME)).unwrap(),
+            b"history"
+        );
+    }
+
+    #[test]
+    fn a_current_directory_holding_something_else_is_not_deleted_for_the_move() {
+        // No database, but not empty either. Whatever that is, it is not ours
+        // to remove, so the history is read where it lies instead.
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("pl.local.trove");
+        let legacy = root.path().join("pl.local.clipboard-history");
+        std::fs::create_dir(&current).unwrap();
+        std::fs::write(current.join("something-else"), b"not ours").unwrap();
+        with_history(&legacy);
+
+        assert_eq!(
+            adopt_legacy_data_dir(current.clone(), Some(legacy.clone())),
+            legacy
+        );
+        assert!(current.join("something-else").exists());
+        assert!(legacy.join(DATABASE_FILENAME).exists());
     }
 
     #[test]
@@ -233,7 +294,7 @@ mod tests {
         // happen the old directory is still the one holding the history.
         let root = tempfile::tempdir().unwrap();
         let legacy = root.path().join("pl.local.clipboard-history");
-        std::fs::create_dir(&legacy).unwrap();
+        with_history(&legacy);
         // A destination whose parent does not exist cannot be renamed onto.
         let current = root.path().join("missing").join("pl.local.trove");
 

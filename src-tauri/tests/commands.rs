@@ -1540,7 +1540,7 @@ fn schema_revision(store: &StoreHandle) -> i64 {
     store
         .with_reader(|connection| {
             connection.query_row(
-                "SELECT revision FROM schema_identity WHERE identity = 'trove-store'",
+                "SELECT revision FROM schema_identity WHERE identity = 'clipboard-store'",
                 [],
                 |row| row.get(0),
             )
