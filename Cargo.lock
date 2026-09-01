@@ -3225,14 +3225,14 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform-linux"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "trove-core",
 ]
 
 [[package]]
 name = "platform-macos"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "image",
  "objc2",
@@ -3245,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "trove-core",
  "windows 0.62.2",
@@ -5172,7 +5172,7 @@ dependencies = [
 
 [[package]]
 name = "trove-app"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5206,7 +5206,7 @@ dependencies = [
 
 [[package]]
 name = "trove-bench"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "clap",
  "rusqlite",
@@ -5220,7 +5220,7 @@ dependencies = [
 
 [[package]]
 name = "trove-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "allocation-counter",
  "bitflags 2.13.1",
@@ -5232,7 +5232,7 @@ dependencies = [
 
 [[package]]
 name = "trove-images"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "base64 0.23.1",
  "image",
@@ -5242,7 +5242,7 @@ dependencies = [
 
 [[package]]
 name = "trove-import"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "aes",
  "allocation-counter",
@@ -5267,7 +5267,7 @@ dependencies = [
 
 [[package]]
 name = "trove-import-cli"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "aes",
  "allocation-counter",
@@ -5293,7 +5293,7 @@ dependencies = [
 
 [[package]]
 name = "trove-keyvault"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -5310,7 +5310,7 @@ dependencies = [
 
 [[package]]
 name = "trove-launcher"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "directories",
  "plist",
@@ -5321,7 +5321,7 @@ dependencies = [
 
 [[package]]
 name = "trove-link-preview"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "encoding_rs",
  "image",
@@ -5334,7 +5334,7 @@ dependencies = [
 
 [[package]]
 name = "trove-search"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "rusqlite",
  "serde",
@@ -5349,7 +5349,7 @@ dependencies = [
 
 [[package]]
 name = "trove-store"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "allocation-counter",
  "blake3",
@@ -5368,7 +5368,7 @@ dependencies = [
 
 [[package]]
 name = "trove-zstd-bound"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "zstd-sys",
 ]
