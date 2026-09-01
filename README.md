@@ -1,4 +1,4 @@
-# Clipboard History
+# Trove
 
 A local clipboard history manager. Rust core, Tauri 2 shell, React interface.
 The history, its index and its blobs never leave this device, and fonts and
@@ -69,7 +69,7 @@ no clipboard history at all.
 To run the native application against your own development database:
 
 ```bash
-CLIPBOARD_HISTORY_DATA_DIR="data/dev" pnpm tauri dev
+TROVE_DATA_DIR="data/dev" pnpm tauri dev
 ```
 
 Without that variable the application uses the operating system's data
@@ -157,9 +157,9 @@ the encrypted `.rayconfig` — the file Raycast actually writes — as well as J
 (the source of truth) and CSV (the fallback format).
 
 ```bash
-cargo run -p clipboard-import-cli -- analyze --source <directory-or-file>
-cargo run -p clipboard-import-cli -- import  --source <directory-or-file> --data-dir data/dev
-cargo run -p clipboard-import-cli -- verify  --data-dir data/dev --expect-records <n>
+cargo run -p trove-import-cli -- analyze --source <directory-or-file>
+cargo run -p trove-import-cli -- import  --source <directory-or-file> --data-dir data/dev
+cargo run -p trove-import-cli -- verify  --data-dir data/dev --expect-records <n>
 ```
 
 ### Encrypted exports
@@ -169,7 +169,7 @@ A `.rayconfig` is `IV ‖ AES-256-CBC-PKCS7(gzip(JSON))` keyed on
 echoing it; in a script it is supplied over `--password-stdin`:
 
 ```bash
-echo "$RAYCAST_PASSWORD" | cargo run -p clipboard-import-cli -- import \
+echo "$RAYCAST_PASSWORD" | cargo run -p trove-import-cli -- import \
   --source "Raycast 2026-08-22 14.39.05.rayconfig" --data-dir data/dev --password-stdin
 ```
 
@@ -259,12 +259,12 @@ started using it.
 ## Performance on a large history
 
 History is unlimited, so "does this still work at a million entries" is a gate,
-not a curiosity. `tools/clipboard-bench` builds a synthetic history from a seed
+not a curiosity. `tools/trove-bench` builds a synthetic history from a seed
 — it reads no real data — and measures what a user actually feels.
 
 ```bash
-cargo run --release -p clipboard-bench -- generate --data-dir data/bench-large --records 1000000 --seed 42
-cargo run --release -p clipboard-bench -- measure  --data-dir data/bench-large --queries 200
+cargo run --release -p trove-bench -- generate --data-dir data/bench-large --records 1000000 --seed 42
+cargo run --release -p trove-bench -- measure  --data-dir data/bench-large --queries 200
 ```
 
 Measured 23 August 2026, macOS on `aarch64-apple-darwin`, one million records,
@@ -397,12 +397,12 @@ keep the key there, is cleared the first time settings are saved.
 
 ```text
 apps/desktop-ui          React + TypeScript + Vite
-crates/clipboard-core    entities, canonicalisation, hashing
-crates/clipboard-store   SQLite, migrations, CAS, writer
-crates/clipboard-search  Polish normalisation, FTS5, ranking
-crates/clipboard-import  Raycast/SuperCmd parsers, import service
-crates/clipboard-images  thumbnails with hard limits
+crates/trove-core    entities, canonicalisation, hashing
+crates/trove-store   SQLite, migrations, CAS, writer
+crates/trove-search  Polish normalisation, FTS5, ranking
+crates/trove-import  Raycast/SuperCmd parsers, import service
+crates/trove-images  thumbnails with hard limits
 src-tauri                lifecycle, IPC, permissions
-tools/clipboard-import-cli  private import and verification
-tools/clipboard-bench       synthetic history and scale measurements
+tools/trove-import-cli  private import and verification
+tools/trove-bench       synthetic history and scale measurements
 ```

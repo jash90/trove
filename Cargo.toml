@@ -2,20 +2,20 @@
 resolver = "2"
 members = [
   "src-tauri",
-  "crates/clipboard-core",
-  "crates/clipboard-store",
-  "crates/clipboard-search",
-  "crates/clipboard-images",
-  "crates/clipboard-import",
-  "crates/clipboard-keyvault",
-  "crates/clipboard-launcher",
-  "crates/clipboard-link-preview",
+  "crates/trove-core",
+  "crates/trove-store",
+  "crates/trove-search",
+  "crates/trove-images",
+  "crates/trove-import",
+  "crates/trove-keyvault",
+  "crates/trove-launcher",
+  "crates/trove-link-preview",
   "crates/platform-macos",
   "crates/platform-linux",
   "crates/platform-windows",
-  "crates/clipboard-zstd-bound",
-  "tools/clipboard-bench",
-  "tools/clipboard-import-cli",
+  "crates/trove-zstd-bound",
+  "tools/trove-bench",
+  "tools/trove-import-cli",
 ]
 
 [workspace.package]

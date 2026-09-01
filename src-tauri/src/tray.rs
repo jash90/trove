@@ -47,7 +47,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri
 
     let menu_control = control.clone();
     let pause_item = pause.clone();
-    TrayIconBuilder::with_id("clipboard-history")
+    TrayIconBuilder::with_id("trove")
         // Its own drawing, not the application icon. A template icon is drawn
         // from its alpha channel alone — every opaque pixel becomes one flat
         // colour — so the coloured icon that suits the Dock arrives in the menu
@@ -55,7 +55,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri
         // transparent, so what survives the flattening is the clipboard.
         .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
         .icon_as_template(true)
-        .tooltip("Clipboard history")
+        .tooltip("Trove")
         .menu(&menu)
         // The menu belongs to the right button. A left click should do the
         // obvious thing — show the history — not open a menu to get there.

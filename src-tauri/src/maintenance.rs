@@ -8,8 +8,8 @@
 
 use std::time::Duration;
 
-use clipboard_store::{GcStepBudget, MAX_RETENTION_BATCH, RetentionPolicy, StoreHandle};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+use trove_store::{GcStepBudget, MAX_RETENTION_BATCH, RetentionPolicy, StoreHandle};
 
 /// How long after startup the first pass runs.
 ///

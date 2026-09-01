@@ -322,7 +322,7 @@ describe('validateAppCatalog', () => {
   });
 
   it('pins the mirrored bound values themselves', () => {
-    // The same assertion lives in crates/clipboard-launcher. A change must
+    // The same assertion lives in crates/trove-launcher. A change must
     // update both tests, not silently drift one side of the bridge.
     expect(MAX_APP_NAME_BYTES).toBe(256);
     expect(MAX_APP_PATH_BYTES).toBe(1_024);

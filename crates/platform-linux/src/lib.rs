@@ -9,7 +9,7 @@
 //! So this crate's job is to say honestly what the session in front of it
 //! supports, rather than to claim a history it cannot deliver.
 
-use clipboard_core::ClipboardCapabilities;
+use trove_core::ClipboardCapabilities;
 
 /// The display server behind the session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

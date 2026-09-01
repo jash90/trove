@@ -6,7 +6,7 @@
 //! system silently discards the keystroke, so the outcome is reported rather
 //! than assumed.
 
-use clipboard_core::PasteOutcome;
+use trove_core::PasteOutcome;
 
 /// Why a paste could not happen, decided before anything is posted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

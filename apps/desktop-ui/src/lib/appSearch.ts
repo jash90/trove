@@ -1,7 +1,7 @@
 import type { AppEntry } from './contracts';
 
 /**
- * Deliberately the TypeScript mirror of `clipboard_core::normalize_search_text`
+ * Deliberately the TypeScript mirror of `trove_core::normalize_search_text`
  * (lowercase, `ł` folded, NFD diacritics stripped): the catalog arrives
  * normalized on the Rust side only for ordering, and a user typing "lodz" on
  * any keyboard must find "Łódź" here without another round trip.

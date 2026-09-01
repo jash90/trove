@@ -18,13 +18,13 @@ it('opens the import wizard over the palette and returns focus to the search fie
 
   await user.click(screen.getByRole('button', { name: 'Import an archive' }));
   expect(screen.getByRole('dialog', { name: 'Import history' })).toBeVisible();
-  expect(screen.getByLabelText('Clipboard history palette')).toHaveAttribute('inert');
+  expect(screen.getByLabelText('Trove palette')).toHaveAttribute('inert');
 
   await user.click(screen.getByRole('button', { name: 'Close import' }));
   // The palette has one place a keyboard user works from, and a shortcut has
   // no button to hand focus back to.
   await waitFor(() => expect(search).toHaveFocus());
-  expect(screen.getByLabelText('Clipboard history palette')).not.toHaveAttribute('inert');
+  expect(screen.getByLabelText('Trove palette')).not.toHaveAttribute('inert');
 });
 
 it('asks for the settings window rather than covering the list with a dialog', async () => {

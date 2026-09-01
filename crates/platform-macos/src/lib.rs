@@ -33,7 +33,7 @@ mod platform {
         NSApplicationActivationOptions, NSPasteboard, NSRunningApplication, NSWorkspace,
     };
 
-    use clipboard_core::PlatformError;
+    use trove_core::PlatformError;
 
     use crate::markers;
     use crate::pasteboard::{PollOutcome, snapshot_from_types};

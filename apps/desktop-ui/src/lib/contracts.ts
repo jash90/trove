@@ -183,7 +183,7 @@ export interface AppEntry {
 }
 
 /**
- * Mirrors of the bounds in crates/clipboard-launcher/src/lib.rs. Keep both
+ * Mirrors of the bounds in crates/trove-launcher/src/lib.rs. Keep both
  * sides equal: a looser bound here can never fire and would hide a broken
  * contract instead of reporting it.
  */

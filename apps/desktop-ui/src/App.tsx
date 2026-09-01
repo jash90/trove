@@ -296,7 +296,7 @@ const ClipboardPalette = (): React.JSX.Element => {
     >
       <section
         className="palette-shell"
-        aria-label="Clipboard history palette"
+        aria-label="Trove palette"
         inert={modalOpen}
       >
         <PaletteHeader

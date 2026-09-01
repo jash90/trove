@@ -4,7 +4,7 @@
 //! so no Objective-C object escapes into the rest of the application and the
 //! whole crate above this line stays testable without a clipboard.
 
-use clipboard_core::{
+use trove_core::{
     ClipboardSnapshot, ContentKind, PlatformError, RepresentationInput, SourceConfidence,
 };
 

@@ -1,9 +1,3 @@
-use clipboard_history_app::{
-    commands::{self, AppSettingsDto},
-    state::{AppState, LAUNCHER_CACHE_TTL_MS, LauncherState},
-};
-use clipboard_search::SearchRequest;
-use clipboard_store::{StoreConfig, StoreHandle};
 use serde_json::json;
 use std::{
     fs,
@@ -16,6 +10,12 @@ use std::{
     time::Duration,
 };
 use tauri::Manager;
+use trove_app::{
+    commands::{self, AppSettingsDto},
+    state::{AppState, LAUNCHER_CACHE_TTL_MS, LauncherState},
+};
+use trove_search::SearchRequest;
+use trove_store::{StoreConfig, StoreHandle};
 
 fn ipc_request(cmd: &str, body: serde_json::Value) -> tauri::webview::InvokeRequest {
     tauri::webview::InvokeRequest {
@@ -57,18 +57,18 @@ async fn search_command_returns_camel_case_page_without_payload_bytes() {
     assert!(json["items"][0].get("blobRelpath").is_none());
 }
 
-fn file_capture(reference_uri: &str, captured_at_ms: i64) -> clipboard_core::CaptureInput {
-    clipboard_core::CaptureInput {
+fn file_capture(reference_uri: &str, captured_at_ms: i64) -> trove_core::CaptureInput {
+    trove_core::CaptureInput {
         captured_at_ms,
-        kind: clipboard_core::ContentKind::File,
+        kind: trove_core::ContentKind::File,
         primary_mime: "application/octet-stream".to_owned(),
         representations: vec![
-            clipboard_core::RepresentationInput {
+            trove_core::RepresentationInput {
                 format_id: "application/octet-stream".to_owned(),
                 bytes: None,
                 missing_ref: Some("synthetic-missing:reference".to_owned()),
             },
-            clipboard_core::RepresentationInput {
+            trove_core::RepresentationInput {
                 format_id: "text/uri-list".to_owned(),
                 bytes: Some(reference_uri.as_bytes().to_vec()),
                 missing_ref: None,
@@ -76,18 +76,18 @@ fn file_capture(reference_uri: &str, captured_at_ms: i64) -> clipboard_core::Cap
         ],
         source_app_id: None,
         source_app_name: None,
-        source_confidence: clipboard_core::SourceConfidence::Unknown,
+        source_confidence: trove_core::SourceConfidence::Unknown,
         pinned: false,
         occurrence_count: 1,
-        content_flags: clipboard_core::ContentFlags::MISSING_PAYLOAD,
-        event_flags: clipboard_core::EventFlags::IMPORTED,
+        content_flags: trove_core::ContentFlags::MISSING_PAYLOAD,
+        event_flags: trove_core::EventFlags::IMPORTED,
         display_label: None,
     }
 }
 
 #[test]
 fn a_saved_shortcut_is_parsed_back_into_the_one_that_will_be_registered() {
-    use clipboard_history_app::hotkey;
+    use trove_app::hotkey;
 
     // The settings screen stores the shortcut as text; registering it means
     // parsing that text back. A round trip that silently failed would leave
@@ -105,7 +105,7 @@ fn a_saved_shortcut_is_parsed_back_into_the_one_that_will_be_registered() {
 
 #[test]
 fn the_active_shortcut_remembers_what_to_take_down_on_a_rebind() {
-    use clipboard_history_app::hotkey;
+    use trove_app::hotkey;
 
     let active = hotkey::ActiveShortcut::default();
     assert_eq!(active.get(), hotkey::default_shortcut());
@@ -119,7 +119,7 @@ fn the_active_shortcut_remembers_what_to_take_down_on_a_rebind() {
 fn the_summoning_shortcut_is_command_shift_space() {
     use tauri_plugin_global_shortcut::{Code, Modifiers};
 
-    let shortcut = clipboard_history_app::hotkey::default_shortcut();
+    let shortcut = trove_app::hotkey::default_shortcut();
 
     // Space is what a launcher-style palette answers to; the added Shift keeps
     // it clear of the input-source switcher and of Spotlight.
@@ -138,18 +138,18 @@ async fn the_application_opens_the_same_database_file_the_importer_writes() {
         .unwrap();
     drop(state);
 
-    // The importer resolves the same layout from clipboard-store, so a data
+    // The importer resolves the same layout from trove-store, so a data
     // directory written by one half must open in the other.
     assert!(
         directory
             .path()
-            .join(clipboard_store::DATABASE_FILENAME)
+            .join(trove_store::DATABASE_FILENAME)
             .is_file()
     );
     assert!(
         directory
             .path()
-            .join(clipboard_store::BLOB_DIRECTORY_NAME)
+            .join(trove_store::BLOB_DIRECTORY_NAME)
             .is_dir()
     );
 }
@@ -253,23 +253,23 @@ async fn a_text_entry_has_no_source_path_to_reveal() {
     );
 }
 
-fn text_capture(value: &str, captured_at_ms: i64) -> clipboard_core::CaptureInput {
-    clipboard_core::CaptureInput {
+fn text_capture(value: &str, captured_at_ms: i64) -> trove_core::CaptureInput {
+    trove_core::CaptureInput {
         captured_at_ms,
-        kind: clipboard_core::ContentKind::Text,
+        kind: trove_core::ContentKind::Text,
         primary_mime: "text/plain".to_owned(),
-        representations: vec![clipboard_core::RepresentationInput {
+        representations: vec![trove_core::RepresentationInput {
             format_id: "text/plain".to_owned(),
             bytes: Some(value.as_bytes().to_vec()),
             missing_ref: None,
         }],
         source_app_id: Some("com.example.synthetic".to_owned()),
         source_app_name: Some("Synthetic".to_owned()),
-        source_confidence: clipboard_core::SourceConfidence::Declared,
+        source_confidence: trove_core::SourceConfidence::Declared,
         pinned: false,
         occurrence_count: 1,
-        content_flags: clipboard_core::ContentFlags::empty(),
-        event_flags: clipboard_core::EventFlags::LOCAL_ONLY,
+        content_flags: trove_core::ContentFlags::empty(),
+        event_flags: trove_core::EventFlags::LOCAL_ONLY,
         display_label: None,
     }
 }
@@ -281,7 +281,7 @@ fn existing_revision_six_database_upgrades_to_settings_without_losing_data() {
     let connection = rusqlite::Connection::open(&database_path).unwrap();
     connection
         .execute_batch(include_str!(
-            "../../crates/clipboard-store/src/migrations/001_initial.sql"
+            "../../crates/trove-store/src/migrations/001_initial.sql"
         ))
         .unwrap();
     connection
@@ -567,7 +567,7 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
         };
     }
 
-    let names = clipboard_history_app::clipboard_history_command_registry!(collect_command_names);
+    let names = trove_app::trove_command_registry!(collect_command_names);
     assert_eq!(
         names.as_slice(),
         &[
@@ -869,11 +869,11 @@ async fn writer_mutations_report_zero_rows_and_concurrent_delete_has_one_winner(
     let state = AppState::open_data_dir(directory.path()).unwrap();
     assert!(matches!(
         state.store.set_pinned(99_999, true).await,
-        Err(clipboard_store::StoreError::HistoryEventNotFound)
+        Err(trove_store::StoreError::HistoryEventNotFound)
     ));
     assert!(matches!(
         state.store.delete_event(99_999).await,
-        Err(clipboard_store::StoreError::HistoryEventNotFound)
+        Err(trove_store::StoreError::HistoryEventNotFound)
     ));
 
     let event = state
@@ -891,10 +891,7 @@ async fn writer_mutations_report_zero_rows_and_concurrent_delete_has_one_winner(
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| matches!(
-                outcome,
-                Err(clipboard_store::StoreError::HistoryEventNotFound)
-            ))
+            .filter(|outcome| matches!(outcome, Err(trove_store::StoreError::HistoryEventNotFound)))
             .count(),
         1
     );
@@ -904,10 +901,10 @@ async fn writer_mutations_report_zero_rows_and_concurrent_delete_has_one_winner(
 async fn blocked_reader_command_yields_the_tokio_worker() {
     let directory = tempfile::tempdir().unwrap();
     let state = AppState::open_data_dir(directory.path()).unwrap();
-    let occupied = Arc::new(Barrier::new(clipboard_store::MAX_STORE_READERS + 1));
-    let release = Arc::new(Barrier::new(clipboard_store::MAX_STORE_READERS + 1));
+    let occupied = Arc::new(Barrier::new(trove_store::MAX_STORE_READERS + 1));
+    let release = Arc::new(Barrier::new(trove_store::MAX_STORE_READERS + 1));
     let mut readers = Vec::new();
-    for _ in 0..clipboard_store::MAX_STORE_READERS {
+    for _ in 0..trove_store::MAX_STORE_READERS {
         let store = state.store.clone();
         let occupied = Arc::clone(&occupied);
         let release = Arc::clone(&release);
@@ -978,8 +975,8 @@ async fn importer_commands_keep_analysis_owner_scoped_and_start_only_by_analysis
 
     let foreign = AppState {
         store: state.store.clone(),
-        importer: clipboard_import::ImportService::new(state.store.clone()).unwrap(),
-        previews: std::sync::Mutex::new(clipboard_history_app::links::FetchCoordinator::default()),
+        importer: trove_import::ImportService::new(state.store.clone()).unwrap(),
+        previews: std::sync::Mutex::new(trove_app::links::FetchCoordinator::default()),
         launcher: state.launcher.clone(),
     };
     let error = commands::start_import_service(&foreign, &analysis.analysis_id.to_string())
@@ -1236,23 +1233,23 @@ async fn an_export_refuses_a_directory_that_already_holds_something() {
     );
 }
 
-fn link_capture(url: &str, captured_at_ms: i64) -> clipboard_core::CaptureInput {
-    clipboard_core::CaptureInput {
+fn link_capture(url: &str, captured_at_ms: i64) -> trove_core::CaptureInput {
+    trove_core::CaptureInput {
         captured_at_ms,
-        kind: clipboard_core::ContentKind::Link,
+        kind: trove_core::ContentKind::Link,
         primary_mime: "text/uri-list".to_owned(),
-        representations: vec![clipboard_core::RepresentationInput {
+        representations: vec![trove_core::RepresentationInput {
             format_id: "text/uri-list".to_owned(),
             bytes: Some(url.as_bytes().to_vec()),
             missing_ref: None,
         }],
         source_app_id: None,
         source_app_name: Some("Synthetic".to_owned()),
-        source_confidence: clipboard_core::SourceConfidence::Declared,
+        source_confidence: trove_core::SourceConfidence::Declared,
         pinned: false,
         occurrence_count: 1,
-        content_flags: clipboard_core::ContentFlags::empty(),
-        event_flags: clipboard_core::EventFlags::LOCAL_ONLY,
+        content_flags: trove_core::ContentFlags::empty(),
+        event_flags: trove_core::EventFlags::LOCAL_ONLY,
         display_label: None,
     }
 }
@@ -1262,9 +1259,9 @@ async fn a_link_describes_itself_without_contacting_anything() {
     let directory = tempfile::tempdir().unwrap();
     let state = AppState::open_data_dir(directory.path()).unwrap();
     // Fetching off: the answer must still say what the address is.
-    let settings = clipboard_history_app::commands::AppSettingsDto {
+    let settings = trove_app::commands::AppSettingsDto {
         link_previews: false,
-        ..clipboard_history_app::commands::AppSettingsDto::default()
+        ..trove_app::commands::AppSettingsDto::default()
     };
     commands::save_settings_service(&state, settings)
         .await
@@ -1295,9 +1292,9 @@ async fn a_link_is_described_whatever_its_address_looks_like() {
     // extension, one a plain path.
     let directory = tempfile::tempdir().unwrap();
     let state = AppState::open_data_dir(directory.path()).unwrap();
-    let settings = clipboard_history_app::commands::AppSettingsDto {
+    let settings = trove_app::commands::AppSettingsDto {
         link_previews: false,
-        ..clipboard_history_app::commands::AppSettingsDto::default()
+        ..trove_app::commands::AppSettingsDto::default()
     };
     commands::save_settings_service(&state, settings)
         .await
@@ -1351,8 +1348,8 @@ async fn a_link_preview_blob_is_not_collected_as_an_orphan() {
         .store
         .store_link_preview(
             content_id,
-            clipboard_store::LinkPreviewRecord {
-                status: clipboard_store::LinkPreviewStatus::Ok,
+            trove_store::LinkPreviewRecord {
+                status: trove_store::LinkPreviewStatus::Ok,
                 title: Some("Synthetic page".to_owned()),
                 icon: Some(vec![1, 2, 3]),
                 icon_mime: Some("image/png".to_owned()),
@@ -1403,9 +1400,9 @@ async fn asking_twice_for_a_link_answers_twice() {
     // nothing would make the card appear and then vanish.
     let directory = tempfile::tempdir().unwrap();
     let state = AppState::open_data_dir(directory.path()).unwrap();
-    let settings = clipboard_history_app::commands::AppSettingsDto {
+    let settings = trove_app::commands::AppSettingsDto {
         link_previews: false,
-        ..clipboard_history_app::commands::AppSettingsDto::default()
+        ..trove_app::commands::AppSettingsDto::default()
     };
     commands::save_settings_service(&state, settings)
         .await
@@ -1445,12 +1442,12 @@ async fn an_entry_that_is_not_a_link_has_nothing_to_describe() {
     );
 }
 
-async fn wait_for_import(state: &AppState, run_id: uuid::Uuid) -> clipboard_import::ImportProgress {
+async fn wait_for_import(state: &AppState, run_id: uuid::Uuid) -> trove_import::ImportProgress {
     for _ in 0..50_000 {
         let progress = commands::get_import_status_service(state, &run_id.to_string())
             .await
             .unwrap();
-        if progress.state != clipboard_import::ImportRunState::Running {
+        if progress.state != trove_import::ImportRunState::Running {
             return progress;
         }
         tokio::task::yield_now().await;
@@ -1458,60 +1455,60 @@ async fn wait_for_import(state: &AppState, run_id: uuid::Uuid) -> clipboard_impo
     panic!("synthetic import did not finish");
 }
 
-fn missing_image_capture(captured_at_ms: i64) -> clipboard_core::CaptureInput {
-    clipboard_core::CaptureInput {
+fn missing_image_capture(captured_at_ms: i64) -> trove_core::CaptureInput {
+    trove_core::CaptureInput {
         captured_at_ms,
-        kind: clipboard_core::ContentKind::Image,
+        kind: trove_core::ContentKind::Image,
         primary_mime: "image/png".to_owned(),
-        representations: vec![clipboard_core::RepresentationInput {
+        representations: vec![trove_core::RepresentationInput {
             format_id: "image/png".to_owned(),
             bytes: None,
             missing_ref: Some("synthetic/missing.png".to_owned()),
         }],
         source_app_id: None,
         source_app_name: Some("Synthetic".to_owned()),
-        source_confidence: clipboard_core::SourceConfidence::Declared,
+        source_confidence: trove_core::SourceConfidence::Declared,
         pinned: false,
         occurrence_count: 1,
-        content_flags: clipboard_core::ContentFlags::MISSING_PAYLOAD,
-        event_flags: clipboard_core::EventFlags::IMPORTED,
+        content_flags: trove_core::ContentFlags::MISSING_PAYLOAD,
+        event_flags: trove_core::EventFlags::IMPORTED,
         display_label: None,
     }
 }
 
-fn image_capture(bytes: Vec<u8>, captured_at_ms: i64) -> clipboard_core::CaptureInput {
-    clipboard_core::CaptureInput {
+fn image_capture(bytes: Vec<u8>, captured_at_ms: i64) -> trove_core::CaptureInput {
+    trove_core::CaptureInput {
         captured_at_ms,
-        kind: clipboard_core::ContentKind::Image,
+        kind: trove_core::ContentKind::Image,
         primary_mime: "image/png".to_owned(),
-        representations: vec![clipboard_core::RepresentationInput {
+        representations: vec![trove_core::RepresentationInput {
             format_id: "image/png".to_owned(),
             bytes: Some(bytes),
             missing_ref: None,
         }],
         source_app_id: None,
         source_app_name: Some("Synthetic".to_owned()),
-        source_confidence: clipboard_core::SourceConfidence::Declared,
+        source_confidence: trove_core::SourceConfidence::Declared,
         pinned: false,
         occurrence_count: 1,
-        content_flags: clipboard_core::ContentFlags::empty(),
-        event_flags: clipboard_core::EventFlags::LOCAL_ONLY,
+        content_flags: trove_core::ContentFlags::empty(),
+        event_flags: trove_core::EventFlags::LOCAL_ONLY,
         display_label: None,
     }
 }
 
 fn remove_thumbnails(data_dir: &std::path::Path) {
-    rusqlite::Connection::open(data_dir.join(clipboard_store::DATABASE_FILENAME))
+    rusqlite::Connection::open(data_dir.join(trove_store::DATABASE_FILENAME))
         .unwrap()
         .execute("DELETE FROM artifact WHERE artifact_kind = 'thumbnail'", [])
         .unwrap();
 }
 
 fn install_thumbnail(data_dir: &std::path::Path, content_id: i64, bytes: &[u8]) {
-    let cas = clipboard_store::CasStore::new(data_dir.join("blobs"));
+    let cas = trove_store::CasStore::new(data_dir.join("blobs"));
     let blob = cas.put(bytes).unwrap();
     let connection =
-        rusqlite::Connection::open(data_dir.join(clipboard_store::DATABASE_FILENAME)).unwrap();
+        rusqlite::Connection::open(data_dir.join(trove_store::DATABASE_FILENAME)).unwrap();
     connection
         .execute(
             "INSERT INTO artifact
@@ -1543,7 +1540,7 @@ fn schema_revision(store: &StoreHandle) -> i64 {
     store
         .with_reader(|connection| {
             connection.query_row(
-                "SELECT revision FROM schema_identity WHERE identity = 'clipboard-store'",
+                "SELECT revision FROM schema_identity WHERE identity = 'trove-store'",
                 [],
                 |row| row.get(0),
             )
@@ -1589,7 +1586,7 @@ fn secure_existing_database(_: &std::path::Path, _: &std::path::Path) {}
 ///
 /// Ignored by default because it speaks to the network; run it by hand after
 /// touching the fetching code:
-/// `cargo test -p clipboard-history-app --test commands -- --ignored --nocapture`
+/// `cargo test -p trove-app --test commands -- --ignored --nocapture`
 #[tokio::test]
 #[ignore = "talks to the real internet; run manually"]
 async fn link_preview_fetches_stores_and_renders_a_real_page() {
@@ -1599,22 +1596,22 @@ async fn link_preview_fetches_stores_and_renders_a_real_page() {
     let state = AppState::open_data_dir(directory.path()).unwrap();
     let event_id = state
         .store
-        .ingest(clipboard_core::CaptureInput {
+        .ingest(trove_core::CaptureInput {
             captured_at_ms: 1_725_000_000_000,
-            kind: clipboard_core::ContentKind::Link,
+            kind: trove_core::ContentKind::Link,
             primary_mime: "text/plain".to_owned(),
-            representations: vec![clipboard_core::RepresentationInput {
+            representations: vec![trove_core::RepresentationInput {
                 format_id: "text/plain".to_owned(),
                 bytes: Some(b"https://github.com/rust-lang/rust".to_vec()),
                 missing_ref: None,
             }],
             source_app_id: Some("com.example.synthetic".to_owned()),
             source_app_name: Some("Synthetic".to_owned()),
-            source_confidence: clipboard_core::SourceConfidence::Declared,
+            source_confidence: trove_core::SourceConfidence::Declared,
             pinned: false,
             occurrence_count: 1,
-            content_flags: clipboard_core::ContentFlags::empty(),
-            event_flags: clipboard_core::EventFlags::LOCAL_ONLY,
+            content_flags: trove_core::ContentFlags::empty(),
+            event_flags: trove_core::EventFlags::LOCAL_ONLY,
             display_label: None,
         })
         .await
@@ -1697,14 +1694,12 @@ async fn link_preview_fetches_stores_and_renders_a_real_page() {
 /// A transport that answers from a script, so the command layer is tested
 /// without the network — the same discipline the keyvault crate keeps.
 struct CannedVault {
-    responses: Vec<Result<clipboard_keyvault::SecretResponse, clipboard_keyvault::KeyvaultError>>,
+    responses: Vec<Result<trove_keyvault::SecretResponse, trove_keyvault::KeyvaultError>>,
 }
 
 impl CannedVault {
     fn with(
-        responses: Vec<
-            Result<clipboard_keyvault::SecretResponse, clipboard_keyvault::KeyvaultError>,
-        >,
+        responses: Vec<Result<trove_keyvault::SecretResponse, trove_keyvault::KeyvaultError>>,
     ) -> Self {
         Self { responses }
     }
@@ -1712,22 +1707,21 @@ impl CannedVault {
     fn json(
         status: u16,
         body: &str,
-    ) -> Result<clipboard_keyvault::SecretResponse, clipboard_keyvault::KeyvaultError> {
-        Ok(clipboard_keyvault::SecretResponse {
+    ) -> Result<trove_keyvault::SecretResponse, trove_keyvault::KeyvaultError> {
+        Ok(trove_keyvault::SecretResponse {
             status,
             body: body.to_owned(),
         })
     }
 }
 
-impl clipboard_keyvault::SecretTransport for CannedVault {
+impl trove_keyvault::SecretTransport for CannedVault {
     #[allow(clippy::manual_async_fn)]
     fn get(
         &self,
         path: &str,
-    ) -> impl Future<
-        Output = Result<clipboard_keyvault::SecretResponse, clipboard_keyvault::KeyvaultError>,
-    > + Send {
+    ) -> impl Future<Output = Result<trove_keyvault::SecretResponse, trove_keyvault::KeyvaultError>> + Send
+    {
         let _ = path;
         async move { self.responses[0].clone() }
     }
@@ -1768,10 +1762,7 @@ fn isolate_device_identity() {
         // reading the environment. It runs before any vault test touches the
         // identity, writes one constant value, and never writes again.
         unsafe {
-            std::env::set_var(
-                "KEYVAULT_AGENT_FILE",
-                "/nonexistent/clipboard-history-tests/agent.json",
-            );
+            std::env::set_var("KEYVAULT_AGENT_FILE", "/nonexistent/trove-tests/agent.json");
         }
     });
 }
@@ -1896,9 +1887,7 @@ async fn keyvault_commands_refuse_before_anything_is_configured() {
     // unconfigured one is unconfigured regardless of what any database says.
     isolate_device_identity();
 
-    let error = clipboard_history_app::keyvault::list_service()
-        .await
-        .unwrap_err();
+    let error = trove_app::keyvault::list_service().await.unwrap_err();
     assert_eq!(error, "keyvault_not_configured");
 }
 
@@ -1946,18 +1935,18 @@ async fn copying_a_key_opens_it_suppresses_capture_and_never_returns_it() {
     // copy path arms it, so the test app needs one too.
     let app = tauri::test::mock_builder()
         .manage(state)
-        .manage(clipboard_history_app::monitor::MonitorControl::new())
+        .manage(trove_app::monitor::MonitorControl::new())
         .invoke_handler(commands::invoke_handler())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap();
 
-    let config = clipboard_keyvault::KeyvaultConfig {
+    let config = trove_keyvault::KeyvaultConfig {
         base_url: "https://trustworthy-eagle-783.convex.site".to_owned(),
         token: "kv_AbCdEf0123456789-_".to_owned(),
         private_jwk: jwk_json_for(&holder),
     };
 
-    let outcome = clipboard_history_app::keyvault::copy_secret_with(
+    let outcome = trove_app::keyvault::copy_secret_with(
         app.handle(),
         CannedVault::with(vec![CannedVault::json(200, &envelope_body)]),
         &config,
@@ -1968,10 +1957,8 @@ async fn copying_a_key_opens_it_suppresses_capture_and_never_returns_it() {
             // the time any clipboard write is attempted, so a fetched key can
             // never be recorded as a fresh capture.
             assert!(
-                app.state::<clipboard_history_app::monitor::MonitorControl>()
-                    .suppression_deadline_active(
-                        clipboard_history_app::commands::current_time_ms()
-                    )
+                app.state::<trove_app::monitor::MonitorControl>()
+                    .suppression_deadline_active(trove_app::commands::current_time_ms())
             );
             assert_eq!(text, "sklejka-klucz");
             Err("clipboard_unavailable".to_owned())
@@ -1994,19 +1981,19 @@ async fn copying_a_key_opens_it_suppresses_capture_and_never_returns_it() {
 
 #[test]
 fn the_vault_read_throttle_spaces_requests() {
-    assert_eq!(clipboard_history_app::keyvault::throttle(10_000), Ok(()));
+    assert_eq!(trove_app::keyvault::throttle(10_000), Ok(()));
     assert_eq!(
-        clipboard_history_app::keyvault::throttle(10_500),
+        trove_app::keyvault::throttle(10_500),
         Err("keyvault_rate_limited".to_owned())
     );
     // A backward wall-clock step passes instead of freezing every read
     // until real time catches up to the stale mark.
-    assert_eq!(clipboard_history_app::keyvault::throttle(9_000), Ok(()));
+    assert_eq!(trove_app::keyvault::throttle(9_000), Ok(()));
     assert_eq!(
-        clipboard_history_app::keyvault::throttle(9_050),
+        trove_app::keyvault::throttle(9_050),
         Err("keyvault_rate_limited".to_owned())
     );
-    assert_eq!(clipboard_history_app::keyvault::throttle(20_000), Ok(()));
+    assert_eq!(trove_app::keyvault::throttle(20_000), Ok(()));
 }
 
 #[test]
@@ -2043,7 +2030,7 @@ async fn a_cryptex_firmlink_application_catalogues_and_answers_an_icon() {
         "the cryptex firmlink must list Safari with the everyday roots"
     );
     assert!(
-        clipboard_launcher::validate_launch_path(SAFARI, state.launcher.roots()).is_ok(),
+        trove_launcher::validate_launch_path(SAFARI, state.launcher.roots()).is_ok(),
         "launch validation must accept the firmlink"
     );
 
@@ -2072,7 +2059,7 @@ async fn a_cryptex_firmlink_application_catalogues_and_answers_an_icon() {
 fn every_vault_refusal_has_words_in_the_settings_pane() {
     let errors = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../crates/clipboard-keyvault/src/lib.rs"
+        "/../crates/trove-keyvault/src/lib.rs"
     ))
     .expect("the vault crate is a workspace member");
     let pane = std::fs::read_to_string(concat!(
@@ -2117,7 +2104,7 @@ async fn pairing_clears_the_overrides_that_would_shadow_it() {
         .await
         .unwrap();
 
-    clipboard_history_app::keyvault::clear_settings_overrides(&state)
+    trove_app::keyvault::clear_settings_overrides(&state)
         .await
         .unwrap();
 
@@ -2138,7 +2125,7 @@ async fn clearing_overrides_that_are_not_there_writes_nothing() {
     // The ordinary case — a fresh install pairing for the first time. Writing the row anyway
     // would touch settings on every pairing for no reason.
     let before = state.store.get_setting("app").unwrap();
-    clipboard_history_app::keyvault::clear_settings_overrides(&state)
+    trove_app::keyvault::clear_settings_overrides(&state)
         .await
         .unwrap();
     assert_eq!(state.store.get_setting("app").unwrap(), before);
