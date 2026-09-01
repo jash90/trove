@@ -83,6 +83,13 @@ application exits solely through "Quit" in the menu bar item, because a
 clipboard manager that stops running when its window closes quietly loses
 history.
 
+The palette floats above other windows. It is summoned over whatever you are
+working in and its whole purpose is to put something back there, so opening
+behind that window would be the one place it must never open. This applies to
+the palette alone; settings is an ordinary window. One limit worth knowing:
+macOS gives a full-screen application a space of its own, and a floating window
+does not follow it there.
+
 The menu bar icon shows the history on a left click; a right click opens a menu
 with pausing capture, settings and quitting. The "Pause capture" entry doubles
 as the indicator: if that is what it says, the application is recording.
