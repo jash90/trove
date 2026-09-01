@@ -1,7 +1,7 @@
 //! Writing the whole history out as a SuperCmd export.
 //!
 //! The record shape lives beside the parser that reads it, in
-//! `clipboard-import`; what lives here is the part that needs the store — the
+//! `trove-import`; what lives here is the part that needs the store — the
 //! walk over every event and the payload bytes behind it.
 //!
 //! This is the only place the application writes a file the user chose. It
@@ -11,9 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
-use clipboard_import::{SuperCmdExportRecord, format_timestamp_ms, render_csv, render_json};
-use clipboard_store::StoreHandle;
 use serde::Serialize;
+use trove_import::{SuperCmdExportRecord, format_timestamp_ms, render_csv, render_json};
+use trove_store::StoreHandle;
 
 /// Largest single image written beside the manifest.
 ///
@@ -101,7 +101,7 @@ fn read_page(store: &StoreHandle, after_event_id: i64) -> Result<Vec<ExportRow>,
                     source_app_name: row.get(4)?,
                     pinned: row.get(5)?,
                     missing_payload: (row.get::<_, i64>(6)?
-                        & i64::from(clipboard_core::ContentFlags::MISSING_PAYLOAD.bits()))
+                        & i64::from(trove_core::ContentFlags::MISSING_PAYLOAD.bits()))
                         != 0,
                 })
             })?;

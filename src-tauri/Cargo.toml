@@ -1,5 +1,5 @@
 [package]
-name = "clipboard-history-app"
+name = "trove-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,14 +14,14 @@ tauri-plugin-autostart = "2.5.1"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-global-shortcut = "2.3.2"
-clipboard-core = { path = "../crates/clipboard-core" }
-clipboard-store = { path = "../crates/clipboard-store" }
-clipboard-search = { path = "../crates/clipboard-search" }
-clipboard-images = { path = "../crates/clipboard-images" }
-clipboard-import = { path = "../crates/clipboard-import" }
-clipboard-keyvault = { path = "../crates/clipboard-keyvault" }
-clipboard-launcher = { path = "../crates/clipboard-launcher" }
-clipboard-link-preview = { path = "../crates/clipboard-link-preview" }
+trove-core = { path = "../crates/trove-core" }
+trove-store = { path = "../crates/trove-store" }
+trove-search = { path = "../crates/trove-search" }
+trove-images = { path = "../crates/trove-images" }
+trove-import = { path = "../crates/trove-import" }
+trove-keyvault = { path = "../crates/trove-keyvault" }
+trove-launcher = { path = "../crates/trove-launcher" }
+trove-link-preview = { path = "../crates/trove-link-preview" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos = { path = "../crates/platform-macos" }

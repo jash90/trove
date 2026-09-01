@@ -10,10 +10,10 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use clipboard_store::{LinkPreviewRecord, LinkPreviewStatus, StoreHandle};
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 use tauri::{Emitter, Manager, Runtime};
+use trove_store::{LinkPreviewRecord, LinkPreviewStatus, StoreHandle};
 
 /// Announced when a link's page has answered and been remembered.
 ///
@@ -174,7 +174,7 @@ pub async fn link_preview_service<R: Runtime>(
     let Some((content_id, url)) = read_link_target(&store, event_id)? else {
         return Ok(None);
     };
-    let Some((host, rest)) = clipboard_link_preview::describe_locally(&url) else {
+    let Some((host, rest)) = trove_link_preview::describe_locally(&url) else {
         return Ok(None);
     };
 
@@ -254,7 +254,7 @@ fn start_fetch<R: Runtime>(
 /// it answered, died before answering, or was never contacted at all. Only the
 /// middle one is evidence that asking again soon is pointless.
 async fn fetch_once(url: &str) -> (LinkPreviewRecord, FetchOutcome) {
-    let Ok(fetcher) = clipboard_link_preview::LinkPreviewFetcher::new() else {
+    let Ok(fetcher) = trove_link_preview::LinkPreviewFetcher::new() else {
         return (
             LinkPreviewRecord {
                 status: LinkPreviewStatus::Failed,
@@ -285,7 +285,7 @@ async fn fetch_once(url: &str) -> (LinkPreviewRecord, FetchOutcome) {
             },
             FetchOutcome::ReachedServer,
         ),
-        Err(clipboard_link_preview::LinkPreviewError::NotFetchable) => (
+        Err(trove_link_preview::LinkPreviewError::NotFetchable) => (
             LinkPreviewRecord {
                 status: LinkPreviewStatus::Refused,
                 ..LinkPreviewRecord::default()
@@ -293,7 +293,7 @@ async fn fetch_once(url: &str) -> (LinkPreviewRecord, FetchOutcome) {
             // The address was judged without anything leaving this machine.
             FetchOutcome::NeverContacted,
         ),
-        Err(clipboard_link_preview::LinkPreviewError::Refused) => (
+        Err(trove_link_preview::LinkPreviewError::Refused) => (
             LinkPreviewRecord {
                 status: LinkPreviewStatus::Refused,
                 ..LinkPreviewRecord::default()
@@ -351,10 +351,10 @@ fn read_stored_image(store: &StoreHandle, relpath: &str, maximum: usize) -> Opti
 /// A page that offers no decodable image simply has none: an unreadable card is
 /// not a failure the user can act on.
 fn downscale(bytes: &[u8]) -> Option<Vec<u8>> {
-    if bytes.len() > clipboard_images::MAX_IMAGE_INPUT_BYTES {
+    if bytes.len() > trove_images::MAX_IMAGE_INPUT_BYTES {
         return None;
     }
-    clipboard_images::make_thumbnail(bytes, clipboard_images::MAX_THUMBNAIL_DIMENSION).ok()
+    trove_images::make_thumbnail(bytes, trove_images::MAX_THUMBNAIL_DIMENSION).ok()
 }
 
 fn encode_bounded(bytes: &[u8], maximum: usize) -> Option<String> {

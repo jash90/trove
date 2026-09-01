@@ -594,12 +594,12 @@ describe('history actions', () => {
     expect(dialog).toBeVisible();
     expect(cancel).toHaveFocus();
     expect(screen.getByRole('button', { name: 'Delete permanently' })).toBeVisible();
-    expect(screen.getByLabelText('Clipboard history palette')).toHaveAttribute('inert');
+    expect(screen.getByLabelText('Trove palette')).toHaveAttribute('inert');
 
     await user.click(cancel);
     expect(dialog).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete entry' })).toHaveFocus();
-    expect(screen.getByLabelText('Clipboard history palette')).not.toHaveAttribute('inert');
+    expect(screen.getByLabelText('Trove palette')).not.toHaveAttribute('inert');
   });
 
   it('traps forward and reverse focus inside delete confirmation', async () => {

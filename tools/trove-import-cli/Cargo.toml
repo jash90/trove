@@ -1,0 +1,29 @@
+[package]
+name = "trove-import-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cap-fs-ext.workspace = true
+cap-std.workspace = true
+blake3.workspace = true
+clap.workspace = true
+trove-core = { path = "../../crates/trove-core" }
+trove-import = { path = "../../crates/trove-import" }
+trove-store = { path = "../../crates/trove-store" }
+directories.workspace = true
+rusqlite = { workspace = true, features = ["limits"] }
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+aes.workspace = true
+allocation-counter.workspace = true
+cbc.workspace = true
+flate2.workspace = true
+sha2.workspace = true

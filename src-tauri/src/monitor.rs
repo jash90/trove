@@ -9,8 +9,8 @@ use std::sync::{
     atomic::{AtomicBool, AtomicI64, Ordering},
 };
 
-use clipboard_core::{CaptureInput, ClipboardSnapshot, ContentFlags, EventFlags};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+use trove_core::{CaptureInput, ClipboardSnapshot, ContentFlags, EventFlags};
 
 /// Emitted after something new is recorded, so an open palette refreshes
 /// instead of showing a history that is already out of date.
@@ -200,14 +200,14 @@ fn record<R: Runtime>(app: &AppHandle<R>, capture: CaptureInput) {
 
 /// Renders a thumbnail for a captured image, when there is one to render.
 fn thumbnail_for(capture: &CaptureInput) -> Option<Vec<u8>> {
-    if capture.kind != clipboard_core::ContentKind::Image {
+    if capture.kind != trove_core::ContentKind::Image {
         return None;
     }
     let bytes = capture.representations.first()?.bytes.as_ref()?;
-    if bytes.len() > clipboard_images::MAX_IMAGE_INPUT_BYTES {
+    if bytes.len() > trove_images::MAX_IMAGE_INPUT_BYTES {
         return None;
     }
-    clipboard_images::make_thumbnail(bytes, clipboard_images::MAX_THUMBNAIL_DIMENSION).ok()
+    trove_images::make_thumbnail(bytes, trove_images::MAX_THUMBNAIL_DIMENSION).ok()
 }
 
 #[cfg(test)]

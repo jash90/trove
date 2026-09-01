@@ -1,15 +1,15 @@
 use std::{collections::HashSet, path::PathBuf};
 
 use base64::Engine;
-use clipboard_core::ContentFlags;
-use clipboard_import::{ImportAnalysis, ImportError, ImportProgress, ImportRunHandle};
-use clipboard_launcher::AppBundle;
-use clipboard_search::{HistoryPage, SearchError, SearchRequest, SearchStoreExt};
-use clipboard_store::{CasError, StoreError, StoreHandle};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use trove_core::ContentFlags;
+use trove_import::{ImportAnalysis, ImportError, ImportProgress, ImportRunHandle};
+use trove_launcher::AppBundle;
+use trove_search::{HistoryPage, SearchError, SearchRequest, SearchStoreExt};
+use trove_store::{CasError, StoreError, StoreHandle};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -27,7 +27,7 @@ const MAX_THUMBNAIL_BASE64_BYTES: usize = 256 * 1024;
 const MAX_THUMBNAIL_RAW_BYTES: usize = MAX_THUMBNAIL_BASE64_BYTES / 4 * 3;
 
 #[macro_export]
-macro_rules! clipboard_history_command_registry {
+macro_rules! trove_command_registry {
     ($consumer:ident) => {
         $consumer! {
             search_history => $crate::commands::search_history,
@@ -70,7 +70,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         };
     }
 
-    crate::clipboard_history_command_registry!(generate_command_handler)
+    crate::trove_command_registry!(generate_command_handler)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -460,7 +460,7 @@ pub async fn launch_app_service(state: &AppState, path: String) -> Result<(), St
     run_blocking("apps_unavailable", move || {
         // The string arrives from the webview; the scanner's own validation
         // decides whether it names a bundle this application ever listed.
-        let canonical = clipboard_launcher::validate_launch_path(&path, &roots)
+        let canonical = trove_launcher::validate_launch_path(&path, &roots)
             .map_err(|error| error.code().to_owned())?;
         launch_application(&canonical)
     })
@@ -499,7 +499,7 @@ pub async fn get_app_icon_service(
     let launcher = state.launcher.clone();
     let roots = state.launcher.roots().to_vec();
     run_blocking("icon_unavailable", move || {
-        let canonical = clipboard_launcher::validate_launch_path(&path, &roots)
+        let canonical = trove_launcher::validate_launch_path(&path, &roots)
             .map_err(|error| error.code().to_owned())?;
         let canonical = canonical.to_str().ok_or("launch_invalid")?.to_owned();
         // No icon to draw is an answer, not a failure — the row falls back
@@ -523,7 +523,7 @@ fn render_app_icon(canonical: &str) -> Option<AppIconDto> {
         // guarantee rather than AppKit's to promise.
         let apple_png =
             platform_macos::application_icon_png(canonical, APP_ICON_DIMENSION as usize)?;
-        let png = clipboard_images::make_thumbnail(&apple_png, APP_ICON_DIMENSION).ok()?;
+        let png = trove_images::make_thumbnail(&apple_png, APP_ICON_DIMENSION).ok()?;
         let base64 = base64::engine::general_purpose::STANDARD.encode(&png);
         Some(AppIconDto {
             mime_type: "image/png".to_owned(),
@@ -808,7 +808,7 @@ pub async fn analyze_import_service(
     // The password is turned into a secret here and dropped with this task.
     // An analysis keeps parsed records rather than a way back to the file, so
     // starting the import it describes never needs the password again.
-    let secret = password.map(clipboard_import::RayconfigSecret::new);
+    let secret = password.map(trove_import::RayconfigSecret::new);
     tokio::task::spawn_blocking(move || importer.analyze_with_password(path, secret.as_ref()))
         .await
         .map_err(|_| "import_analysis_failed".to_owned())?
@@ -1048,16 +1048,15 @@ fn render_thumbnail_blocking(
     let Some(bytes) = read_primary_bytes(
         store,
         &metadata,
-        clipboard_images::MAX_IMAGE_INPUT_BYTES,
+        trove_images::MAX_IMAGE_INPUT_BYTES,
         "thumbnail_too_large",
         "thumbnail_unavailable",
     )?
     else {
         return Ok(None);
     };
-    let thumbnail =
-        clipboard_images::make_thumbnail(&bytes, clipboard_images::MAX_THUMBNAIL_DIMENSION)
-            .map_err(|_| "thumbnail_unavailable".to_owned())?;
+    let thumbnail = trove_images::make_thumbnail(&bytes, trove_images::MAX_THUMBNAIL_DIMENSION)
+        .map_err(|_| "thumbnail_unavailable".to_owned())?;
     Ok(Some(RenderedThumbnail {
         content_id,
         bytes: thumbnail,
@@ -1263,7 +1262,7 @@ pub async fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppSettin
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn keyvault_list() -> Result<Vec<clipboard_keyvault::SecretRef>, String> {
+pub async fn keyvault_list() -> Result<Vec<trove_keyvault::SecretRef>, String> {
     crate::keyvault::throttle(current_time_ms())?;
     crate::keyvault::list_service().await
 }
@@ -1313,8 +1312,8 @@ pub async fn keyvault_copy_secret<R: tauri::Runtime>(
 ) -> Result<(), String> {
     crate::keyvault::throttle(current_time_ms())?;
     let config = crate::keyvault::config_from()?;
-    let transport = clipboard_keyvault::ReqwestSecretTransport::new(&config)
-        .map_err(|error| error.to_string())?;
+    let transport =
+        trove_keyvault::ReqwestSecretTransport::new(&config).map_err(|error| error.to_string())?;
     crate::keyvault::copy_secret_service(&app, transport, &config, &slug).await
 }
 
@@ -1597,7 +1596,7 @@ fn validate_settings(settings: &AppSettingsDto) -> Result<(), String> {
         .keyvault
         .address()
         .as_deref()
-        .is_none_or(|url| clipboard_keyvault::validate_base_url(url).is_ok());
+        .is_none_or(|url| trove_keyvault::validate_base_url(url).is_ok());
     if settings.schema_version != 1
         || !retention_is_valid
         || !hotkey_is_valid

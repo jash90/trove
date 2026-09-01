@@ -1,8 +1,0 @@
-[package]
-name = "clipboard-zstd-bound"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-zstd-sys.workspace = true

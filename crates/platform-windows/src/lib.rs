@@ -8,7 +8,7 @@
 //! three advisory formats an application sets to say "leave this out of
 //! clipboard history", and Windows' own history honours them. So does this one.
 
-use clipboard_core::ClipboardCapabilities;
+use trove_core::ClipboardCapabilities;
 
 /// Formats that ask every clipboard history to skip an item.
 ///

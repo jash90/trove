@@ -1,0 +1,15 @@
+[package]
+name = "trove-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+trove-core = { path = "../../crates/trove-core" }
+trove-search = { path = "../../crates/trove-search" }
+trove-store = { path = "../../crates/trove-store" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

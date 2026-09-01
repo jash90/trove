@@ -27,7 +27,7 @@ pub fn run() {
             // state, not a reason to refuse to start: the palette still opens
             // from its own window.
             if hotkey::install(app.handle()).is_err() {
-                eprintln!("clipboard-history: global shortcut unavailable");
+                eprintln!("trove: global shortcut unavailable");
             }
             app.manage(hotkey::PasteTarget::new());
             app.manage(hotkey::PastePrompt::new());
@@ -38,7 +38,7 @@ pub fn run() {
             // where the application exists on screen. Failing to place it there
             // is not a reason to refuse to start.
             if let Err(error) = tray::install(app.handle(), control.clone()) {
-                eprintln!("clipboard-history: menu bar item unavailable ({error})");
+                eprintln!("trove: menu bar item unavailable ({error})");
             }
             monitor::start(app.handle(), control);
             maintenance::start(app.handle());
@@ -56,5 +56,5 @@ pub fn run() {
         })
         .invoke_handler(commands::invoke_handler())
         .run(tauri::generate_context!())
-        .expect("error while running Clipboard History");
+        .expect("error while running Trove");
 }

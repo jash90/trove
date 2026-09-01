@@ -11,11 +11,11 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use clipboard_keyvault::{
+use tauri::{AppHandle, Manager, Runtime};
+use trove_keyvault::{
     KeyvaultClient, KeyvaultConfig, ReqwestSecretTransport, SecretTransport, decrypt_envelope,
     parse_private_jwk,
 };
-use tauri::{AppHandle, Manager, Runtime};
 
 use crate::state::AppState;
 
@@ -35,9 +35,9 @@ const MIN_REQUEST_INTERVAL_MS: i64 = 1_050;
 /// A missing identity is the ordinary unconfigured state and says so. A
 /// malformed one is a different answer, because a typo deserves to be named.
 pub fn config_from() -> Result<KeyvaultConfig, String> {
-    let config = match clipboard_keyvault::load_device_identity(clipboard_keyvault::CONSUMER) {
+    let config = match trove_keyvault::load_device_identity(trove_keyvault::CONSUMER) {
         Ok(config) => config,
-        Err(clipboard_keyvault::KeyvaultError::DeviceIdentityMissing) => {
+        Err(trove_keyvault::KeyvaultError::DeviceIdentityMissing) => {
             return Err("keyvault_not_configured".to_owned());
         }
         Err(error) => return Err(error.to_string()),
@@ -74,7 +74,7 @@ pub fn throttle(now_ms: i64) -> Result<(), String> {
 }
 
 /// Lists the secrets the token may read — metadata only, nothing sealed.
-pub async fn list_service() -> Result<Vec<clipboard_keyvault::SecretRef>, String> {
+pub async fn list_service() -> Result<Vec<trove_keyvault::SecretRef>, String> {
     let config = config_from()?;
     let transport = ReqwestSecretTransport::new(&config).map_err(|error| error.to_string())?;
     KeyvaultClient::new(transport)
@@ -192,35 +192,34 @@ pub async fn pair_start_service(base_url: String) -> Result<PairingStartedDto, S
     // thing the next one could read. The device already knows where its vault is.
     let typed = base_url.trim().to_owned();
     let base_url = if typed.is_empty() {
-        clipboard_keyvault::known_base_url(clipboard_keyvault::CONSUMER)
-            .ok_or_else(|| clipboard_keyvault::KeyvaultError::NoVaultAddress.to_string())?
+        trove_keyvault::known_base_url(trove_keyvault::CONSUMER)
+            .ok_or_else(|| trove_keyvault::KeyvaultError::NoVaultAddress.to_string())?
     } else {
         // Whatever was typed, resolved to the API. The address someone knows is the one they
         // visit, and that is a different host from the API — asking them to know the second is
         // asking them to know a deployment detail.
-        clipboard_keyvault::resolve_api(&typed)
+        trove_keyvault::resolve_api(&typed)
             .await
             .map_err(|error| error.to_string())?
     };
-    clipboard_keyvault::validate_base_url(&base_url).map_err(|error| error.to_string())?;
+    trove_keyvault::validate_base_url(&base_url).map_err(|error| error.to_string())?;
 
     // Asked before anything is generated: a deployment with no published interface cannot be
     // paired at all, and spending two seconds on a keypair first would only delay saying so.
-    let page = clipboard_keyvault::pairing_page_url(&base_url)
+    let page = trove_keyvault::pairing_page_url(&base_url)
         .await
         .map_err(|error| error.to_string())?;
 
     // Generating 3072-bit RSA takes a second or two of solid arithmetic; off the async runtime so
     // it cannot stall everything else the application is doing.
-    let key = tokio::task::spawn_blocking(clipboard_keyvault::generate_device_key)
+    let key = tokio::task::spawn_blocking(trove_keyvault::generate_device_key)
         .await
         .map_err(|_| "keyvault_pairing_failed".to_owned())?
         .map_err(|error| error.to_string())?;
 
-    let started =
-        clipboard_keyvault::start_pairing(&base_url, "Clipboard History", &key.public_jwk)
-            .await
-            .map_err(|error| error.to_string())?;
+    let started = trove_keyvault::start_pairing(&base_url, "Trove", &key.public_jwk)
+        .await
+        .map_err(|error| error.to_string())?;
 
     let url = format!("{page}/pair?code={}", urlencoding_minimal(&started.code));
     {
@@ -261,35 +260,30 @@ pub async fn pair_poll_service(state: &AppState) -> Result<PairingStatusDto, Str
         return Ok(PairingStatusDto::of("idle"));
     };
 
-    let outcome = clipboard_keyvault::claim_pairing(&base_url, &code, &private_jwk)
+    let outcome = trove_keyvault::claim_pairing(&base_url, &code, &private_jwk)
         .await
         .map_err(|error| error.to_string())?;
 
     match outcome {
-        clipboard_keyvault::PairingOutcome::Pending => Ok(PairingStatusDto::of("pending")),
-        clipboard_keyvault::PairingOutcome::Approved { url, token } => {
-            clipboard_keyvault::save_paired(
-                clipboard_keyvault::CONSUMER,
-                &url,
-                &private_jwk,
-                &token,
-            )
-            .map_err(|error| error.to_string())?;
+        trove_keyvault::PairingOutcome::Pending => Ok(PairingStatusDto::of("pending")),
+        trove_keyvault::PairingOutcome::Approved { url, token } => {
+            trove_keyvault::save_paired(trove_keyvault::CONSUMER, &url, &private_jwk, &token)
+                .map_err(|error| error.to_string())?;
             // Only after the identity is safely on disk: clearing first would leave an install
             // with neither the old configuration nor the new one if the write failed.
             clear_settings_overrides(state).await?;
             pair_cancel_service();
             Ok(PairingStatusDto::of("paired"))
         }
-        clipboard_keyvault::PairingOutcome::Expired => {
+        trove_keyvault::PairingOutcome::Expired => {
             pair_cancel_service();
             Ok(PairingStatusDto::of("expired"))
         }
-        clipboard_keyvault::PairingOutcome::NotFound => {
+        trove_keyvault::PairingOutcome::NotFound => {
             pair_cancel_service();
             Ok(PairingStatusDto::of("notFound"))
         }
-        clipboard_keyvault::PairingOutcome::AlreadyClaimed => {
+        trove_keyvault::PairingOutcome::AlreadyClaimed => {
             pair_cancel_service();
             Ok(PairingStatusDto::of("alreadyClaimed"))
         }
@@ -390,8 +384,8 @@ pub struct IdentityDto {
 /// showing a value nobody is using is how the last round of confusion started.
 pub fn identity_service() -> IdentityDto {
     IdentityDto {
-        paired: clipboard_keyvault::load_device_identity(clipboard_keyvault::CONSUMER).is_ok(),
-        url: clipboard_keyvault::known_base_url(clipboard_keyvault::CONSUMER),
+        paired: trove_keyvault::load_device_identity(trove_keyvault::CONSUMER).is_ok(),
+        url: trove_keyvault::known_base_url(trove_keyvault::CONSUMER),
     }
 }
 
@@ -402,8 +396,7 @@ pub fn identity_service() -> IdentityDto {
 /// retire it and the vault's Devices screen can do it by hand — which the interface says, because
 /// a "Reset" that quietly leaves a working credential behind would be a lie.
 pub async fn reset_pairing_service(state: &AppState) -> Result<(), String> {
-    clipboard_keyvault::forget_paired(clipboard_keyvault::CONSUMER)
-        .map_err(|error| error.to_string())?;
+    trove_keyvault::forget_paired(trove_keyvault::CONSUMER).map_err(|error| error.to_string())?;
     // The row's vestigial fields go too, so nothing is left to reappear in the pane.
     clear_settings_overrides(state).await
 }
