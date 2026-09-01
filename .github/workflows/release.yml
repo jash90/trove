@@ -12,7 +12,8 @@
 # Required repository secrets:
 #   MACOS_CERTIFICATE           base64 of the Developer ID Application .p12
 #   MACOS_CERTIFICATE_PASSWORD  password that .p12 was exported with
-#   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_SIGNING_IDENTITY      SHA-1 fingerprint of that certificate, not its
+#                               name: two of them share a name on this account
 #   APPLE_API_KEY               base64 of the App Store Connect .p8
 #   APPLE_API_KEY_ID            the key id
 #   APPLE_API_ISSUER            the issuer id
@@ -125,8 +126,10 @@ jobs:
       # would undo it, and its own bundle fails `codesign --deep --strict` with
       # "code has no resources but signature indicates they must be present".
       #
-      # By name here, unlike locally, where two certificates share this name and
-      # signing by name fails as ambiguous. The runner's keychain holds one.
+      # APPLE_SIGNING_IDENTITY is the certificate's SHA-1 fingerprint, not its
+      # name. Two Developer ID certificates on this account share a name, and
+      # signing by name fails as ambiguous — in a way that leaves the previous
+      # signature in place rather than failing loudly.
       - name: Sign the application
         env:
           IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
