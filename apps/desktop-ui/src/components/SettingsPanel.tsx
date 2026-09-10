@@ -7,6 +7,8 @@ import type {
   PairingStarted,
   ExportSummary as ExportSummaryContract,
   KeyvaultSecret,
+  ShortcutRelease,
+  ShortcutStatus,
   StorageStats as StorageStatsContract,
 } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
@@ -267,6 +269,28 @@ export const keyvaultErrorMessage = (code: string): string => {
   }
 };
 
+/**
+ * What to tell the user about a change to the system's shortcut table.
+ *
+ * `needsLogout` is the case worth spelling out rather than folding into
+ * success: the preference is written and will hold, but the running session has
+ * not picked it up, so the shortcut does nothing until the user logs back in.
+ * Reporting that as done would send them off to press a key that still opens
+ * Spotlight.
+ */
+export const shortcutReleaseNotice = (outcome: ShortcutRelease): string | null => {
+  switch (outcome) {
+    case 'applied':
+      return null;
+    case 'alreadyFree':
+      return 'Nothing in the system was holding that shortcut.';
+    case 'needsLogout':
+      return 'Saved. It takes effect after you log out and back in.';
+    default:
+      return 'Trove could not change the system shortcut. Open Keyboard Shortcuts, turn the conflicting one off, then try again.';
+  }
+};
+
 export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.JSX.Element => {
   const [persisted, setPersisted] = useState<AppSettings | null>(null);
   const [hotkey, setHotkey] = useState('');
@@ -298,7 +322,27 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [pending, setPending] = useState(false);
+  // Read from the system rather than remembered: what holds a chord is decided
+  // outside this application and can change while it runs.
+  const [shortcutStatus, setShortcutStatus] = useState<ShortcutStatus | null>(null);
+  const [shortcutBusy, setShortcutBusy] = useState(false);
+  const [shortcutNotice, setShortcutNotice] = useState<string | null>(null);
   const hotkeyRef = useRef<HTMLInputElement>(null);
+  const runShortcutChange = async (
+    change: (() => Promise<ShortcutRelease>) | undefined,
+  ): Promise<void> => {
+    if (change === undefined) return;
+    setShortcutBusy(true);
+    setShortcutNotice(null);
+    try {
+      setShortcutNotice(shortcutReleaseNotice(await change()));
+      // Read the system back rather than assuming the change took: the point of
+      // the row is to say what is true now, not what was asked for.
+      setShortcutStatus((await gateway.getShortcutStatus?.().catch(() => null)) ?? null);
+    } finally {
+      setShortcutBusy(false);
+    }
+  };
   // Its own window now, so the first field takes focus when the settings
   // arrive — no trap to build, because there is nothing behind it to escape to.
   useEffect(() => {
@@ -308,12 +352,14 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [settings, native, paired] = await Promise.all([
+      const [settings, native, paired, shortcut] = await Promise.all([
         gateway.getSettings(),
         gateway.isAutostartEnabled().catch(() => null),
         gateway.keyvaultIdentity().catch(() => null),
+        gateway.getShortcutStatus?.().catch(() => null) ?? Promise.resolve(null),
       ]);
       if (cancelled) return;
+      setShortcutStatus(shortcut);
       setPersisted(settings);
       setIdentity(paired);
       setHotkey(settings.hotkey);
@@ -678,6 +724,59 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                       }}
                     />
                   </label>
+                  {shortcutStatus !== null && shortcutStatus.heldBySystem ? (
+                    <div className="settings-notice" role="status">
+                      <p>
+                        <strong>{shortcutStatus.hotkey.replace('CommandOrControl', '⌘')}</strong> is
+                        a system shortcut, so macOS answers it before Trove ever sees it. Trove can
+                        turn that system shortcut off for you.
+                      </p>
+                      <div className="settings-notice-actions">
+                        <button
+                          type="button"
+                          disabled={shortcutBusy}
+                          onClick={() => void runShortcutChange(gateway.freeSummoningShortcut)}
+                        >
+                          Free it for Trove
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void gateway.openKeyboardSettings?.().catch(() => undefined)}
+                        >
+                          Open Keyboard Shortcuts
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  {shortcutStatus !== null &&
+                  !shortcutStatus.heldBySystem &&
+                  shortcutStatus.releasedIds.length > 0 ? (
+                    <div className="settings-notice" role="status">
+                      <p>Trove turned a system shortcut off to free this combination.</p>
+                      <div className="settings-notice-actions">
+                        <button
+                          type="button"
+                          disabled={shortcutBusy}
+                          onClick={() => void runShortcutChange(gateway.restoreSystemShortcut)}
+                        >
+                          Give it back to the system
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  {shortcutStatus !== null && !shortcutStatus.registered ? (
+                    <div className="settings-notice" role="status">
+                      <p>
+                        Another application is holding this combination, so Trove could not register
+                        it. Record a different one above, or quit whatever is holding it.
+                      </p>
+                    </div>
+                  ) : null}
+                  {shortcutNotice !== null ? (
+                    <p className="settings-help" role="status">
+                      {shortcutNotice}
+                    </p>
+                  ) : null}
                   <p className="settings-help">
                     Click the field and press the combination you want — hold <kbd>⌘</kbd>,
                     <kbd>⌃</kbd> or <kbd>⌥</kbd> and press a key. Shift alone is not recorded: it

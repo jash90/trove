@@ -26,6 +26,8 @@ import {
   type KeyvaultIdentity,
   type PairingStarted,
   type PairingStatus,
+  type ShortcutStatus,
+  type ShortcutRelease,
 } from './contracts';
 import { mockGateway } from './mockGateway';
 
@@ -109,6 +111,19 @@ export interface ClipboardGateway {
    * decides whether an entry can be pasted rather than only copied.
    */
   openAccessibilitySettings(): Promise<void>;
+  /** What the summoning shortcut is doing, as opposed to what it was asked to do. */
+  getShortcutStatus?(): Promise<ShortcutStatus>;
+  /**
+   * Turns off the system shortcuts standing on the configured chord.
+   *
+   * Deliberate and user-initiated: this changes a setting that belongs to the
+   * whole machine, not to this application.
+   */
+  freeSummoningShortcut?(): Promise<ShortcutRelease>;
+  /** Hands the system back what freeing the shortcut took. */
+  restoreSystemShortcut?(): Promise<ShortcutRelease>;
+  /** Opens the Keyboard shortcut list, for when the automatic route is refused. */
+  openKeyboardSettings?(): Promise<void>;
 }
 
 /**
@@ -169,6 +184,10 @@ export const tauriGateway: ClipboardGateway = {
     ),
   revealSource: (eventId) => invoke<void>('reveal_source', { eventId }),
   openSettingsWindow: () => invoke<void>('open_settings_window'),
+  getShortcutStatus: () => invoke<ShortcutStatus>('get_shortcut_status'),
+  freeSummoningShortcut: () => invoke<ShortcutRelease>('free_summoning_shortcut'),
+  restoreSystemShortcut: () => invoke<ShortcutRelease>('restore_system_shortcut'),
+  openKeyboardSettings: () => invoke<void>('open_keyboard_settings_window'),
   linkPreview: (eventId) => invoke<LinkPreview | null>('get_link_preview', { eventId }),
   onLinkPreviewReady: (listener) => subscribe<number>('link-preview-ready', listener),
   chooseExportDirectory: () =>

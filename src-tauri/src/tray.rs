@@ -1,7 +1,7 @@
 //! The menu bar item.
 //!
-//! A clipboard manager runs all day with its window hidden, so the menu bar is
-//! the only place it exists on screen. It answers the two questions the user
+//! A clipboard manager runs all day with its window hidden, and this one has no
+//! Dock icon at all, so the menu bar is the only place it exists on screen. It answers the two questions the user
 //! actually has — is it still recording, and how do I stop it — and gets out of
 //! the way.
 
@@ -50,7 +50,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri
     TrayIconBuilder::with_id("trove")
         // Its own drawing, not the application icon. A template icon is drawn
         // from its alpha channel alone — every opaque pixel becomes one flat
-        // colour — so the coloured icon that suits the Dock arrives in the menu
+        // colour — so the coloured icon the bundle carries arrives in the menu
         // bar as a featureless rectangle. This one is a glyph: mostly
         // transparent, so what survives the flattening is the clipboard.
         .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)

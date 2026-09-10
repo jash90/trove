@@ -6,6 +6,11 @@ license.workspace = true
 
 [dependencies]
 trove-core = { path = "../trove-core" }
+# The system's own shortcut table is a preference domain, and reading it means
+# parsing a plist. Declared outside the macOS block on purpose: the half of
+# `symbolic_hotkeys` that decides anything is pure, and its tests have to run on
+# every host the workspace is checked on, not only on the one that has the file.
+plist.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"

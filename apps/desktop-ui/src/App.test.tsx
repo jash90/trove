@@ -2,7 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { App } from './App';
+import { App, isSummoningShortcut, shortcutHint } from './App';
 import { mockGateway, type ClipboardGateway } from './lib/gateway';
 import { SYNTHETIC_APPS } from './lib/fixtures';
 
@@ -47,6 +47,49 @@ it('opens the import wizard from the keyboard, with no history selected', async 
 
   await user.keyboard('{Meta>}i{/Meta}');
   expect(await screen.findByRole('dialog', { name: 'Import history' })).toBeVisible();
+});
+
+describe('the summoning shortcut inside the palette', () => {
+  const press = (mods: Partial<Record<'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey', boolean>>) => ({
+    code: 'Space',
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...mods,
+  });
+
+  it('recognises the configured chord so the palette can put itself away', () => {
+    // Pressing it while the search field had focus did nothing: the chord went
+    // into the text field rather than through it, and the one key meant to be
+    // in charge of both directions only worked in one.
+    expect(isSummoningShortcut(press({ metaKey: true }), 'CommandOrControl+Space')).toBe(true);
+  });
+
+  it('follows a rebound shortcut rather than a hardcoded one', () => {
+    expect(isSummoningShortcut(press({ metaKey: true }), 'CommandOrControl+Shift+Space')).toBe(
+      false,
+    );
+    expect(
+      isSummoningShortcut(press({ metaKey: true, shiftKey: true }), 'CommandOrControl+Shift+Space'),
+    ).toBe(true);
+  });
+
+  it('leaves an ordinary space alone', () => {
+    // Typing a space in the search field must stay a space.
+    expect(isSummoningShortcut(press({}), 'CommandOrControl+Space')).toBe(false);
+  });
+
+  it('does nothing until the configured shortcut has been read', () => {
+    expect(isSummoningShortcut(press({ metaKey: true }), null)).toBe(false);
+  });
+
+  it('names the shortcut in the footer the way a keyboard is drawn', () => {
+    // Hardcoded prose went on advertising ⌘⇧Space after the shortcut changed.
+    expect(shortcutHint('CommandOrControl+Space')).toBe('⌘Space');
+    expect(shortcutHint('Control+Alt+7')).toBe('⌃⌥7');
+    expect(shortcutHint(null)).toBe('');
+  });
 });
 
 describe('the unified palette', () => {

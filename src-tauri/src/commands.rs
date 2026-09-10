@@ -17,7 +17,6 @@ use crate::state::AppState;
 use crate::state::AppIconDto;
 
 const APP_SETTINGS_KEY: &str = "app";
-const DEFAULT_HOTKEY: &str = "CommandOrControl+Shift+V";
 const MAX_HOTKEY_BYTES: usize = 128;
 const MAX_DENYLISTED_APPS: usize = 200;
 const MAX_DENYLISTED_APP_BYTES: usize = 256;
@@ -49,6 +48,10 @@ macro_rules! trove_command_registry {
             get_app_icon => $crate::commands::get_app_icon,
             open_settings_window => $crate::commands::open_settings_window,
             open_accessibility_settings_window => $crate::commands::open_accessibility_settings_window,
+            open_keyboard_settings_window => $crate::commands::open_keyboard_settings_window,
+            get_shortcut_status => $crate::commands::get_shortcut_status,
+            free_summoning_shortcut => $crate::commands::free_summoning_shortcut,
+            restore_system_shortcut => $crate::commands::restore_system_shortcut,
             export_history => $crate::commands::export_history,
             get_link_preview => $crate::commands::get_link_preview,
             keyvault_list => $crate::commands::keyvault_list,
@@ -146,6 +149,43 @@ pub struct AppSettingsDto {
     pub keyvault: KeyvaultSettingsDto,
 }
 
+/// What stands between the user and the shortcut they configured.
+///
+/// Two separate failures, kept separate because they look identical from the
+/// keyboard and have different fixes. `registered` false means the system
+/// refused the binding outright. `held_by_system` means the binding took and a
+/// system shortcut still eats every press before this application sees it —
+/// which is the ordinary state of Cmd+Space on a machine nobody has changed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutStatusDto {
+    pub hotkey: String,
+    pub registered: bool,
+    pub held_by_system: bool,
+    /// The system shortcuts this application turned off to free the chord.
+    ///
+    /// Kept so the change can be given back: taking a system-wide shortcut away
+    /// from inside an application and offering no way to return it would be bad
+    /// manners.
+    pub released_ids: Vec<i64>,
+}
+
+/// How a request to change the system's shortcut table actually went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ShortcutReleaseDto {
+    /// Nothing held the chord; nothing needed doing.
+    AlreadyFree,
+    /// Done, and live now.
+    Applied,
+    /// Written, but the system did not reload its table. It takes effect at the
+    /// next login, and saying so is better than reporting a success the user
+    /// will not observe.
+    NeedsLogout,
+    /// Nothing was written. The manual route is all that is left.
+    Refused,
+}
+
 /// Optional overrides for the vault connection.
 ///
 /// The connection itself — URL, token and the private key that opens what the
@@ -218,7 +258,7 @@ impl Default for AppSettingsDto {
     fn default() -> Self {
         Self {
             schema_version: 1,
-            hotkey: DEFAULT_HOTKEY.to_owned(),
+            hotkey: crate::hotkey::DEFAULT_HOTKEY.to_owned(),
             autostart: false,
             retention_days: None,
             denylisted_apps: Vec::new(),
@@ -725,6 +765,90 @@ fn activate_paste_target(_pid: i32) -> bool {
     false
 }
 
+/// Which system shortcuts hold the chord the palette is bound to.
+///
+/// Empty on every platform but macOS, and empty on macOS whenever the chord is
+/// free. Only the system's own table is visible here: another application
+/// holding the same chord is not recorded anywhere this can read, which is why
+/// nothing derives "the shortcut works" from an empty answer.
+#[cfg(target_os = "macos")]
+fn system_holders(shortcut: &tauri_plugin_global_shortcut::Shortcut) -> Vec<i64> {
+    let Some(chord) = symbolic_chord(shortcut) else {
+        return Vec::new();
+    };
+    platform_macos::holders_of(chord)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_holders(_shortcut: &tauri_plugin_global_shortcut::Shortcut) -> Vec<i64> {
+    Vec::new()
+}
+
+/// The chord as the system's own shortcut table spells it.
+///
+/// Only the combinations that table can express are worth translating; for
+/// anything else there is nothing to collide with there, and answering `None`
+/// says exactly that.
+#[cfg(target_os = "macos")]
+fn symbolic_chord(
+    shortcut: &tauri_plugin_global_shortcut::Shortcut,
+) -> Option<platform_macos::Chord> {
+    use platform_macos::symbolic_hotkeys::{
+        MODIFIER_COMMAND, MODIFIER_CONTROL, MODIFIER_OPTION, MODIFIER_SHIFT,
+    };
+    use tauri_plugin_global_shortcut::{Code, Modifiers};
+
+    let key_code = match shortcut.key {
+        Code::Space => 49,
+        _ => return None,
+    };
+    let mut modifiers = 0;
+    for (flag, mask) in [
+        (Modifiers::SUPER, MODIFIER_COMMAND),
+        (Modifiers::CONTROL, MODIFIER_CONTROL),
+        (Modifiers::ALT, MODIFIER_OPTION),
+        (Modifiers::SHIFT, MODIFIER_SHIFT),
+    ] {
+        if shortcut.mods.contains(flag) {
+            modifiers |= mask;
+        }
+    }
+    Some(platform_macos::Chord {
+        key_code,
+        modifiers,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn release_system_holders(ids: &[i64]) -> platform_macos::SetOutcome {
+    platform_macos::symbolic_hotkeys::set_enabled(ids, false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn release_system_holders(_ids: &[i64]) -> ShortcutReleaseDto {
+    ShortcutReleaseDto::Refused
+}
+
+#[cfg(target_os = "macos")]
+fn restore_system_holders(ids: &[i64]) -> platform_macos::SetOutcome {
+    platform_macos::symbolic_hotkeys::set_enabled(ids, true)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn restore_system_holders(_ids: &[i64]) -> ShortcutReleaseDto {
+    ShortcutReleaseDto::Refused
+}
+
+#[cfg(target_os = "macos")]
+fn open_keyboard_settings() -> bool {
+    platform_macos::symbolic_hotkeys::open_keyboard_shortcut_settings()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_keyboard_settings() -> bool {
+    false
+}
+
 /// Opens the Accessibility list in System Settings, on request.
 ///
 /// The palette offers this next to the refusal it reports, so the fix is one
@@ -736,6 +860,89 @@ pub fn open_accessibility_settings_window() -> Result<(), String> {
     } else {
         Err("accessibility_settings_unavailable".to_owned())
     }
+}
+
+/// What the summoning shortcut is doing, as opposed to what it was asked to do.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_shortcut_status(
+    active: tauri::State<'_, crate::hotkey::ActiveShortcut>,
+    released: tauri::State<'_, crate::hotkey::ReleasedSystemHotkeys>,
+) -> ShortcutStatusDto {
+    let shortcut = active.get();
+    ShortcutStatusDto {
+        hotkey: shortcut.into_string(),
+        registered: active.is_registered(),
+        held_by_system: !system_holders(&shortcut).is_empty(),
+        released_ids: released.get(),
+    }
+}
+
+/// Turns off the system shortcuts standing on the configured chord.
+///
+/// Deliberate and user-initiated, never automatic: this changes a setting that
+/// belongs to the whole machine, not to this application.
+#[tauri::command(rename_all = "camelCase")]
+pub fn free_summoning_shortcut(
+    active: tauri::State<'_, crate::hotkey::ActiveShortcut>,
+    released: tauri::State<'_, crate::hotkey::ReleasedSystemHotkeys>,
+) -> ShortcutReleaseDto {
+    let holders = system_holders(&active.get());
+    if holders.is_empty() {
+        return ShortcutReleaseDto::AlreadyFree;
+    }
+    let outcome = release_outcome(release_system_holders(&holders));
+    if matches!(
+        outcome,
+        ShortcutReleaseDto::Applied | ShortcutReleaseDto::NeedsLogout
+    ) {
+        released.remember(&holders);
+    }
+    outcome
+}
+
+/// Hands the system back what `free_summoning_shortcut` took.
+#[tauri::command(rename_all = "camelCase")]
+pub fn restore_system_shortcut(
+    released: tauri::State<'_, crate::hotkey::ReleasedSystemHotkeys>,
+) -> ShortcutReleaseDto {
+    let ids = released.get();
+    if ids.is_empty() {
+        return ShortcutReleaseDto::AlreadyFree;
+    }
+    let outcome = release_outcome(restore_system_holders(&ids));
+    if matches!(
+        outcome,
+        ShortcutReleaseDto::Applied | ShortcutReleaseDto::NeedsLogout
+    ) {
+        released.forget();
+    }
+    outcome
+}
+
+/// Opens the Keyboard shortcut list in System Settings, on request.
+///
+/// The manual route, offered whenever the automatic one is refused.
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_keyboard_settings_window() -> Result<(), String> {
+    if open_keyboard_settings() {
+        Ok(())
+    } else {
+        Err("keyboard_settings_unavailable".to_owned())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn release_outcome(outcome: platform_macos::SetOutcome) -> ShortcutReleaseDto {
+    match outcome {
+        platform_macos::SetOutcome::Applied => ShortcutReleaseDto::Applied,
+        platform_macos::SetOutcome::NeedsLogout => ShortcutReleaseDto::NeedsLogout,
+        platform_macos::SetOutcome::Failed => ShortcutReleaseDto::Refused,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn release_outcome(outcome: ShortcutReleaseDto) -> ShortcutReleaseDto {
+    outcome
 }
 
 #[cfg(target_os = "macos")]
@@ -1159,6 +1366,18 @@ pub fn retention_days(store: &StoreHandle) -> Option<u16> {
         .and_then(|settings| settings.retention_days)
 }
 
+/// The shortcut the user chose, for a launch that has to register one.
+///
+/// Startup used to register a hardcoded default and never look here, so a
+/// shortcut changed in settings answered until the application was closed and
+/// then quietly reverted, while the settings screen went on showing the value
+/// that no longer worked.
+pub fn stored_hotkey(store: &StoreHandle) -> Option<String> {
+    get_settings_blocking(store)
+        .ok()
+        .map(|settings| settings.hotkey)
+}
+
 /// Whether link pages may be contacted.
 ///
 /// An unreadable settings row means no fetching: silence is the safe direction
@@ -1212,9 +1431,14 @@ pub async fn save_settings_with_app<R: tauri::Runtime>(
     ) {
         let previous = active.get();
         // A shortcut another application already holds leaves the previous one
-        // answering, which is better than leaving none.
-        if crate::hotkey::rebind(app, previous, next).is_ok() {
-            active.set(next);
+        // answering, which is better than leaving none — but the screen must
+        // not go on presenting the new one as though it took.
+        match crate::hotkey::rebind(app, previous, next) {
+            Ok(()) => {
+                active.set(next);
+                active.set_registered(true);
+            }
+            Err(_) => active.set_registered(false),
         }
     }
     Ok(stored)
@@ -1238,7 +1462,7 @@ pub async fn save_settings_service(
         private_jwk: None,
     };
     settings.keyvault = keyvault;
-    validate_settings(&settings)?;
+    validate_settings_for_save(&settings)?;
     let value_json = serde_json::to_string(&settings).map_err(|_| "invalid_settings".to_owned())?;
     state
         .store
@@ -1571,6 +1795,21 @@ fn cas_error_code(error: &CasError, fallback: &str) -> String {
         CasError::PrivateStorageUnavailable => "private_storage_unavailable".to_owned(),
         _ => fallback.to_owned(),
     }
+}
+
+/// The checks a row must pass to be written.
+///
+/// Stricter than the read path on purpose. A shortcut that does not parse can
+/// never be registered, so refusing it belongs here, where the user sees the
+/// refusal and picks another one. Putting the same check on the read path
+/// instead would mean one bad row — written by an older version, or by hand —
+/// makes `get_settings` fail, and the screen holding the fix stops opening.
+fn validate_settings_for_save(settings: &AppSettingsDto) -> Result<(), String> {
+    validate_settings(settings)?;
+    if crate::hotkey::parse_shortcut(&settings.hotkey).is_none() {
+        return Err("invalid_settings".to_owned());
+    }
+    Ok(())
 }
 
 fn validate_settings(settings: &AppSettingsDto) -> Result<(), String> {

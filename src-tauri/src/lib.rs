@@ -22,16 +22,33 @@ pub fn run() {
         .setup(|app| {
             let data_dir = state::resolve_data_dir(app.handle())?;
             let app_state = state::AppState::open_data_dir(data_dir)?;
+            // The menu bar is where this application exists on screen. A Dock
+            // icon promises a window that spends its life hidden, and clicking
+            // it does nothing worth doing. `LSUIElement` in Info.plist keeps
+            // the tile from ever appearing in a built bundle; this covers
+            // `pnpm tauri dev`, where there is no bundle to read it from.
+            #[cfg(target_os = "macos")]
+            let _ = app.handle().set_dock_visibility(false);
+            // The shortcut the user chose, not the built-in one. Startup used
+            // to register the default unconditionally, so a shortcut changed in
+            // settings answered until the application was closed and then
+            // reverted without saying so.
+            let shortcut =
+                hotkey::shortcut_for_launch(commands::stored_hotkey(&app_state.store).as_deref());
             app.manage(app_state);
-            // A shortcut another application already holds is a degraded
-            // state, not a reason to refuse to start: the palette still opens
-            // from its own window.
-            if hotkey::install(app.handle()).is_err() {
-                eprintln!("trove: global shortcut unavailable");
+            let active = hotkey::ActiveShortcut::new(shortcut);
+            // A shortcut another application already holds is a degraded state,
+            // not a reason to refuse to start: the palette still opens from the
+            // menu bar. What it is not is a state to keep quiet about, so the
+            // answer is recorded where the settings screen can read it.
+            match hotkey::install(app.handle(), shortcut) {
+                Ok(()) => active.set_registered(true),
+                Err(_) => eprintln!("trove: global shortcut unavailable"),
             }
+            app.manage(active);
+            app.manage(hotkey::ReleasedSystemHotkeys::new());
             app.manage(hotkey::PasteTarget::new());
             app.manage(hotkey::PastePrompt::new());
-            app.manage(hotkey::ActiveShortcut::default());
             let control = monitor::MonitorControl::new();
             app.manage(control.clone());
             // The window spends most of its life hidden, so the menu bar is

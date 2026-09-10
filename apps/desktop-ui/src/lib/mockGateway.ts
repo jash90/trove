@@ -165,4 +165,14 @@ export const mockGateway: ClipboardGateway = {
   // There is no System Settings to open outside Tauri; resolving keeps the
   // browser preview walkable, same as launching an application does.
   openAccessibilitySettings: async () => undefined,
+  // Nothing holds a chord in a browser, so the preview never shows the notice.
+  getShortcutStatus: async () => ({
+    hotkey: settings.hotkey,
+    registered: true,
+    heldBySystem: false,
+    releasedIds: [],
+  }),
+  freeSummoningShortcut: async () => 'alreadyFree' as const,
+  restoreSystemShortcut: async () => 'alreadyFree' as const,
+  openKeyboardSettings: async () => undefined,
 };

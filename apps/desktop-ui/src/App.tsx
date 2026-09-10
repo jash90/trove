@@ -11,6 +11,7 @@ import {
 import { ActionBar } from './components/ActionBar';
 import { ImportWizard } from './components/ImportWizard';
 import { PaletteHeader } from './components/PaletteHeader';
+import { acceleratorFromKeyEvent } from './components/SettingsPanel';
 import { PaletteWorkspace } from './components/PaletteWorkspace';
 import { useAppsCatalog } from './hooks/useAppsCatalog';
 import { useVaultCatalog } from './hooks/useVaultCatalog';
@@ -36,6 +37,57 @@ interface AppProps {
 
 /** Keys that belong to whatever text field has focus, never to the palette. */
 const TEXT_EDITING_KEYS = new Set(['Backspace', 'Delete']);
+
+/**
+ * The shortcut written the way a keyboard is drawn rather than the way it is stored.
+ *
+ * The footer used to name it in prose, hardcoded, so it went on advertising
+ * ⌘⇧Space after the shortcut changed — and a shortcut nobody was told about
+ * correctly is worse than one nobody was told about at all.
+ */
+export const shortcutHint = (hotkey: string | null): string => {
+  if (hotkey === null) return '';
+  return hotkey
+    .split('+')
+    .map((part) => {
+      switch (part) {
+        case 'CommandOrControl':
+        case 'Command':
+          return '⌘';
+        case 'Control':
+          return '⌃';
+        case 'Alt':
+          return '⌥';
+        case 'Shift':
+          return '⇧';
+        default:
+          return part;
+      }
+    })
+    .join('');
+};
+
+/**
+ * Whether a keypress is the summoning shortcut arriving inside the palette.
+ *
+ * The shortcut is registered with the system and toggles the window from
+ * outside, but pressing it while the search field has focus did nothing: the
+ * field is a text field, and the chord went into it rather than through it. The
+ * shortcut is meant to be in charge of both directions — that is the whole
+ * reason there is no second key for putting the palette away — so the palette
+ * answers it itself when it is the one holding focus.
+ *
+ * Compared against the accelerator the settings screen stores, so a rebound
+ * shortcut closes the palette exactly as the built-in one does.
+ */
+export const isSummoningShortcut = (
+  event: { code: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean },
+  hotkey: string | null,
+): boolean => {
+  if (hotkey === null) return false;
+  const pressed = acceleratorFromKeyEvent(event);
+  return pressed !== null && pressed === hotkey;
+};
 
 const shortcutIsBlocked = (
   event: ReactKeyboardEvent<HTMLElement>,
@@ -77,6 +129,29 @@ const ClipboardPalette = (): React.JSX.Element => {
     [vault.secrets, query],
   );
   const [launchError, setLaunchError] = useState<string | null>(null);
+  // The shortcut the palette has to recognise when it is pressed inside the
+  // window rather than outside it. Read once: it changes only in settings, and
+  // saving there rebinds the system registration anyway.
+  const [summoningShortcut, setSummoningShortcut] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    // Defensive on the call as well as the promise: the palette has to open
+    // whether or not the settings can be read, and a shortcut it does not know
+    // costs a way of closing, not the window.
+    try {
+      void gateway
+        .getSettings()
+        .then((settings) => {
+          if (!cancelled) setSummoningShortcut(settings.hotkey);
+        })
+        .catch(() => undefined);
+    } catch {
+      /* no settings to read; the system shortcut still toggles the window */
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [gateway]);
   const focusSearch = (): void => searchInputRef.current?.focus();
   useEffect(() => {
     searchInputRef.current?.focus();
@@ -209,6 +284,17 @@ const ClipboardPalette = (): React.JSX.Element => {
   const handleSearchKeyDown: KeyboardEventHandler<HTMLInputElement> = (event) => {
     if (actions.deleteTargetId === null) navigation.handleKeyDown(event);
   };
+  // Hidden rather than closed, the same as every other way the palette goes
+  // away: closing it would end the process and take the history recording with
+  // it. Outside a Tauri window there is nothing to hide, and the palette works
+  // in a browser without one.
+  const hideWindow = (): void => {
+    try {
+      void getCurrentWindow().hide().catch(() => undefined);
+    } catch {
+      /* no window to hide */
+    }
+  };
   const handleCopy = (): void => {
     if (selectedHistoryId !== null) actions.copy(selectedHistoryId, 'copy');
   };
@@ -230,6 +316,14 @@ const ClipboardPalette = (): React.JSX.Element => {
     void gateway.openAccessibilitySettings().catch(() => undefined);
   };
   const handlePaletteKeyDown: KeyboardEventHandler<HTMLElement> = (event) => {
+    // Checked before anything else, including the text-field guard: this is the
+    // one chord that must work wherever focus happens to be, because it is the
+    // only way the palette is put away without reaching for the mouse.
+    if (isSummoningShortcut(event, summoningShortcut)) {
+      event.preventDefault();
+      hideWindow();
+      return;
+    }
     if (shortcutIsBlocked(event, modalOpen)) return;
     const key = event.key.toLocaleLowerCase('en-US');
     const primaryModifier = event.metaKey || event.ctrlKey;
@@ -342,7 +436,10 @@ const ClipboardPalette = (): React.JSX.Element => {
           </p>
         ) : null}
         <footer className="palette-footer">
-          <span>↵ open · ⌘C copy · ⌘⇧V plain · ⌘⇧Space summon</span>
+          <span>
+            ↵ open · ⌘C copy · ⌘⇧V plain
+            {summoningShortcut === null ? '' : ` · ${shortcutHint(summoningShortcut)} summon`}
+          </span>
           {/* Out of the way but still visible: a shortcut nobody was told about
               is the same as no way in. */}
           <span className="palette-footer__entries">

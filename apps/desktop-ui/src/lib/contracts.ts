@@ -92,6 +92,26 @@ export interface AppSettings {
 }
 
 /**
+ * What stands between the user and the shortcut they configured.
+ *
+ * Two failures that feel identical from the keyboard and have different fixes.
+ * `registered` false means the system refused the binding outright, usually
+ * because another application holds it. `heldBySystem` means the binding took
+ * and a system shortcut still eats every press — the ordinary state of ⌘Space
+ * on a machine nobody has changed.
+ */
+export interface ShortcutStatus {
+  hotkey: string;
+  registered: boolean;
+  heldBySystem: boolean;
+  /** The system shortcuts this application turned off, so they can be given back. */
+  releasedIds: number[];
+}
+
+/** How a request to change the system's shortcut table actually went. */
+export type ShortcutRelease = 'alreadyFree' | 'applied' | 'needsLogout' | 'refused';
+
+/**
  * Where a pairing stands.
  *
  * `idle` means nothing is in flight — the answer after a pairing finished or was abandoned, so

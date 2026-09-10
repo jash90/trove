@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { AppSettings, StorageStats } from '../lib/contracts';
+import type { AppSettings, ShortcutStatus, StorageStats } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
 import {
   acceleratorFromKeyEvent,
@@ -12,6 +12,7 @@ import {
   normalizeExecutableDenylistEntry,
   normalizePlatformHotkey,
   SettingsPanel,
+  shortcutReleaseNotice,
 } from './SettingsPanel';
 import { StorageStats as StorageStatsView } from './StorageStats';
 
@@ -30,7 +31,7 @@ const deferred = <T,>(): Deferred<T> => {
 
 const persistedSettings: AppSettings = {
   schemaVersion: 1,
-  hotkey: 'CommandOrControl+Shift+V',
+  hotkey: 'CommandOrControl+Space',
   autostart: false,
   retentionDays: 30,
   denylistedApps: ['com.acme.private'],
@@ -106,8 +107,83 @@ const openTab = async (name: string): Promise<void> => {
   await userEvent.click(screen.getByRole('tab', { name }));
 };
 
+const heldBySystem: ShortcutStatus = {
+  hotkey: 'CommandOrControl+Space',
+  registered: true,
+  heldBySystem: true,
+  releasedIds: [],
+};
+
+describe('the system shortcut standing on ours', () => {
+  it('offers to free the chord, and reports what the system actually did', async () => {
+    // Registration succeeding tells the user nothing: macOS answers ⌘Space
+    // above the table this application registers into, so the shortcut binds
+    // cleanly and then never fires.
+    const freeSummoningShortcut = vi.fn<NonNullable<ClipboardGateway['freeSummoningShortcut']>>(
+      async () => 'applied' as const,
+    );
+    const getShortcutStatus = vi
+      .fn<NonNullable<ClipboardGateway['getShortcutStatus']>>()
+      .mockResolvedValueOnce(heldBySystem)
+      .mockResolvedValue({ ...heldBySystem, heldBySystem: false, releasedIds: [64] });
+    const user = userEvent.setup();
+    render(<SettingsPanel gateway={makeGateway({ getShortcutStatus, freeSummoningShortcut })} />);
+    await loadSettings();
+
+    await user.click(await screen.findByRole('button', { name: 'Free it for Trove' }));
+    await waitFor(() => expect(freeSummoningShortcut).toHaveBeenCalled());
+
+    // The system is read back rather than assumed, so what is offered next is
+    // the undo — not the same button again.
+    expect(
+      await screen.findByRole('button', { name: 'Give it back to the system' }),
+    ).toBeInTheDocument();
+  });
+
+  it('says nothing when the chord is already free', async () => {
+    const getShortcutStatus = vi.fn(async () => ({ ...heldBySystem, heldBySystem: false }));
+    render(<SettingsPanel gateway={makeGateway({ getShortcutStatus })} />);
+    await loadSettings();
+
+    expect(screen.queryByRole('button', { name: 'Free it for Trove' })).not.toBeInTheDocument();
+  });
+
+  it('names the other application when the binding itself was refused', async () => {
+    // A different failure with a different fix, and it looks identical from the
+    // keyboard: nothing happens when the key is pressed.
+    const getShortcutStatus = vi.fn(async () => ({
+      ...heldBySystem,
+      registered: false,
+      heldBySystem: false,
+    }));
+    render(<SettingsPanel gateway={makeGateway({ getShortcutStatus })} />);
+    await loadSettings();
+
+    expect(await screen.findByText(/Another application is holding/u)).toBeInTheDocument();
+  });
+
+  it.each([
+    ['applied', null],
+    ['alreadyFree', 'Nothing in the system was holding that shortcut.'],
+    ['needsLogout', 'Saved. It takes effect after you log out and back in.'],
+  ] as const)('reports %s honestly rather than as a plain success', (outcome, expected) => {
+    // `needsLogout` is the one worth spelling out: the preference is written
+    // and will hold, but the running session has not picked it up, so calling
+    // it done would send the user off to press a key that still opens
+    // Spotlight.
+    expect(shortcutReleaseNotice(outcome)).toBe(expected);
+  });
+
+  it('falls back to the manual route when the system refuses the change', () => {
+    expect(shortcutReleaseNotice('refused')).toMatch(/Keyboard Shortcuts/u);
+  });
+});
+
 describe('settings normalization', () => {
   it.each([
+    // One modifier is enough, and it has to be: ⌘Space is the shortcut this
+    // application ships with.
+    ['commandorcontrol + space', 'CommandOrControl+Space'],
     ['commandorcontrol + shift + space', 'CommandOrControl+Shift+Space'],
     ['commandorcontrol + shift + v', 'CommandOrControl+Shift+V'],
     ['control+alt+7', 'Control+Alt+7'],
@@ -432,7 +508,7 @@ describe('recording a shortcut', () => {
 
     // Typing used to be the only way to set this, and it meant knowing the accelerator syntax.
     await user.type(field, 'nonsense');
-    expect(field).toHaveValue('CommandOrControl+Shift+V');
+    expect(field).toHaveValue('CommandOrControl+Space');
 
     fireEvent.keyDown(field, { code: 'KeyK', metaKey: true, altKey: true });
     expect(field).toHaveValue('CommandOrControl+Alt+K');

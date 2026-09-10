@@ -12,7 +12,7 @@ use std::sync::{
 };
 
 use tauri::{AppHandle, Manager, Runtime};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 /// The label of the window the shortcut toggles.
 const PALETTE_WINDOW: &str = "main";
@@ -105,21 +105,47 @@ impl PastePrompt {
     }
 }
 
-/// Cmd+Shift+Space on macOS, Ctrl+Shift+Space elsewhere.
+/// Cmd+Space on macOS, Ctrl+Space elsewhere.
 ///
-/// Space is what a launcher-style palette is expected to answer to, and the
-/// added Shift keeps it clear of the input-source switcher and of Spotlight.
+/// The chord a launcher-style palette is reached for by reflex. It is also the
+/// one Spotlight holds, which is why freeing it is part of setting this
+/// application up rather than an afterthought: a chord the system claims is
+/// dispatched above the table this application registers into, so the shortcut
+/// registers cleanly and then never fires. An earlier version added Shift to
+/// step around that. Stepping around it was the thing to stop doing.
+///
+/// Written once, here, because the settings row and the registration used to
+/// carry their own copies and disagreed: the screen offered Cmd+Shift+V while
+/// Cmd+Shift+Space was what answered.
+pub const DEFAULT_HOTKEY: &str = "CommandOrControl+Space";
+
 pub fn default_shortcut() -> Shortcut {
-    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space)
+    parse_shortcut(DEFAULT_HOTKEY).expect("the built-in default must parse")
 }
 
-/// Registers the shortcut and wires it to the palette.
+/// Which shortcut a launch should try, given what was saved.
 ///
-/// A failure here is not fatal: the application still works from its window, so
-/// the caller reports the degraded state rather than refusing to start. The
-/// most common cause is another application holding the same combination.
-pub fn install<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri_plugin_global_shortcut::Error> {
-    register(app, default_shortcut())
+/// An unreadable saved value falls back rather than refusing to register. A row
+/// written by an older version, or by hand, must not leave the palette with no
+/// way in at all — and the settings screen, which is where the value gets
+/// fixed, is reached through the palette.
+pub fn shortcut_for_launch(saved: Option<&str>) -> Shortcut {
+    saved
+        .and_then(parse_shortcut)
+        .unwrap_or_else(default_shortcut)
+}
+
+/// Registers a shortcut and wires it to the palette.
+///
+/// A failure here is not fatal: the application still works from its window and
+/// from the menu bar, so the caller records the degraded state rather than
+/// refusing to start. The most common cause is another application holding the
+/// same combination — and on Cmd+Space there are several candidates.
+pub fn install<R: Runtime>(
+    app: &AppHandle<R>,
+    shortcut: Shortcut,
+) -> Result<(), tauri_plugin_global_shortcut::Error> {
+    register(app, shortcut)
 }
 
 /// Parses a shortcut written the way the settings screen stores it.
@@ -161,16 +187,33 @@ fn register<R: Runtime>(
 }
 
 /// The shortcut currently answering, so a rebind knows what to take down.
+///
+/// It also carries whether the system accepted the registration at all. That
+/// used to end at an `eprintln!`, which was survivable while the shortcut was
+/// an unusual chord nobody else wanted; on Cmd+Space it is not. A shortcut the
+/// system refused looks exactly like a shortcut that works until the user
+/// presses it, so the one place that knows the answer has to be able to say so.
 #[derive(Clone, Debug)]
 pub struct ActiveShortcut {
     current: Arc<std::sync::Mutex<Shortcut>>,
+    registered: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ActiveShortcut {
     pub fn new(shortcut: Shortcut) -> Self {
         Self {
             current: Arc::new(std::sync::Mutex::new(shortcut)),
+            registered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Whether the system is actually answering the shortcut.
+    pub fn is_registered(&self) -> bool {
+        self.registered.load(Ordering::Relaxed)
+    }
+
+    pub fn set_registered(&self, registered: bool) {
+        self.registered.store(registered, Ordering::Relaxed);
     }
 
     pub fn get(&self) -> Shortcut {
@@ -190,6 +233,46 @@ impl ActiveShortcut {
 impl Default for ActiveShortcut {
     fn default() -> Self {
         Self::new(default_shortcut())
+    }
+}
+
+/// The system shortcuts this application turned off to free its own chord.
+///
+/// Remembered for one reason: so they can be turned back on. Disabling a
+/// machine-wide shortcut from inside an application and then offering no way
+/// back would leave the user hunting through System Settings for a change they
+/// did not make by hand.
+///
+/// Held in memory rather than written to the settings row. The system's table
+/// is the truth about what is disabled and it is read live; a second copy on
+/// disk could only ever go stale, and acting on a stale one would mean handing
+/// back a shortcut the user had since turned off themselves.
+#[derive(Clone, Debug, Default)]
+pub struct ReleasedSystemHotkeys {
+    ids: Arc<std::sync::Mutex<Vec<i64>>>,
+}
+
+impl ReleasedSystemHotkeys {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self) -> Vec<i64> {
+        self.ids.lock().map(|ids| ids.clone()).unwrap_or_default()
+    }
+
+    pub fn remember(&self, ids: &[i64]) {
+        if let Ok(mut held) = self.ids.lock() {
+            held.extend_from_slice(ids);
+            held.sort_unstable();
+            held.dedup();
+        }
+    }
+
+    pub fn forget(&self) {
+        if let Ok(mut held) = self.ids.lock() {
+            held.clear();
+        }
     }
 }
 

@@ -1194,6 +1194,51 @@
   border-radius: 7px;
 }
 
+/* A shortcut that binds cleanly and then never fires looks like a broken
+   application, so the explanation and the fix sit right under the field that
+   caused the question rather than in a help paragraph below it. */
+.settings-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--paper-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+}
+
+.settings-notice p {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-notice-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-notice-actions button {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 12px;
+  cursor: pointer;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-notice-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .settings-field {
   display: flex;
   flex-direction: column;

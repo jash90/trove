@@ -74,7 +74,7 @@ const completedProgress: ImportProgressContract = {
 
 const settings: AppSettings = {
   schemaVersion: 1,
-  hotkey: 'CommandOrControl+Shift+V',
+  hotkey: 'CommandOrControl+Space',
   autostart: false,
   retentionDays: 30,
   denylistedApps: [],

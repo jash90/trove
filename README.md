@@ -77,11 +77,33 @@ directory.
 
 ## Global shortcut
 
-`⌘⇧Space` (`Ctrl+Shift+Space` elsewhere) summons the palette and focuses it;
-pressing it again hides it. Closing the window also only hides it — the
-application exits solely through "Quit" in the menu bar item, because a
-clipboard manager that stops running when its window closes quietly loses
-history.
+`⌘Space` (`Ctrl+Space` elsewhere) summons the palette and focuses it; pressing
+it again hides it. Closing the window also only hides it — the application
+exits solely through "Quit" in the menu bar item, because a clipboard manager
+that stops running when its window closes quietly loses history.
+
+There is no Dock icon and no `⌘Tab` entry. The menu bar is where this
+application exists on screen: the window spends most of its life hidden and is
+summoned over whatever you are working in, so a Dock tile would advertise a
+window that is not there.
+
+### Spotlight holds ⌘Space
+
+macOS dispatches `⌘Space` to Spotlight before any application sees it, so the
+shortcut registers cleanly and then never fires. There is no way to intercept a
+chord the system has claimed — the only route is to free it, which is what the
+Shortcut tab in settings offers: one button that turns Spotlight's shortcut off
+and one that gives it back. Nothing is changed without being asked.
+
+Two answers there are worth reading rather than skimming. "It takes effect
+after you log out and back in" means the preference was written but the running
+session did not pick it up; the shortcut works after the next login. A refusal
+means nothing was written, and the same pane offers the manual route — System
+Settings → Keyboard → Keyboard Shortcuts.
+
+Some conflicts are invisible from here. Another launcher holding `⌘Space` is
+not recorded in any table this application can read, so if the chord is free and
+the palette still does not appear, something else is holding it.
 
 The palette floats above other windows. It is summoned over whatever you are
 working in and its whole purpose is to put something back there, so opening
@@ -96,8 +118,10 @@ with pausing capture, settings and quitting. The "Pause capture" entry doubles
 as the indicator: if that is what it says, the application is recording.
 
 If the shortcut is already taken by another application, registration fails and
-the palette still works from its own window. Changing the shortcut in settings
-is saved, but takes effect after a restart.
+the settings screen says so rather than presenting a shortcut that does
+nothing; the palette still opens from the menu bar. Changing the shortcut in
+settings takes effect at once, and the new one is what the next launch
+registers.
 
 ## Launching applications
 

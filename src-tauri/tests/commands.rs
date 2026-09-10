@@ -92,7 +92,7 @@ fn a_saved_shortcut_is_parsed_back_into_the_one_that_will_be_registered() {
     // The settings screen stores the shortcut as text; registering it means
     // parsing that text back. A round trip that silently failed would leave
     // the screen showing one shortcut while another answered.
-    let parsed = hotkey::parse_shortcut("CommandOrControl+Shift+Space")
+    let parsed = hotkey::parse_shortcut(hotkey::DEFAULT_HOTKEY)
         .expect("the default must survive the round trip");
     assert_eq!(parsed, hotkey::default_shortcut());
 
@@ -116,15 +116,50 @@ fn the_active_shortcut_remembers_what_to_take_down_on_a_rebind() {
 }
 
 #[test]
-fn the_summoning_shortcut_is_command_shift_space() {
+fn the_summoning_shortcut_is_command_space() {
     use tauri_plugin_global_shortcut::{Code, Modifiers};
 
     let shortcut = trove_app::hotkey::default_shortcut();
 
-    // Space is what a launcher-style palette answers to; the added Shift keeps
-    // it clear of the input-source switcher and of Spotlight.
+    // Cmd+Space, the chord a launcher-style palette is reached for by reflex.
+    // An earlier version added Shift to step around Spotlight holding it;
+    // stepping around it was the thing to stop doing, and freeing the chord is
+    // now part of setting the application up.
     assert_eq!(shortcut.key, Code::Space);
-    assert_eq!(shortcut.mods, Modifiers::SUPER | Modifiers::SHIFT);
+    assert_eq!(shortcut.mods, Modifiers::SUPER);
+}
+
+#[test]
+fn a_relaunch_registers_the_shortcut_that_was_saved() {
+    use trove_app::hotkey;
+
+    // Startup used to register a hardcoded default and never read the settings
+    // row, so a shortcut changed in settings answered until the application was
+    // closed and then reverted while the screen went on showing it.
+    let saved = hotkey::parse_shortcut("Control+Alt+7").unwrap();
+    assert_eq!(hotkey::shortcut_for_launch(Some("Control+Alt+7")), saved);
+
+    // Nothing saved, or something unreadable saved, falls back rather than
+    // leaving the palette with no way in: the screen that fixes the value is
+    // reached through the palette.
+    assert_eq!(
+        hotkey::shortcut_for_launch(None),
+        hotkey::default_shortcut()
+    );
+    assert_eq!(
+        hotkey::shortcut_for_launch(Some("not-a-shortcut")),
+        hotkey::default_shortcut()
+    );
+}
+
+#[test]
+fn the_two_defaults_that_used_to_disagree_are_now_one() {
+    use trove_app::hotkey;
+
+    // The settings row offered Cmd+Shift+V while Cmd+Shift+Space was what
+    // answered, because each side carried its own copy. There is one now, and
+    // it has to be registrable.
+    assert!(hotkey::parse_shortcut(hotkey::DEFAULT_HOTKEY).is_some());
 }
 
 #[tokio::test]
@@ -338,7 +373,10 @@ async fn settings_use_valid_defaults_and_persist_one_versioned_json_object() {
 
     let defaults = commands::get_settings_service(&state).await.unwrap();
     assert_eq!(defaults.schema_version, 1);
-    assert_eq!(defaults.hotkey, "CommandOrControl+Shift+V");
+    assert_eq!(defaults.hotkey, trove_app::hotkey::DEFAULT_HOTKEY);
+    // The assertion that would have caught the two copies disagreeing: a
+    // default nobody can register is worse than no default.
+    assert!(trove_app::hotkey::parse_shortcut(&defaults.hotkey).is_some());
     assert!(!defaults.autostart);
     assert_eq!(defaults.retention_days, None);
     assert!(defaults.denylisted_apps.is_empty());
@@ -590,6 +628,10 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "get_app_icon",
             "open_settings_window",
             "open_accessibility_settings_window",
+            "open_keyboard_settings_window",
+            "get_shortcut_status",
+            "free_summoning_shortcut",
+            "restore_system_shortcut",
             "export_history",
             "get_link_preview",
             "keyvault_list",
@@ -2129,6 +2171,66 @@ async fn clearing_overrides_that_are_not_there_writes_nothing() {
         .await
         .unwrap();
     assert_eq!(state.store.get_setting("app").unwrap(), before);
+}
+
+#[tokio::test]
+async fn an_unregistrable_shortcut_is_refused_on_save_and_never_locks_the_screen_out() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+
+    // A shortcut that cannot be parsed can never be registered, so saving it
+    // would leave the user pressing keys that do nothing.
+    let unregistrable = AppSettingsDto {
+        hotkey: "Meta+".to_owned(),
+        ..AppSettingsDto::default()
+    };
+    assert_eq!(
+        commands::save_settings_service(&state, unregistrable)
+            .await
+            .unwrap_err(),
+        "invalid_settings"
+    );
+
+    // The same check on the read path would be a bricked install: one row an
+    // older version wrote would make `get_settings` fail, and the screen that
+    // contains the fix is the one that stops opening. So a row like that still
+    // reads back.
+    let stored = serde_json::json!({
+        "schemaVersion": 1,
+        "hotkey": "Meta+",
+        "autostart": false,
+        "retentionDays": null,
+        "denylistedApps": [],
+        "linkPreviews": true,
+    });
+    state
+        .store
+        .save_setting("app", &stored.to_string())
+        .await
+        .unwrap();
+    let read_back = commands::get_settings_service(&state).await.unwrap();
+    assert_eq!(read_back.hotkey, "Meta+");
+}
+
+/// Trove lives on the menu bar, so it has no Dock tile and no Cmd-Tab entry.
+///
+/// Asserted against the file rather than against the running application for
+/// the same reason the window levels below are: this is where the decision is
+/// made, and it is made before any of this application's own code runs.
+#[test]
+fn the_application_never_appears_in_the_dock() {
+    let info: plist::Value =
+        plist::from_bytes(include_bytes!("../Info.plist")).expect("Info.plist must parse");
+    let ui_element = info
+        .as_dictionary()
+        .and_then(|info| info.get("LSUIElement"))
+        .and_then(plist::Value::as_boolean);
+
+    assert_eq!(
+        ui_element,
+        Some(true),
+        "a Dock icon advertises a window that spends its life hidden"
+    );
 }
 
 /// Each window is opened over something it must not disappear behind: the

@@ -3239,6 +3239,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-graphics",
  "objc2-foundation",
+ "plist",
  "tempfile",
  "trove-core",
 ]
@@ -5179,6 +5180,7 @@ dependencies = [
  "base64 0.23.1",
  "image",
  "platform-macos",
+ "plist",
  "rsa",
  "rusqlite",
  "serde",
