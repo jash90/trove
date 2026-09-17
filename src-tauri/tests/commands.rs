@@ -671,6 +671,15 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "keyvault_pair_cancel",
             "keyvault_identity",
             "keyvault_reset_pairing",
+            "chat_send",
+            "chat_stop",
+            "chat_list_models",
+            "save_generated_file",
+            "open_external_url",
+            "copy_chat_text",
+            "get_chat_settings",
+            "save_chat_settings",
+            "open_chat_window",
         ]
     );
 
@@ -716,6 +725,57 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
     )
     .unwrap_err();
     assert_eq!(error, json!("history_event_not_found"));
+}
+
+#[tokio::test]
+async fn chat_settings_round_trip_and_default_for_rows_without_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+
+    // Nothing stored: the defaults answer, so the window opens configured.
+    let defaults = trove_app::chat::get_chat_settings_service(&state)
+        .await
+        .unwrap();
+    assert_eq!(defaults.provider, "zai");
+    assert_eq!(defaults.keys.anthropic, "");
+
+    let saved = trove_app::chat::save_chat_settings_service(
+        &state,
+        trove_app::chat::ChatSettingsDto {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-4-5".to_owned(),
+            keys: trove_app::chat::ChatProviderKeysDto {
+                anthropic: "sk-ant-synthetic".to_owned(),
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved.model, "claude-sonnet-4-5");
+    assert_eq!(saved.keys.anthropic, "sk-ant-synthetic");
+
+    // A malformed row is refused rather than silently defaulted: a row that
+    // exists and cannot be read is a fact, not an absence.
+    state
+        .store
+        .save_setting("chat", "{\"nonsense\"")
+        .await
+        .unwrap();
+    assert!(
+        trove_app::chat::get_chat_settings_service(&state)
+            .await
+            .is_err()
+    );
+
+    drop(state);
+    let reopened = AppState::open_data_dir(directory.path()).unwrap();
+    // The malformed row survives on disk; reopening sees it too.
+    assert!(
+        trove_app::chat::get_chat_settings_service(&reopened)
+            .await
+            .is_err()
+    );
 }
 
 #[cfg(unix)]

@@ -13,6 +13,7 @@ import { ActionBar } from './components/ActionBar';
 import { ImportWizard } from './components/ImportWizard';
 import {
   PALETTE_CATEGORIES,
+  PALETTE_CHAT_CATEGORY,
   PaletteHeader,
   type PaletteMode,
   type PaletteView,
@@ -342,15 +343,21 @@ const ClipboardPalette = (): React.JSX.Element => {
   };
   const handleSearchKeyDown: KeyboardEventHandler<HTMLInputElement> = (event) => {
     // The digits pick a category straight from home, in tile order —
-    // the keys the tiles themselves display.
+    // the keys the tiles themselves display. The fourth opens the chat
+    // window, a destination beside the palette rather than a view of it.
     if (
       paletteModes &&
       mode === 'home' &&
-      ['1', '2', '3'].includes(event.key) &&
+      ['1', '2', '3', '4'].includes(event.key) &&
       !event.metaKey &&
       !event.ctrlKey &&
       !event.altKey
     ) {
+      if (event.key === PALETTE_CHAT_CATEGORY.key) {
+        event.preventDefault();
+        void gateway.openChatWindow?.().catch(() => undefined);
+        return;
+      }
       const category = PALETTE_CATEGORIES.find((entry) => entry.key === event.key);
       if (category) {
         event.preventDefault();
@@ -437,14 +444,26 @@ const ClipboardPalette = (): React.JSX.Element => {
       openSettings();
       return;
     }
+    // The chat window is one chord away, like the importer and settings:
+    // a conversation is its own window, not a mode of this one.
+    if (primaryModifier && !event.shiftKey && key === 'k') {
+      event.preventDefault();
+      void gateway.openChatWindow?.().catch(() => undefined);
+      return;
+    }
     // Direct category picks, in tile order: ⌘1 applications, ⌘2 history,
     // ⌘3 vault.
     if (
       paletteModes &&
       primaryModifier &&
       !event.shiftKey &&
-      ['1', '2', '3'].includes(key)
+      ['1', '2', '3', '4'].includes(key)
     ) {
+      if (key === PALETTE_CHAT_CATEGORY.key) {
+        event.preventDefault();
+        void gateway.openChatWindow?.().catch(() => undefined);
+        return;
+      }
       const category = PALETTE_CATEGORIES.find((entry) => entry.key === key);
       if (category) {
         event.preventDefault();
@@ -517,12 +536,12 @@ const ClipboardPalette = (): React.JSX.Element => {
           refreshing={refreshing}
           searchInputRef={searchInputRef}
           onQueryChange={handleQueryChange}
-          onModeChange={setMode}
           onKeyDown={handleSearchKeyDown}
         />
         <PaletteWorkspace
           mode={view}
           onPickCategory={setMode}
+          onOpenChat={() => void gateway.openChatWindow?.().catch(() => undefined)}
           appsStatus={catalog.status}
           status={status}
           items={paletteItems}
@@ -569,6 +588,14 @@ const ClipboardPalette = (): React.JSX.Element => {
               onClick={() => setWorkspace('import')}
             >
               Import <kbd>⌘I</kbd>
+            </button>
+            <button
+              type="button"
+              className="footer-action"
+              aria-label="Open the chat window"
+              onClick={() => void gateway.openChatWindow?.().catch(() => undefined)}
+            >
+              Chat <kbd>⌘K</kbd>
             </button>
             <button
               type="button"

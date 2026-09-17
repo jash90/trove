@@ -11,6 +11,10 @@ import {
   validateStorageStats,
   type AppEntry,
   type AppSettings,
+  type ChatMessage,
+  type ChatSettings,
+  type ChatStreamEvent,
+  type ChatTurn,
   type CopyResult,
   type ExportSummary,
   type HistoryPage,
@@ -78,6 +82,34 @@ export interface ClipboardGateway {
    * account and this application holds a token. The next pairing offers to retire it.
    */
   keyvaultResetPairing(): Promise<void>;
+  /**
+   * The chat window's commands. Optional the way the shortcut extras are:
+   * a gateway without them — a test harness, or a palette that never
+   * chats — is still a complete gateway, and the chat window is the one
+   * place that requires them.
+   */
+  chatSend?(messages: ChatMessage[]): Promise<ChatTurn>;
+  chatStop?(id: string): Promise<boolean>;
+  /** The models the active provider offers, fetched live from its list. */
+  chatListModels?(): Promise<string[]>;
+  /**
+   * Saves one file the chat produced. The native save dialog asks where;
+   * resolves false when the user cancelled.
+   */
+  saveGeneratedFile?(defaultName: string, contents: string): Promise<boolean>;
+  /** Copies a code block, through the core like every other copy. */
+  copyChatText?(text: string): Promise<void>;
+  /** Opens one http(s) link from an answer, in the user's browser. */
+  openExternalUrl?(url: string): Promise<void>;
+  getChatSettings?(): Promise<ChatSettings>;
+  saveChatSettings?(settings: ChatSettings): Promise<ChatSettings>;
+  /** Opens the chat window, its own window beside the palette. */
+  openChatWindow?(): Promise<void>;
+  /**
+   * Calls back for every chat stream event: tokens as they arrive, the
+   * settle when the turn ends — by answer, refusal or stop.
+   */
+  onChatEvent?(listener: (event: ChatStreamEvent) => void): () => void;
   /**
    * Calls back whenever the core records something new. Returns a function
    * that stops listening; without it the palette would show a history that is
@@ -225,6 +257,47 @@ export const tauriGateway: ClipboardGateway = {
     invoke<StorageStats>('get_storage_stats').then(validateStorageStats),
   listApps: () => invoke<AppEntry[]>('list_apps').then(validateAppCatalog),
   onAppsChanged: (listener) => subscribe('apps-catalog-changed', listener),
+  chatSend: (messages) => invoke<ChatTurn>('chat_send', { messages }),
+  chatStop: (id) => invoke<boolean>('chat_stop', { id }),
+  chatListModels: () => invoke<string[]>('chat_list_models'),
+  saveGeneratedFile: async (defaultName, contents) => {
+    const target = await save({
+      title: 'Save the file the chat produced',
+      defaultPath: defaultName,
+    });
+    if (target === null) return false;
+    await invoke<void>('save_generated_file', { path: target, contents });
+    return true;
+  },
+  copyChatText: (text) => invoke<void>('copy_chat_text', { text }),
+  openExternalUrl: (url) => invoke<void>('open_external_url', { url }),
+  getChatSettings: () => invoke<ChatSettings>('get_chat_settings'),
+  saveChatSettings: (settings) =>
+    invoke<ChatSettings>('save_chat_settings', { settings }),
+  openChatWindow: () => invoke<void>('open_chat_window'),
+  onChatEvent: (listener) => {
+    const stopDelta = subscribe<{ id: string; part: string; text: string }>(
+      'chat-delta',
+      (payload) =>
+        listener({
+          kind: 'delta',
+          id: payload.id,
+          part: payload.part === 'reasoning' ? 'reasoning' : 'answer',
+          text: payload.text,
+        }),
+    );
+    const stopDone = subscribe<{ id: string }>('chat-done', (payload) =>
+      listener({ kind: 'done', id: payload.id }),
+    );
+    const stopError = subscribe<{ id: string; code?: string }>('chat-error', (payload) =>
+      listener({ kind: 'error', id: payload.id, code: payload.code ?? 'chat_failed' }),
+    );
+    return () => {
+      stopDelta();
+      stopDone();
+      stopError();
+    };
+  },
   launchApp: (path) => invoke<void>('launch_app', { path }),
   getAppIcon: (path) => invoke<Thumbnail | null>('get_app_icon', { path }),
   openAccessibilitySettings: () => invoke<void>('open_accessibility_settings_window'),

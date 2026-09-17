@@ -17,43 +17,67 @@ const SMALLEST_ICON_PX: usize = 16;
 /// would draw.
 ///
 /// An icon is not a bitmap. `iconForFile:` hands back an image whose every
-/// representation is an `NSISIconImageRep`: a resolution-independent stand-in
-/// that draws itself on demand and holds no pixels to pick from. So the size
-/// is *asked for* rather than chosen — AppKit is given the rectangle the row
-/// wants and rasterises into it. The bitmap that comes back is wrapped once,
-/// with no decode and no resample in between, and encoded as PNG on the Apple
-/// side: Apple's icons are the one picture no third-party decoder should be
-/// handed in its original form.
+/// representation is resolution-independent — it draws itself on demand
+/// and holds no pixels to pick from. So it is *drawn*, into a bitmap of
+/// exactly the side the row asked for: the context is created around that
+/// bitmap, and the image is asked to fill its rectangle. Drawing (rather
+/// than asking a rectangle for a CGImage, which consults the main
+/// screen's backing scale when no context is given — and doubles the
+/// pixels on a Retina session) keeps the size a contract of this
+/// function, not a fact about whoever's display is frontmost. The encode
+/// below writes Apple's pixels unchanged: Apple's icons are the one
+/// picture no third-party decoder should be handed in its original form.
 #[cfg(target_os = "macos")]
 pub fn application_icon_png(path: &str, target_px: usize) -> Option<Vec<u8>> {
     use objc2::AnyThread;
-    use objc2_app_kit::NSWorkspace;
+    use objc2_app_kit::{NSBitmapImageRep, NSCompositingOperation, NSGraphicsContext, NSWorkspace};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+
+    let side = target_px.max(SMALLEST_ICON_PX);
 
     let workspace = NSWorkspace::sharedWorkspace();
     let file = NSString::from_str(path);
     let image = workspace.iconForFile(&file);
 
-    // The rectangle is in points and the reference context is absent, so
-    // there is no backing scale factor to multiply it by: one point is one
-    // pixel, and the bitmap arrives at exactly this side. The floor is
-    // sixteen because AppKit's own is: an icon carries nothing smaller, and
-    // a rectangle below it comes back at sixteen anyway. Saying so here
-    // keeps the promise this function makes true.
-    let side = target_px.max(SMALLEST_ICON_PX) as f64;
-    let mut proposed = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(side, side));
-
-    // SAFETY: `proposed` is a live local for the whole call, so the pointer
-    // AppKit writes the rectangle it settled on back through stays valid; the
-    // hints dictionary is absent, so it carries no element type to get wrong.
-    let drawn =
-        unsafe { image.CGImageForProposedRect_context_hints(&raw mut proposed, None, None) }?;
-
-    // `initWithCGImage:` adopts the pixels it is handed rather than copying
-    // or resampling them, so the representation's `pixelsWide`/`pixelsHigh`
-    // are the ones just rendered and the encode below writes them unchanged.
-    let bitmap = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &drawn);
-    encode_png(&bitmap)
+    unsafe {
+        // A bitmap of exactly `side × side`, allocated here: the rectangle
+        // the icon is drawn into and the pixels that come back are the same
+        // thing, whatever the display in front happens to weigh.
+        let bitmap =
+            NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(),
+                std::ptr::null_mut(),
+                side as isize,
+                side as isize,
+                8,
+                4,
+                true,
+                false,
+                objc2_app_kit::NSDeviceRGBColorSpace,
+                0,
+                0,
+            )?;
+        let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&bitmap)?;
+        NSGraphicsContext::saveGraphicsState_class();
+        NSGraphicsContext::setCurrentContext(Some(&context));
+        let rect = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(side as f64, side as f64),
+        );
+        // The whole image (a zero source rectangle means all of it), copied
+        // into the whole bitmap, respecting the context's flipped origin so
+        // the icon does not arrive upside down.
+        image.drawInRect_fromRect_operation_fraction_respectFlipped_hints(
+            rect,
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+            NSCompositingOperation::Copy,
+            1.0,
+            true,
+            None,
+        );
+        NSGraphicsContext::restoreGraphicsState_class();
+        encode_png(&bitmap)
+    }
 }
 
 /// Asks a bitmap representation for its PNG bytes.

@@ -24,6 +24,12 @@ const PALETTE_WINDOW: &str = "main";
 /// position between openings.
 const SETTINGS_WINDOW: &str = "settings";
 
+/// The label of the chat window. The same shape as settings: declared in
+/// the configuration, started hidden, shown rather than rebuilt — and its
+/// conversation stays in memory between openings, because hiding the
+/// window keeps the document alive.
+const CHAT_WINDOW: &str = "chat";
+
 /// Brings the settings window up, wherever it was last left.
 ///
 /// Separate from the palette on purpose: settings are read and edited slowly,
@@ -36,6 +42,34 @@ pub fn show_settings<R: Runtime>(app: &AppHandle<R>) {
     let _ = window.show();
     let _ = window.unminimize();
     let _ = window.set_focus();
+    // The palette stays open — it only stops floating: the window just
+    // opened is focused and renders above it.
+    put_palette_below(app);
+}
+
+/// Brings the chat window up, wherever it was last left.
+pub fn show_chat<R: Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window(CHAT_WINDOW) else {
+        return;
+    };
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    put_palette_below(app);
+}
+
+/// Puts the palette at the bottom of this application's windows.
+///
+/// The palette floats above everything — that is its job as a summon
+/// overlay. But the windows it opens (chat, settings) are working windows,
+/// and a palette still floating over them covers the thing the user asked
+/// for. So it stops floating: it sinks to the ordinary level, stays open
+/// and visible, and the focused destination renders above it. Summoning
+/// the palette re-floats it — an overlay asked for is an overlay again.
+fn put_palette_below<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(palette) = app.get_webview_window(PALETTE_WINDOW) {
+        let _ = palette.set_always_on_top(false);
+    }
 }
 
 /// The window the user was working in before the palette appeared.
@@ -305,6 +339,9 @@ pub fn show_palette<R: Runtime>(app: &AppHandle<R>) {
     if let Some(target) = app.try_state::<PasteTarget>() {
         target.remember(current_frontmost_pid());
     }
+    // Summoning is asking for the overlay: it floats again, over whatever
+    // it was sunk beneath when a working window opened.
+    let _ = window.set_always_on_top(true);
     let _ = window.show();
     let _ = window.set_focus();
 }
@@ -354,7 +391,7 @@ pub fn hide_instead_of_closing<R: Runtime>(
 /// An unknown label is not covered on purpose. A window added later should decide this for itself
 /// rather than inherit it by being adjacent.
 fn should_hide_instead_of_closing(label: &str) -> bool {
-    matches!(label, PALETTE_WINDOW | SETTINGS_WINDOW)
+    matches!(label, PALETTE_WINDOW | SETTINGS_WINDOW | CHAT_WINDOW)
 }
 
 #[cfg(test)]
@@ -368,6 +405,7 @@ mod tests {
         // the settings simply stopped opening.
         assert!(should_hide_instead_of_closing(PALETTE_WINDOW));
         assert!(should_hide_instead_of_closing(SETTINGS_WINDOW));
+        assert!(should_hide_instead_of_closing(CHAT_WINDOW));
 
         // Not a blanket rule: a window added later should say so itself.
         assert!(!should_hide_instead_of_closing("some-future-window"));

@@ -15,6 +15,8 @@ interface PaletteWorkspaceProps {
   mode: PaletteView;
   /** Entering one of the categories from the home tiles. */
   onPickCategory: (mode: import('./PaletteHeader').PaletteMode) => void;
+  /** The chat tile opens a window of its own. */
+  onOpenChat: () => void;
   appsStatus: 'loading' | 'ready' | 'error';
   status: 'loading' | 'ready' | 'error';
   /** The single result list: applications and history, already ordered. */
@@ -48,6 +50,7 @@ interface PaletteWorkspaceProps {
 export const PaletteWorkspace = ({
   mode,
   onPickCategory,
+  onOpenChat,
   appsStatus,
   status,
   items,
@@ -89,7 +92,7 @@ export const PaletteWorkspace = ({
       ) : null}
       <div className="history-panel">
         {mode === 'home' ? (
-          <CategoryTiles onPick={onPickCategory} />
+          <CategoryTiles onPick={onPickCategory} onOpenChat={onOpenChat} />
         ) : null}
         {/* The states speak only when there is nothing to show, and about
             the side the view is showing: with modes on, the history's

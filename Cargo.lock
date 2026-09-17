@@ -5181,6 +5181,7 @@ dependencies = [
  "image",
  "platform-macos",
  "plist",
+ "reqwest",
  "rsa",
  "rusqlite",
  "serde",

@@ -1,4 +1,4 @@
-import { AppWindowMac, ClipboardList, Search, Vault } from 'lucide-react';
+import { Search } from 'lucide-react';
 import type { ChangeEventHandler, KeyboardEventHandler, Ref } from 'react';
 
 import { formatCount } from '../lib/format';
@@ -26,6 +26,10 @@ export const PALETTE_CATEGORIES: readonly {
   { mode: 'vault', key: '3', label: 'Key vault' },
 ];
 
+/** The chat tile: not a palette view but a window of its own, opened from
+ * the chooser like the rest and living beside it. */
+export const PALETTE_CHAT_CATEGORY = { key: '4', label: 'Chat' } as const;
+
 interface PaletteHeaderProps {
   query: string;
   mode: PaletteView;
@@ -38,7 +42,6 @@ interface PaletteHeaderProps {
   refreshing: boolean;
   searchInputRef?: Ref<HTMLInputElement>;
   onQueryChange: (query: string) => void;
-  onModeChange: (mode: PaletteMode) => void;
   onKeyDown: KeyboardEventHandler<HTMLInputElement>;
 }
 
@@ -51,9 +54,9 @@ interface PaletteHeaderProps {
 ///
 /// The field drives whichever category it names — history over the bridge,
 /// applications on the client, the vault's metadata once asked — and on
-/// `home` typing means history, the palette's own core. The category
-/// control beside it names all three: Tab and ⌘1/⌘2/⌘3 reach them from
-/// the field, and a click works too.
+/// `home` typing means history, the palette's own core. The categories are
+/// the home tiles and their keys (1/2/3/4, Tab, ⌘1–⌘4); nothing else
+/// competes with the field for the top of the palette.
 export const PaletteHeader = ({
   query,
   mode,
@@ -63,7 +66,6 @@ export const PaletteHeader = ({
   refreshing,
   searchInputRef,
   onQueryChange,
-  onModeChange,
   onKeyDown,
 }: PaletteHeaderProps): React.JSX.Element => {
   const handleChange: ChangeEventHandler<HTMLInputElement> = (event) => {
@@ -119,40 +121,6 @@ export const PaletteHeader = ({
           {resultsTruncated ? '+' : ''}
         </span>
       </label>
-      {combined ? null : (
-      <div className="palette-mode" role="group" aria-label="Palette categories">
-        <button
-          type="button"
-          className="palette-mode__option"
-          aria-pressed={mode === 'history'}
-          title="Clipboard history (2)"
-          onClick={() => onModeChange('history')}
-        >
-          <ClipboardList size={14} strokeWidth={1.8} aria-hidden="true" />
-          History
-        </button>
-        <button
-          type="button"
-          className="palette-mode__option"
-          aria-pressed={mode === 'apps'}
-          title="Applications (1)"
-          onClick={() => onModeChange('apps')}
-        >
-          <AppWindowMac size={14} strokeWidth={1.8} aria-hidden="true" />
-          Apps
-        </button>
-        <button
-          type="button"
-          className="palette-mode__option"
-          aria-pressed={mode === 'vault'}
-          title="Key vault (3)"
-          onClick={() => onModeChange('vault')}
-        >
-          <Vault size={14} strokeWidth={1.8} aria-hidden="true" />
-          Vault
-        </button>
-      </div>
-      )}
       {mode === 'history' || mode === 'all' ? (
         <TypeFilter query={query} onQueryChange={onQueryChange} />
       ) : null}

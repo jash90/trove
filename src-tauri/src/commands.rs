@@ -61,6 +61,15 @@ macro_rules! trove_command_registry {
             keyvault_pair_cancel => $crate::commands::keyvault_pair_cancel,
             keyvault_identity => $crate::commands::keyvault_identity,
             keyvault_reset_pairing => $crate::commands::keyvault_reset_pairing,
+            chat_send => $crate::commands::chat_send,
+            chat_stop => $crate::commands::chat_stop,
+            chat_list_models => $crate::commands::chat_list_models,
+            save_generated_file => $crate::commands::save_generated_file,
+            open_external_url => $crate::commands::open_external_url,
+            copy_chat_text => $crate::commands::copy_chat_text,
+            get_chat_settings => $crate::commands::get_chat_settings,
+            save_chat_settings => $crate::commands::save_chat_settings,
+            open_chat_window => $crate::commands::open_chat_window,
         }
     };
 }
@@ -1099,6 +1108,76 @@ fn prepare_copy_payload_blocking(
     Ok(CopyPayload::Text(text))
 }
 
+/// One exchange with the model: answers with the turn id, the answer
+/// itself streams as `chat-delta` events and settles with `chat-done` or
+/// `chat-error`.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn chat_send<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    messages: Vec<crate::chat::ChatMessageDto>,
+) -> Result<crate::chat::ChatTurnDto, String> {
+    crate::chat::chat_send_service(app, state.inner(), messages).await
+}
+
+/// Stops the turn in flight; its stream then settles as done.
+#[tauri::command(rename_all = "camelCase")]
+pub fn chat_stop(id: String) -> Result<bool, String> {
+    crate::chat::chat_stop_service(&id)
+}
+
+/// The models the active provider offers, fetched live from its list
+/// endpoint — the picker in the window fills from this.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn chat_list_models(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    crate::chat::chat_list_models_service(state.inner()).await
+}
+
+/// Writes one file the chat produced, to the path the save dialog chose.
+#[tauri::command(rename_all = "camelCase")]
+pub fn save_generated_file(path: String, contents: String) -> Result<(), String> {
+    crate::chat::save_generated_file_blocking(&path, &contents)
+}
+
+/// Opens one http(s) link from a markdown answer in the user's browser.
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    crate::chat::open_external_url(&url)
+}
+
+/// Puts a copied code block on the clipboard — the same plugin write the
+/// history's copy path uses, bounded the same way.
+#[tauri::command(rename_all = "camelCase")]
+pub fn copy_chat_text<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    text: String,
+) -> Result<(), String> {
+    if text.len() > 8 * 1024 * 1024 {
+        return Err("chat_copy_too_large".to_owned());
+    }
+    match app.try_state::<tauri_plugin_clipboard_manager::Clipboard<R>>() {
+        Some(clipboard) => clipboard
+            .write_text(&text)
+            .map_err(|_| "clipboard_unavailable".to_owned()),
+        None => Err("clipboard_unavailable".to_owned()),
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_chat_settings(
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::chat::ChatSettingsDto, String> {
+    crate::chat::get_chat_settings_service(state.inner()).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn save_chat_settings(
+    state: tauri::State<'_, AppState>,
+    settings: crate::chat::ChatSettingsDto,
+) -> Result<crate::chat::ChatSettingsDto, String> {
+    crate::chat::save_chat_settings_service(state.inner(), settings).await
+}
+
 pub async fn analyze_import_service(
     state: &AppState,
     path: PathBuf,
@@ -1159,6 +1238,13 @@ pub async fn get_import_status_service(
 #[tauri::command(rename_all = "camelCase")]
 pub fn open_settings_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     crate::hotkey::show_settings(&app);
+}
+
+/// Brings the chat window up. Its own window for the same reason settings
+/// have one: a conversation is read and typed slowly, on top of nothing.
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_chat_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    crate::hotkey::show_chat(&app);
 }
 
 pub async fn export_history_service(
