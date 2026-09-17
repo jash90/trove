@@ -1,7 +1,7 @@
 import { AppWindowMac, ClipboardX, LoaderCircle, TriangleAlert } from 'lucide-react';
 
 type EmptyStateKind = 'loading' | 'empty' | 'error';
-type EmptyStateSubject = 'history' | 'applications';
+type EmptyStateSubject = 'history' | 'applications' | 'vault';
 
 interface EmptyStateProps {
   kind: EmptyStateKind;
@@ -43,6 +43,20 @@ const STATE_COPY: Record<EmptyStateSubject, Record<EmptyStateKind, { title: stri
     error: {
       title: 'The applications could not be loaded',
       detail: 'Try again in a moment.',
+    },
+  },
+  vault: {
+    loading: {
+      title: 'Reading the vault…',
+      detail: 'Asking the paired vault for its keys.',
+    },
+    empty: {
+      title: 'No keys to show',
+      detail: 'A paired vault lists its keys here. Pair one in Settings.',
+    },
+    error: {
+      title: 'The vault could not be reached',
+      detail: 'Check the connection and try again.',
     },
   },
 };

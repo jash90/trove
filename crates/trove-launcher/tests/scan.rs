@@ -11,9 +11,19 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use trove_launcher::{
-    AppBundle, LaunchPathError, MAX_APP_NAME_BYTES, MAX_CATALOG_APPS, scan_applications,
-    validate_launch_path,
+    AppBundle, LaunchPathError, MAX_APP_NAME_BYTES, MAX_CATALOG_APPS, ScanRoot, default_scan_roots,
+    scan_applications, validate_launch_path,
 };
+
+/// The plain roots every existing fixture already uses: unannotated paths
+/// carry the strict policy, which is the behavior these tests have always
+/// asserted.
+fn plain_roots(paths: &[PathBuf]) -> Vec<ScanRoot> {
+    paths
+        .iter()
+        .map(|path| ScanRoot::system(path.clone()))
+        .collect()
+}
 
 /// Everything a synthetic bundle can vary. `None` fields are simply absent
 /// from `Contents/Info.plist`, which is a shape real bundles do ship — the
@@ -110,7 +120,7 @@ fn scan_finds_app_bundles_with_names_and_bundle_ids_from_info_plist() {
         },
     );
 
-    let catalog = scan_applications(&[root.path().to_path_buf()]);
+    let catalog = scan_applications(&plain_roots(&[root.path().to_path_buf()]));
 
     assert_eq!(catalog.len(), 1);
     let app = &catalog[0];
@@ -152,7 +162,7 @@ fn scan_reads_binary_plists_the_same_as_xml() {
         },
     );
 
-    let catalog = scan_applications(&[root.path().to_path_buf()]);
+    let catalog = scan_applications(&plain_roots(&[root.path().to_path_buf()]));
 
     assert_eq!(
         bundle_named(&catalog, "Xml Bundle").bundle_id.as_deref(),
@@ -202,7 +212,7 @@ fn scan_prefers_display_name_then_bundle_name_then_file_stem() {
         },
     );
 
-    let catalog = scan_applications(&[root.path().to_path_buf()]);
+    let catalog = scan_applications(&plain_roots(&[root.path().to_path_buf()]));
 
     assert!(catalog.iter().any(|app| app.name == "Display Wins"));
     assert!(catalog.iter().any(|app| app.name == "Bundle Name Wins"));
@@ -255,7 +265,7 @@ fn scan_recurses_into_utility_folders_but_not_into_bundles() {
         },
     );
 
-    let catalog = scan_applications(&[root.path().to_path_buf()]);
+    let catalog = scan_applications(&plain_roots(&[root.path().to_path_buf()]));
 
     let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
     assert!(names.contains(&"Nested"));
@@ -266,7 +276,7 @@ fn scan_recurses_into_utility_folders_but_not_into_bundles() {
 }
 
 #[test]
-fn scan_skips_ui_element_and_background_only_agents() {
+fn scan_skips_ui_element_and_background_only_agents_in_system_roots() {
     let root = TempDir::new().unwrap();
     make_app(
         root.path(),
@@ -295,10 +305,78 @@ fn scan_skips_ui_element_and_background_only_agents() {
         },
     );
 
-    let catalog = scan_applications(&[root.path().to_path_buf()]);
+    let catalog = scan_applications(&plain_roots(&[root.path().to_path_buf()]));
 
     let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
     assert_eq!(names, vec!["Visible"]);
+}
+
+#[test]
+fn scan_lists_menu_bar_agents_from_user_roots_and_daemons_from_nowhere() {
+    // The same `LSUIElement` bundle is an application where the person using
+    // the machine put it there, and machinery where the operating system
+    // did. Raycast and Docker are `LSUIElement`; so is AirPlayUIAgent.
+    let user = TempDir::new().unwrap();
+    let system = TempDir::new().unwrap();
+    for root in [user.path(), system.path()] {
+        make_app(
+            root,
+            &AppSpec {
+                dir_name: "Agent.app",
+                bundle_name: Some("Agent"),
+                ui_element: true,
+                ..AppSpec::default()
+            },
+        );
+    }
+    // A background-only daemon stays unlisted even in a user root: it has
+    // no face anywhere, so a row for it is a promise Enter cannot show.
+    make_app(
+        user.path(),
+        &AppSpec {
+            dir_name: "Daemon.app",
+            bundle_name: Some("Daemon"),
+            background_only: true,
+            ..AppSpec::default()
+        },
+    );
+    make_app(
+        user.path(),
+        &AppSpec {
+            dir_name: "Visible.app",
+            bundle_name: Some("Visible"),
+            ..AppSpec::default()
+        },
+    );
+
+    let catalog =
+        scan_applications(&[ScanRoot::user(user.path()), ScanRoot::system(system.path())]);
+
+    let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
+    assert_eq!(names, vec!["Agent", "Visible"]);
+}
+
+#[test]
+fn the_default_roots_list_agents_only_where_the_user_owns_them() {
+    let roots = default_scan_roots();
+
+    let user: Vec<&std::ffi::OsStr> = roots
+        .iter()
+        .filter(|root| root.list_menu_bar_agents)
+        .map(|root| root.path.as_os_str())
+        .collect();
+    assert!(user.contains(&std::ffi::OsStr::new("/Applications")));
+    assert!(user.contains(&std::ffi::OsStr::new("/Applications/Setapp")));
+    // Every strict root is system territory; every user root is not.
+    for root in &roots {
+        let under_system = root.path.starts_with("/System");
+        assert_eq!(
+            root.list_menu_bar_agents,
+            !under_system,
+            "the policy for {} does not match whose folder it is",
+            root.path.display()
+        );
+    }
 }
 
 #[test]
@@ -338,7 +416,7 @@ fn scan_skips_agents_whose_flags_ship_as_strings() {
         },
     );
 
-    let catalog = scan_applications(&[root.path().to_path_buf()]);
+    let catalog = scan_applications(&plain_roots(&[root.path().to_path_buf()]));
 
     let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
     assert_eq!(names, vec!["Plain False"]);
@@ -377,7 +455,7 @@ fn scan_falls_through_blank_names_to_the_next_candidate() {
         },
     );
 
-    let catalog = scan_applications(&[root.path().to_path_buf()]);
+    let catalog = scan_applications(&plain_roots(&[root.path().to_path_buf()]));
 
     let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
     assert!(names.contains(&"Real Bundle Name"));
@@ -412,7 +490,7 @@ fn scan_skips_bundles_with_an_oversized_info_plist() {
         },
     );
 
-    let catalog = scan_applications(&[root.path().to_path_buf()]);
+    let catalog = scan_applications(&plain_roots(&[root.path().to_path_buf()]));
 
     let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
     assert_eq!(names, vec!["Small"]);
@@ -446,7 +524,7 @@ fn scan_does_not_follow_directory_symlinks_or_loop_on_cycles() {
         },
     );
 
-    let catalog = scan_applications(&[root.path().to_path_buf()]);
+    let catalog = scan_applications(&plain_roots(&[root.path().to_path_buf()]));
 
     let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
     assert_eq!(names, vec!["Direct"]);
@@ -464,7 +542,7 @@ fn scan_survives_a_missing_info_plist_by_falling_back_to_the_file_stem() {
         },
     );
 
-    let catalog = scan_applications(&[root.path().to_path_buf()]);
+    let catalog = scan_applications(&plain_roots(&[root.path().to_path_buf()]));
 
     assert_eq!(catalog.len(), 1);
     assert_eq!(catalog[0].name, "No Plist");
@@ -476,7 +554,7 @@ fn scan_ignores_roots_that_do_not_exist() {
     let root = TempDir::new().unwrap();
     let missing = root.path().join("not-installed");
 
-    let catalog = scan_applications(&[missing]);
+    let catalog = scan_applications(&plain_roots(&[missing]));
 
     assert!(catalog.is_empty());
 }
@@ -501,7 +579,7 @@ fn scan_sorts_by_normalized_name_and_dedupes_canonical_paths() {
     )
     .unwrap();
 
-    let catalog = scan_applications(&[root.path().to_path_buf()]);
+    let catalog = scan_applications(&plain_roots(&[root.path().to_path_buf()]));
 
     let names: Vec<&str> = catalog.iter().map(|app| app.name.as_str()).collect();
     // `Łódź` folds with the `l` words, not after `z` — a user typing "lo"
@@ -527,7 +605,7 @@ fn scan_caps_the_catalog_at_a_bounded_number_of_apps() {
         );
     }
 
-    let catalog = scan_applications(&[root.path().to_path_buf()]);
+    let catalog = scan_applications(&plain_roots(&[root.path().to_path_buf()]));
 
     assert_eq!(catalog.len(), MAX_CATALOG_APPS);
 }

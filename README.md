@@ -125,16 +125,26 @@ registers.
 
 ## Launching applications
 
-The palette is a launcher from the moment it opens: applications and clipboard
-history answer one search field together. Applications occupy the top section
-— the whole catalog, alphabetically, each row with the application's own icon,
-its bundle identifier when it declares one, and the folder it lives in — and
-the history follows underneath. Typing narrows both: the applications filter
-on the client as you type, the history searches as it always did. `Enter`
-opens what is selected (an application starts and the palette hides; a
-history entry pastes), and `Escape` clears the query — nothing else, because
-with one field there is no mode to back out of and hiding the palette remains
-the global shortcut's job.
+The palette opens on its categories — Applications, Clipboard history and
+the Key vault as three tiles — and which list someone came for is a fact
+about them, not a decision the application makes. The tiles answer their
+digit (`1`, `2`, `3`), `Tab` walks the ring, `⌘1`/`⌘2`/`⌘3` pick from
+anywhere, and clicking works too; typing from the chooser means the
+history, the palette's own core. `Escape` backs out one step at a time —
+first the query, then the category, back to the chooser — and hiding the
+palette remains the global shortcut's job.
+
+In the applications category the field drives the whole catalog —
+alphabetically, each row with the application's own icon, its bundle
+identifier when it declares one, and the folder it lives in — filtering on
+the client as you type. The Key vault category lists the keys of the
+paired vault by name (never their values), and `Enter` copies one through
+the core; the ask crosses the network only because entering the category
+asked for it. A setting — "Open the palette on its categories", on by
+default — restores the single combined list where applications and history
+answer one field together. `Enter` opens what is selected (an application
+starts, a history entry pastes, a key lands on the clipboard) and the
+palette opens on the chooser again.
 
 The catalog is scanned lazily — never at startup — on the palette's first
 opening, and every later opening re-checks the disk: the list answers
@@ -146,9 +156,15 @@ that is already open. The scan covers `/Applications`,
 `/System/Applications`, `~/Applications`, `/System/Library/CoreServices`
 and `/Applications/Setapp` when present — two directory levels deep, so
 `/Applications/Utilities` is included. Bundles that mark themselves
-`LSUIElement` or `LSBackgroundOnly` (in either the boolean or the string
-form plists ship) are skipped: they are the faceless helpers, not
-applications anyone launches by name. Typing narrows the catalog on the
+`LSBackgroundOnly` (in either the boolean or the string form plists ship)
+are skipped everywhere: a daemon with no face at all is not an application
+anyone launches by name. Menu-bar agents — bundles marked `LSUIElement` —
+are listed from the folders the user owns (`/Applications`,
+`~/Applications`, Setapp), where an agent is an application someone chose
+to install (Raycast, Docker, a VPN living in the menu bar; Spotlight lists
+these too), and skipped under `/System`, where they are the operating
+system's own machinery and would flood the list with a hundred rows nobody
+launches by name. Typing narrows the catalog on the
 client as you type: a query matches the name's beginning, the beginning of
 any of its words (split on whatever separator the bundle shipped), its
 initials ("vsc" finds "Visual Studio Code"), the bundle directory's own

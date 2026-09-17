@@ -40,6 +40,10 @@ export const buildPaletteItems = (
     return [
       ...apps.map((app): PaletteItem => ({ kind: 'app', app })),
       ...history.map((item): PaletteItem => ({ kind: 'history', item })),
+      // Secrets reach this branch from the vault category, which browses
+      // them with no query at all; everywhere else they arrive filtered to
+      // nothing here, so the launcher view is unchanged.
+      ...secrets.map((secret): PaletteItem => ({ kind: 'vault', secret })),
     ];
   }
   const merged: PaletteItem[] = [];

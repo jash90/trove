@@ -33,6 +33,7 @@ const persistedSettings: AppSettings = {
   schemaVersion: 1,
   hotkey: 'CommandOrControl+Space',
   autostart: false,
+  paletteModes: true,
   retentionDays: 30,
   denylistedApps: ['com.acme.private'],
   linkPreviews: true,

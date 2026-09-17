@@ -1,5 +1,6 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -10,7 +11,12 @@ import {
 
 import { ActionBar } from './components/ActionBar';
 import { ImportWizard } from './components/ImportWizard';
-import { PaletteHeader } from './components/PaletteHeader';
+import {
+  PALETTE_CATEGORIES,
+  PaletteHeader,
+  type PaletteMode,
+  type PaletteView,
+} from './components/PaletteHeader';
 import { acceleratorFromKeyEvent } from './components/SettingsPanel';
 import { PaletteWorkspace } from './components/PaletteWorkspace';
 import { useAppsCatalog } from './hooks/useAppsCatalog';
@@ -116,25 +122,46 @@ const ClipboardPalette = (): React.JSX.Element => {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
   const [workspace, setWorkspace] = useState<'none' | 'import'>('none');
-  // The catalog lives beside the history from the first frame: the palette
-  // is a launcher the moment it opens, not after a mode is toggled into.
+  // The palette opens on its categories — Applications, Clipboard history,
+  // Key vault — and one of them is then a deliberate pick away. Which list
+  // someone came for is a fact about them; the home view asks instead of
+  // guessing. The setting can turn the whole arrangement off: `view` is
+  // then the combined list, exactly as the palette used to be.
+  const [mode, setMode] = useState<PaletteMode | 'home'>('home');
+  // Whether the palette has modes at all — a setting, read below and
+  // refreshed each time the palette comes back to the front.
+  const [paletteModes, setPaletteModes] = useState(true);
+  const view: PaletteView = paletteModes ? mode : 'all';
+  // The catalog is loaded whichever mode is showing it, so that Tab is a
+  // filter change and never a wait.
   const catalog = useAppsCatalog(gateway, true);
-  const visibleApps = useMemo(() => filterApps(catalog.apps, query), [catalog.apps, query]);
+  const visibleApps = useMemo(
+    () => (view === 'apps' || view === 'all' ? filterApps(catalog.apps, query) : []),
+    [view, catalog.apps, query],
+  );
   // Only asked for once someone types. The application catalog is a local scan and may load
   // eagerly; this one reaches someone's vault over the network, and an untouched palette has no
   // business doing that.
-  const vault = useVaultCatalog(gateway, query.trim() !== '');
-  const visibleSecrets = useMemo(
-    () => filterSecrets(vault.secrets, query),
-    [vault.secrets, query],
-  );
+  // The vault is asked for the moment its category is entered — a
+  // deliberate act, like typing was before it — or, combined, when someone
+  // types. Never on an untouched palette: the ask crosses the network.
+  const vault = useVaultCatalog(gateway, view === 'vault' || (view === 'all' && query.trim() !== ''));
+  const visibleSecrets = useMemo(() => {
+    if (view === 'vault') {
+      // Browsed, not only searched: the whole key list is the point of the
+      // category, so an empty query shows everything the vault returned.
+      return query.trim() === '' ? vault.secrets : filterSecrets(vault.secrets, query);
+    }
+    if (view === 'all' && query.trim() !== '') return filterSecrets(vault.secrets, query);
+    return [];
+  }, [view, vault.secrets, query]);
   const [launchError, setLaunchError] = useState<string | null>(null);
   // The shortcut the palette has to recognise when it is pressed inside the
-  // window rather than outside it. Read once: it changes only in settings, and
-  // saving there rebinds the system registration anyway.
+  // window rather than outside it, and the setting that decides whether the
+  // palette has modes at all. Re-read on focus: settings change in their own
+  // window, and the palette notices the next time it is in front.
   const [summoningShortcut, setSummoningShortcut] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
+  const refreshSettings = useCallback((): void => {
     // Defensive on the call as well as the promise: the palette has to open
     // whether or not the settings can be read, and a shortcut it does not know
     // costs a way of closing, not the window.
@@ -142,16 +169,17 @@ const ClipboardPalette = (): React.JSX.Element => {
       void gateway
         .getSettings()
         .then((settings) => {
-          if (!cancelled) setSummoningShortcut(settings.hotkey);
+          setSummoningShortcut(settings.hotkey);
+          setPaletteModes(settings.paletteModes);
         })
         .catch(() => undefined);
     } catch {
       /* no settings to read; the system shortcut still toggles the window */
     }
-    return () => {
-      cancelled = true;
-    };
   }, [gateway]);
+  useEffect(() => {
+    refreshSettings();
+  }, [refreshSettings]);
   const focusSearch = (): void => searchInputRef.current?.focus();
   useEffect(() => {
     searchInputRef.current?.focus();
@@ -171,7 +199,12 @@ const ClipboardPalette = (): React.JSX.Element => {
     try {
       void getCurrentWindow()
         .onFocusChanged(({ payload: focused }) => {
-          if (focused) focusSearch();
+          if (focused) {
+            focusSearch();
+            // Settings may have changed in their own window while this one
+            // was out of front; the next summoning picks them up.
+            refreshSettings();
+          }
         })
         .then((unlisten) => {
           if (cancelled) unlisten();
@@ -192,6 +225,10 @@ const ClipboardPalette = (): React.JSX.Element => {
     onFocusSearch: focusSearch,
     onOpenPreview: () => setMobilePreviewOpen(true),
   });
+  // The history rows the palette shows: every one of them while the
+  // history side is up — the view decides, the source is always the same
+  // list.
+  const historyItems = view === 'history' || view === 'all' ? actions.visibleItems : [];
 
   const handleLaunch = (path: string): void => {
     setLaunchError(null);
@@ -201,8 +238,8 @@ const ClipboardPalette = (): React.JSX.Element => {
   };
 
   const paletteItems = useMemo<PaletteItem[]>(
-    () => buildPaletteItems(visibleApps, actions.visibleItems, query, visibleSecrets),
-    [visibleApps, actions.visibleItems, query, visibleSecrets],
+    () => buildPaletteItems(visibleApps, historyItems, query, visibleSecrets),
+    [visibleApps, historyItems, query, visibleSecrets],
   );
 
   const handleActivate = (entry: PaletteItem): void => {
@@ -219,15 +256,30 @@ const ClipboardPalette = (): React.JSX.Element => {
     } else {
       actions.copy(entry.item.eventId, 'paste');
     }
+    // A launch and a key copy both end with the palette going away — the
+    // next summoning opens back on the categories, not on whichever side
+    // the last errand ran on. A history paste is different: it may leave
+    // the palette standing with something to say (the Accessibility
+    // refusal and its fix), and that answer belongs to the row and the
+    // selection still on screen. With categories off there is nothing to
+    // reset.
+    if (paletteModes && entry.kind !== 'history') setMode('home');
   };
 
   const navigation = useListNavigation({
     items: paletteItems,
     keyOf: keyOfItem,
     onActivate: handleActivate,
-    // Escape only ever clears the query: with one shared field there is no
-    // mode to back out of, and hiding the palette is the shortcut's job.
-    onEscape: () => setQuery(''),
+    // Escape backs out one step at a time: first the query, then the
+    // category — back to the chooser — and only hiding the palette remains
+    // the global shortcut's job. Home has nothing above it to back out to.
+    onEscape: () => {
+      if (query !== '') {
+        setQuery('');
+      } else if (paletteModes && mode !== 'home') {
+        setMode('home');
+      }
+    },
   });
 
   const selected = paletteItems.find((entry) => keyOfItem(entry) === navigation.selectedKey) ?? null;
@@ -278,10 +330,56 @@ const ClipboardPalette = (): React.JSX.Element => {
     focusSearch();
   };
   const handleQueryChange = (nextQuery: string): void => {
+    // Typing from home means the history: the palette is a clipboard
+    // manager before it is anything else, and a query is the one answer
+    // that needs no category picked. Picking a tile first keeps any other
+    // meaning.
+    if (paletteModes && mode === 'home' && nextQuery.trim() !== '') {
+      setMode('history');
+    }
     setQuery(nextQuery);
     focusSearch();
   };
   const handleSearchKeyDown: KeyboardEventHandler<HTMLInputElement> = (event) => {
+    // The digits pick a category straight from home, in tile order —
+    // the keys the tiles themselves display.
+    if (
+      paletteModes &&
+      mode === 'home' &&
+      ['1', '2', '3'].includes(event.key) &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey
+    ) {
+      const category = PALETTE_CATEGORIES.find((entry) => entry.key === event.key);
+      if (category) {
+        event.preventDefault();
+        setMode(category.mode);
+        return;
+      }
+    }
+    // Tab, from the field only, cycles the categories: home, then each of
+    // them in tile order, then home again. Shift+Tab keeps the browser's
+    // meaning — a keyboard user's route out of the field to the controls
+    // below must survive this. With categories off, plain Tab keeps the
+    // browser's meaning too: there is nothing to cycle.
+    if (
+      paletteModes &&
+      event.key === 'Tab' &&
+      !event.shiftKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey
+    ) {
+      event.preventDefault();
+      setMode((previous) => {
+        const order: Array<PaletteMode | 'home'> = ['home', ...PALETTE_CATEGORIES.map((c) => c.mode)];
+        const index = order.indexOf(previous);
+        const next = order[(index + 1) % order.length];
+        return next === undefined ? 'home' : next;
+      });
+      return;
+    }
     if (actions.deleteTargetId === null) navigation.handleKeyDown(event);
   };
   // Hidden rather than closed, the same as every other way the palette goes
@@ -339,6 +437,21 @@ const ClipboardPalette = (): React.JSX.Element => {
       openSettings();
       return;
     }
+    // Direct category picks, in tile order: ⌘1 applications, ⌘2 history,
+    // ⌘3 vault.
+    if (
+      paletteModes &&
+      primaryModifier &&
+      !event.shiftKey &&
+      ['1', '2', '3'].includes(key)
+    ) {
+      const category = PALETTE_CATEGORIES.find((entry) => entry.key === key);
+      if (category) {
+        event.preventDefault();
+        setMode(category.mode);
+        return;
+      }
+    }
     // The row shortcuts below act on a history entry; while an application
     // holds the selection there is none, and ⌘P or Delete doing nothing is
     // the honest behavior. Tab is deliberately absent: focus movement is
@@ -395,15 +508,21 @@ const ClipboardPalette = (): React.JSX.Element => {
       >
         <PaletteHeader
           query={query}
+          mode={view}
           activeDescendant={activeDescendant}
-          resultCount={visibleSecrets.length + visibleApps.length + actions.visibleItems.length}
-          resultsTruncated={actions.visibleItems.length >= HISTORY_PAGE_SIZE}
+          resultCount={visibleSecrets.length + visibleApps.length + historyItems.length}
+          resultsTruncated={
+            (view === 'history' || view === 'all') && historyItems.length >= HISTORY_PAGE_SIZE
+          }
           refreshing={refreshing}
           searchInputRef={searchInputRef}
           onQueryChange={handleQueryChange}
+          onModeChange={setMode}
           onKeyDown={handleSearchKeyDown}
         />
         <PaletteWorkspace
+          mode={view}
+          onPickCategory={setMode}
           appsStatus={catalog.status}
           status={status}
           items={paletteItems}
@@ -437,7 +556,7 @@ const ClipboardPalette = (): React.JSX.Element => {
         ) : null}
         <footer className="palette-footer">
           <span>
-            ↵ open · ⌘C copy · ⌘⇧V plain
+            ↵ open · ⌘C copy · ⌘⇧V plain · ⇥ mode
             {summoningShortcut === null ? '' : ` · ${shortcutHint(summoningShortcut)} summon`}
           </span>
           {/* Out of the way but still visible: a shortcut nobody was told about

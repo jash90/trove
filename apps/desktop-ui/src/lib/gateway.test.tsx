@@ -33,6 +33,7 @@ const settings: AppSettings = {
   schemaVersion: 1,
   hotkey: 'CommandOrControl+Space',
   autostart: false,
+  paletteModes: true,
   retentionDays: null,
   denylistedApps: [],
   linkPreviews: true,

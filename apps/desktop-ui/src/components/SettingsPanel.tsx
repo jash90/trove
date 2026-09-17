@@ -301,6 +301,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [denylist, setDenylist] = useState('');
   const [stats, setStats] = useState<StorageStatsContract | null>(null);
   const [linkPreviews, setLinkPreviews] = useState(true);
+  const [paletteModes, setPaletteModes] = useState(true);
   const [vaultUrl, setVaultUrl] = useState('');
   const [vaultSecrets, setVaultSecrets] = useState<KeyvaultSecret[] | null>(null);
   const [pairing, setPairing] = useState<PairingStarted | null>(null);
@@ -369,6 +370,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setRetentionDays(settings.retentionDays === null ? '' : String(settings.retentionDays));
       setDenylist(settings.denylistedApps.join('\n'));
       setLinkPreviews(settings.linkPreviews);
+      setPaletteModes(settings.paletteModes);
       setVaultUrl(settings.keyvault.url ?? '');
     })();
     return () => {
@@ -440,6 +442,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       retentionDays: nextRetention,
       denylistedApps: nextDenylist,
       linkPreviews,
+      paletteModes,
       // Overrides over the device identity file, each independent of the
       // other. A blank field travels as an absent one, meaning "use the
       // device's value". The private key is never sent: it is not ours to hold.
@@ -841,8 +844,22 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                     <span className="settings-section-icon" aria-hidden="true">
                       <ShieldBan size={16} />
                     </span>
-                    <h2 id="settings-denylist-title">Excluded applications</h2>
+                    <h2 id="settings-denylist-title">Applications</h2>
                   </div>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={paletteModes}
+                      onChange={(event) => setPaletteModes(event.currentTarget.checked)}
+                    />
+                    Open the palette on its categories
+                  </label>
+                  <p className="settings-help">
+                    On, the palette opens on three categories — Applications, Clipboard history
+                    and the Key vault — picked with 1/2/3 or Tab, and typing means the history.
+                    Off, one combined list answers everything at once. Takes effect the next time
+                    the palette is summoned.
+                  </p>
                   <label className="settings-field" htmlFor="settings-denylist">
                     <span>Bundle identifiers or executable names</span>
                     <textarea
