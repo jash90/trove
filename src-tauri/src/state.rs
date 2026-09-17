@@ -26,6 +26,10 @@ pub struct AppIconDto {
 /// The application catalog and the roots it was scanned from.
 #[derive(Clone)]
 pub struct LauncherState {
+    /// The roots a scan walks, with each root's menu-bar-agent policy.
+    scan_roots: Arc<[trove_launcher::ScanRoot]>,
+    /// The same roots as plain paths — what launch and icon validation
+    /// accepts, flattened once so neither caller maps per request.
     roots: Arc<[PathBuf]>,
     cached: Arc<Mutex<Option<CachedCatalog>>>,
     /// Whether a background scan is running. A palette that gains focus
@@ -44,9 +48,18 @@ struct CachedCatalog {
 }
 
 impl LauncherState {
-    pub fn scanning(roots: Vec<PathBuf>) -> Self {
+    /// Accepts plain paths (strict policy) or annotated [`ScanRoot`]s; the
+    /// production roots come from `trove_launcher::default_scan_roots`,
+    /// tests inject temporary directories and inherit the strict policy.
+    pub fn scanning(roots: Vec<impl Into<trove_launcher::ScanRoot>>) -> Self {
+        let scan_roots: Vec<trove_launcher::ScanRoot> = roots.into_iter().map(Into::into).collect();
+        let paths = scan_roots
+            .iter()
+            .map(|root| root.path.clone())
+            .collect::<Vec<PathBuf>>();
         Self {
-            roots: Arc::from(roots),
+            scan_roots: Arc::from(scan_roots),
+            roots: Arc::from(paths),
             cached: Arc::new(Mutex::new(None)),
             scan_in_flight: Arc::new(AtomicBool::new(false)),
             icons: Arc::new(Mutex::new(HashMap::new())),
@@ -82,7 +95,7 @@ impl LauncherState {
         if let Some(entry) = cached.as_ref() {
             return entry.catalog.clone();
         }
-        let catalog = trove_launcher::scan_applications(&self.roots);
+        let catalog = trove_launcher::scan_applications(&self.scan_roots);
         *cached = Some(CachedCatalog {
             catalog: catalog.clone(),
         });
@@ -105,7 +118,7 @@ impl LauncherState {
         {
             return false;
         }
-        let roots = Arc::clone(&self.roots);
+        let roots = Arc::clone(&self.scan_roots);
         let cached = Arc::clone(&self.cached);
         let scan_in_flight = Arc::clone(&self.scan_in_flight);
         std::thread::spawn(move || {

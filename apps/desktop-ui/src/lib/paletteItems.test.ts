@@ -91,11 +91,16 @@ describe('buildPaletteItems with vault secrets', () => {
     ]);
   });
 
-  it('leaves the launcher view untouched when nothing is typed', () => {
-    // The catalog is not even fetched without a query, so this is the shape that actually
-    // reaches the palette on open — and it must be exactly what it was before secrets existed.
+  it('carries secrets on the empty query too, for the vault category that browses them', () => {
+    // Only the vault category passes secrets with no query — everywhere
+    // else they arrive filtered to nothing — so the empty-query shape is
+    // still the launcher view unless the caller actually brought keys.
     const items = buildPaletteItems([app('/A.app')], [history(1)], '', [secret('openai')]);
-    expect(kindsOf(items)).toEqual(['app', 'history']);
+    expect(kindsOf(items)).toEqual(['app', 'history', 'vault']);
+    expect(kindsOf(buildPaletteItems([app('/A.app')], [history(1)], ''))).toEqual([
+      'app',
+      'history',
+    ]);
   });
 
   it('keys a secret so it cannot collide with a history row', () => {

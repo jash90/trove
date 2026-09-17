@@ -2,13 +2,19 @@ import { PanelRightOpen } from 'lucide-react';
 
 import type { HistoryItem, LinkPreview as LinkPreviewContract, Preview } from '../lib/contracts';
 import type { PaletteItem } from '../lib/paletteItems';
+import type { PaletteView } from './PaletteHeader';
 import type { PreviewStatus } from './PreviewPane';
 import type { ThumbnailStatus } from './ImagePreview';
+import { CategoryTiles } from './CategoryTiles';
 import { EmptyState } from './EmptyState';
 import { PaletteList } from './PaletteList';
 import { PreviewPane } from './PreviewPane';
 
 interface PaletteWorkspaceProps {
+  /** What the palette is showing — the home picker and the empty states follow it. */
+  mode: PaletteView;
+  /** Entering one of the categories from the home tiles. */
+  onPickCategory: (mode: import('./PaletteHeader').PaletteMode) => void;
   appsStatus: 'loading' | 'ready' | 'error';
   status: 'loading' | 'ready' | 'error';
   /** The single result list: applications and history, already ordered. */
@@ -40,6 +46,8 @@ interface PaletteWorkspaceProps {
 /// loading state would both flash and leave Enter steering at rows nobody
 /// can see — so the states speak only when there is nothing to show.
 export const PaletteWorkspace = ({
+  mode,
+  onPickCategory,
   appsStatus,
   status,
   items,
@@ -80,24 +88,65 @@ export const PaletteWorkspace = ({
         </p>
       ) : null}
       <div className="history-panel">
-        {/* The history announces; the applications are visible — the states
-            below speak only when neither side put a row on screen. */}
-        {status === 'error' && appsStatus !== 'ready' ? <EmptyState kind="error" /> : null}
-        {status === 'error' && appsStatus === 'ready' && items.length === 0 ? (
-          <EmptyState kind="error" />
+        {mode === 'home' ? (
+          <CategoryTiles onPick={onPickCategory} />
         ) : null}
-        {status === 'loading' && items.length === 0 ? <EmptyState kind="loading" /> : null}
-        {status === 'ready' && appsStatus === 'ready' && items.length === 0 ? (
-          <EmptyState kind="empty" />
-        ) : null}
-        {/* The history has answered and has nothing; the catalog has not.
-            Without these two the panel says nothing at all — and a catalog
-            that failed to load fails silently. */}
-        {status === 'ready' && appsStatus === 'loading' && items.length === 0 ? (
-          <EmptyState kind="loading" subject="applications" />
-        ) : null}
-        {status === 'ready' && appsStatus === 'error' && items.length === 0 ? (
-          <EmptyState kind="error" subject="applications" />
+        {/* The states speak only when there is nothing to show, and about
+            the side the view is showing: with modes on, the history's
+            loading state is silent while applications are on screen and an
+            applications problem is invisible while history is — a status
+            nobody asked about is noise. Combined, both sides owe their
+            state to the one panel, as they always did. */}
+        {mode === 'vault' ? (
+          <>
+            {/* The vault was asked for by entering the category, so an
+                empty answer is worth saying rather than a silent panel.
+                The list hook reports silence for every failure — an
+                unpaired install included — and "no keys" is the honest
+                sentence for all of them. */}
+            {items.length === 0 ? <EmptyState kind="empty" subject="vault" /> : null}
+          </>
+        ) : mode === 'apps' ? (
+          <>
+            {appsStatus === 'error' && items.length === 0 ? (
+              <EmptyState kind="error" subject="applications" />
+            ) : null}
+            {appsStatus === 'loading' && items.length === 0 ? (
+              <EmptyState kind="loading" subject="applications" />
+            ) : null}
+            {appsStatus === 'ready' && items.length === 0 ? (
+              <EmptyState kind="empty" subject="applications" />
+            ) : null}
+          </>
+        ) : mode === 'history' ? (
+          <>
+            {status === 'error' ? <EmptyState kind="error" /> : null}
+            {status === 'loading' && items.length === 0 ? (
+              <EmptyState kind="loading" />
+            ) : null}
+            {status === 'ready' && items.length === 0 ? <EmptyState kind="empty" /> : null}
+          </>
+        ) : mode === 'all' ? (
+          <>
+            {status === 'error' && appsStatus !== 'ready' ? (
+              <EmptyState kind="error" />
+            ) : null}
+            {status === 'error' && appsStatus === 'ready' && items.length === 0 ? (
+              <EmptyState kind="error" />
+            ) : null}
+            {status === 'loading' && items.length === 0 ? (
+              <EmptyState kind="loading" />
+            ) : null}
+            {status === 'ready' && appsStatus === 'ready' && items.length === 0 ? (
+              <EmptyState kind="empty" />
+            ) : null}
+            {status === 'ready' && appsStatus === 'loading' && items.length === 0 ? (
+              <EmptyState kind="loading" subject="applications" />
+            ) : null}
+            {status === 'ready' && appsStatus === 'error' && items.length === 0 ? (
+              <EmptyState kind="error" subject="applications" />
+            ) : null}
+          </>
         ) : null}
         {items.length > 0 ? (
           <PaletteList

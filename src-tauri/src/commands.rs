@@ -135,11 +135,18 @@ pub struct AppSettingsDto {
     pub denylisted_apps: Vec<String>,
     /// Whether a link entry's page may be contacted for its title and icon.
     ///
-    /// The one setting that decides whether this application uses the network
-    /// at all. Defaulted through serde so a settings row written before it
-    /// existed still reads.
+    /// The one setting that decides whether this application uses the
+    /// network at all. Defaulted through serde so a settings row written
+    /// before it existed still reads.
     #[serde(default = "default_link_previews")]
     pub link_previews: bool,
+    /// Whether the palette splits into History and Applications modes.
+    ///
+    /// On, the palette opens on the history and `Tab` flips to the
+    /// applications; off, one list answers both at once. Defaulted through
+    /// serde so a settings row written before it existed still reads.
+    #[serde(default = "default_palette_modes")]
+    pub palette_modes: bool,
     /// Where the keyvault pane looks, when it is configured at all.
     ///
     /// Defaulted through serde so a settings row written before it existed
@@ -254,6 +261,13 @@ fn default_link_previews() -> bool {
     true
 }
 
+/// Palette modes are on by default: the palette opens on the history it
+/// exists to keep, and applications are one `Tab` away. Turning the setting
+/// off restores the single combined list.
+fn default_palette_modes() -> bool {
+    true
+}
+
 impl Default for AppSettingsDto {
     fn default() -> Self {
         Self {
@@ -263,6 +277,7 @@ impl Default for AppSettingsDto {
             retention_days: None,
             denylisted_apps: Vec::new(),
             link_previews: default_link_previews(),
+            palette_modes: default_palette_modes(),
             keyvault: KeyvaultSettingsDto::default(),
         }
     }
@@ -658,25 +673,49 @@ pub async fn copy_event<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     event_id: i64,
-    plain_text: bool,
+    // Kept in the IPC contract; plainness now follows the payload — an
+    // image is never a plain-text copy, a text entry always is.
+    _plain_text: bool,
     paste: bool,
 ) -> Result<CopyResultDto, String> {
-    let text = prepare_copy_text_service(state.inner(), event_id, plain_text).await?;
+    let payload = prepare_copy_payload_service(state.inner(), event_id).await?;
     // Putting an entry back changes the clipboard, and the monitor would
     // otherwise record our own paste as a fresh copy. Arm the suppression
     // before the write so the change cannot land first.
     if let Some(control) = app.try_state::<crate::monitor::MonitorControl>() {
         control.suppress_next_change(current_time_ms());
     }
-    app.clipboard()
-        .write_text(text)
-        .map_err(|_| "clipboard_unavailable".to_owned())?;
+    let is_plain_text = matches!(payload, CopyPayload::Text(_));
+    match payload {
+        CopyPayload::Text(text) => {
+            app.clipboard()
+                .write_text(text)
+                .map_err(|_| "clipboard_unavailable".to_owned())?;
+        }
+        CopyPayload::Image(bytes) => {
+            // The clipboard takes pixels, not the PNG/TIFF file the history
+            // keeps: decoded off the async runtime, because a screenshot
+            // pasted back is real decoding work.
+            let image = run_blocking("copy_unavailable", move || {
+                let (rgba, width, height) =
+                    trove_images::decode_rgba(&bytes).map_err(|_| "copy_format_unavailable")?;
+                Ok::<_, String>(tauri::image::Image::new_owned(rgba, width, height))
+            })
+            .await?;
+            app.clipboard()
+                .write_image(&image)
+                .map_err(|_| "clipboard_unavailable".to_owned())?;
+        }
+    }
     let mode = if paste {
         paste_into_previous_window(&app).await
     } else {
         CopyModeDto::Copied
     };
-    Ok(CopyResultDto { mode, plain_text })
+    Ok(CopyResultDto {
+        mode,
+        plain_text: is_plain_text,
+    })
 }
 
 /// How long the target is given to come forward before the keystroke is posted.
@@ -996,24 +1035,53 @@ fn paste_keystroke(_pid: i32) -> bool {
     false
 }
 
-pub async fn prepare_copy_text_service(
+/// The ceiling on an image put back on the clipboard. Capture refuses
+/// payloads past this size on the way in, so the pair of bounds means an
+/// entry that was recordable is also pasteable — nothing sits in the
+/// history as an exhibit.
+const MAX_COPY_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+
+/// What one entry contributes to the clipboard.
+#[derive(Debug, Eq, PartialEq)]
+pub enum CopyPayload {
+    /// UTF-8 text, for every textual representation — including the
+    /// `file-url` list a file entry carries as text.
+    Text(String),
+    /// Encoded image bytes (PNG or TIFF), as captured.
+    Image(Vec<u8>),
+}
+
+pub async fn prepare_copy_payload_service(
     state: &AppState,
     event_id: i64,
-    plain_text: bool,
-) -> Result<String, String> {
+) -> Result<CopyPayload, String> {
     let store = state.store.clone();
     run_blocking("copy_unavailable", move || {
-        prepare_copy_text_blocking(&store, event_id, plain_text)
+        prepare_copy_payload_blocking(&store, event_id)
     })
     .await
 }
 
-fn prepare_copy_text_blocking(
+fn prepare_copy_payload_blocking(
     store: &StoreHandle,
     event_id: i64,
-    _plain_text: bool,
-) -> Result<String, String> {
+) -> Result<CopyPayload, String> {
     let metadata = read_primary_metadata(store, event_id, "copy_unavailable")?;
+    // An image returns to the clipboard as an image — pixels the receiving
+    // application pastes, not a path or a refusal. Only its own bytes back;
+    // an image entry whose payload is gone (an import whose source file
+    // vanished) has nothing to give and says so.
+    if metadata.kind == "image" {
+        let bytes = read_primary_bytes(
+            store,
+            &metadata,
+            MAX_COPY_IMAGE_BYTES,
+            "copy_too_large",
+            "copy_unavailable",
+        )?
+        .ok_or_else(|| "missing_payload".to_owned())?;
+        return Ok(CopyPayload::Image(bytes));
+    }
     if !metadata.missing_payload
         && !is_text_preview(&metadata.kind, &metadata.mime_type, &metadata.format_id)
     {
@@ -1027,7 +1095,8 @@ fn prepare_copy_text_blocking(
         "copy_unavailable",
     )?
     .ok_or_else(|| "missing_payload".to_owned())?;
-    String::from_utf8(bytes).map_err(|_| "copy_format_unavailable".to_owned())
+    let text = String::from_utf8(bytes).map_err(|_| "copy_format_unavailable".to_owned())?;
+    Ok(CopyPayload::Text(text))
 }
 
 pub async fn analyze_import_service(

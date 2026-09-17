@@ -72,6 +72,7 @@ export const SYNTHETIC_SETTINGS: AppSettings = {
   retentionDays: null,
   denylistedApps: ['com.apple.Passwords', 'com.apple.keychainaccess'],
   linkPreviews: true,
+  paletteModes: true,
   keyvault: { url: null, token: null, privateJwk: null },
 };
 

@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -76,6 +76,7 @@ const settings: AppSettings = {
   schemaVersion: 1,
   hotkey: 'CommandOrControl+Space',
   autostart: false,
+  paletteModes: true,
   retentionDays: 30,
   denylistedApps: [],
   linkPreviews: true,
@@ -161,6 +162,9 @@ const makeGateway = (
 };
 
 const settleInitialSearch = async (): Promise<void> => {
+  // The palette opens on its category chooser; the second tile digit is
+  // the history these tests read.
+  fireEvent.keyDown(screen.getByRole('searchbox'), { key: '2' });
   await screen.findByRole('listbox', { name: 'Applications, secrets and history results' });
 };
 
@@ -650,7 +654,7 @@ describe('history actions', () => {
     const user = userEvent.setup();
     render(<App gateway={gateway} />);
     await settleInitialSearch();
-    const search = screen.getByRole('searchbox', { name: 'Search applications, secrets and history' });
+    const search = screen.getByRole('searchbox', { name: 'Search history' });
     expect(search).toHaveFocus();
 
     await user.keyboard('{Enter}');

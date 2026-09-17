@@ -1,10 +1,10 @@
 import '@testing-library/jest-dom/vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, isSummoningShortcut, shortcutHint } from './App';
 import { mockGateway, type ClipboardGateway } from './lib/gateway';
-import { SYNTHETIC_APPS } from './lib/fixtures';
+import { SYNTHETIC_APPS, SYNTHETIC_KEYVAULT_SECRETS } from './lib/fixtures';
 
 it('renders the private clipboard palette landmark', () => {
   render(<App />);
@@ -108,38 +108,146 @@ describe('the unified palette', () => {
   const appsResults = () =>
     within(screen.getByRole('listbox', { name: 'Applications, secrets and history results' }));
 
+  // The palette opens on its category chooser; a test that wants a list
+  // picks its category the way a user does — the digit on the tile.
+  const pick = (key: string): void => {
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key });
+  };
+  const homeTiles = () => screen.getAllByRole('button', { name: /Applications|Clipboard history|Key vault/u });
   const settleHistory = async (): Promise<void> => {
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: '2', metaKey: true });
     await waitFor(() =>
       expect(historyResults().getAllByRole('option').length).toBeGreaterThan(0),
     );
   };
   const settleApps = async (): Promise<void> => {
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: '1', metaKey: true });
     await waitFor(() =>
       expect(appsResults().getAllByRole('option').length).toBeGreaterThan(0),
     );
   };
 
-  it('shows applications above the history before anything is typed', async () => {
+  it('opens on its categories, and typing means the history', async () => {
+    const user = userEvent.setup();
     render(<App />);
-    await settleApps();
-    await settleHistory();
 
-    // A launcher from the first frame: the whole catalog, alphabetically,
-    // with the recent history underneath it — one list, apps first.
+    // The palette opens on the chooser: three categories, no list rows —
+    // which list someone came for is a fact about them, not the app.
+    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+    expect(
+      screen.queryByRole('listbox', { name: 'Applications, secrets and history results' }),
+    ).toBeNull();
+
+    // Typing from home enters the history with the query already carried.
+    await user.type(screen.getByRole('searchbox'), 'project note');
+    await waitFor(() =>
+      expect(historyResults().getAllByRole('option').length).toBeGreaterThan(0),
+    );
+    expect(
+      historyResults().getAllByRole('option').filter((option) => option.hasAttribute('data-path')),
+    ).toHaveLength(0);
+  });
+
+  it('picks a category with its tile digit, in tile order', async () => {
+    render(<App />);
+    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+
+    pick('1');
+    await waitFor(() =>
+      expect(
+        appsResults()
+          .getAllByRole('option')
+          .filter((option) => option.hasAttribute('data-path')),
+      ).toHaveLength(SYNTHETIC_APPS.length),
+    );
+    expect(
+      appsResults().getAllByRole('option').filter((option) => option.hasAttribute('data-event-id')),
+    ).toHaveLength(0);
+
+    // Escape clears the query; the second Escape is the way back home.
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
+    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+  });
+
+  it('shows the keys of the paired vault in its category', async () => {
+    const user = userEvent.setup();
+    const keyvaultCopySecret = vi.fn(async () => undefined);
+    render(
+      <App gateway={{ ...mockGateway, keyvaultCopySecret } as ClipboardGateway} />,
+    );
+
+    pick('3');
+    const vaultRows = await waitFor(() => {
+      const rows = historyResults().getAllByRole('option');
+      expect(rows.length).toBeGreaterThanOrEqual(SYNTHETIC_KEYVAULT_SECRETS.length);
+      return rows;
+    });
+    expect(vaultRows.some((row) => row.textContent?.includes('openai'))).toBe(true);
+
+    // Enter copies the selected key through the core — the value never
+    // crosses the interface — and the palette lands back on the categories.
+    await user.keyboard('{Enter}');
+    expect(keyvaultCopySecret).toHaveBeenCalledWith('openai');
+    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+  });
+
+  it('picks a category directly with ⌘1, ⌘2 and ⌘3, and from the buttons', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.keyboard('{Meta>}1{/Meta}');
     await waitFor(() =>
       expect(
         historyResults()
           .getAllByRole('option')
-          .some((option) => option.hasAttribute('data-event-id')),
+          .filter((option) => option.hasAttribute('data-path')).length,
+      ).toBeGreaterThan(0),
+    );
+
+    await user.keyboard('{Meta>}2{/Meta}');
+    await waitFor(() =>
+      expect(
+        historyResults()
+          .getAllByRole('option')
+          .filter((option) => option.hasAttribute('data-event-id')).length,
+      ).toBeGreaterThan(0),
+    );
+
+    await user.keyboard('{Meta>}3{/Meta}');
+    await waitFor(() =>
+      expect(
+        historyResults()
+          .getAllByRole('option')
+          .some((option) => option.textContent?.includes('openai')),
       ).toBe(true),
     );
-    const options = historyResults().getAllByRole('option');
-    const appRows = options.filter((option) => option.hasAttribute('data-path'));
-    const firstHistoryRow = options.findIndex((option) =>
-      option.hasAttribute('data-event-id'),
+
+    // The buttons say the same thing the keyboard does.
+    await user.click(screen.getByRole('button', { name: 'Apps' }));
+    await waitFor(() =>
+      expect(
+        historyResults()
+          .getAllByRole('option')
+          .filter((option) => option.hasAttribute('data-path')).length,
+      ).toBeGreaterThan(0),
     );
-    expect(appRows).toHaveLength(SYNTHETIC_APPS.length);
-    expect(firstHistoryRow).toBe(appRows.length);
+  });
+
+  it('returns to the categories after launching an application', async () => {
+    const user = userEvent.setup();
+    const launchApp = vi.fn(async () => undefined);
+    render(<App gateway={{ ...mockGateway, launchApp } as ClipboardGateway} />);
+
+    await user.keyboard('{Meta>}1{/Meta}');
+    await user.type(screen.getByRole('searchbox'), 'terminal');
+    await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
+    await user.keyboard('{Enter}');
+
+    expect(launchApp).toHaveBeenCalled();
+    // The stay in a category ended with the errand: the next summoning
+    // opens back on the categories.
+    await waitFor(() => expect(homeTiles()).toHaveLength(3));
   });
 
   it('filters applications client-side while typing once fetched', async () => {
@@ -148,7 +256,6 @@ describe('the unified palette', () => {
     render(<App gateway={{ ...mockGateway, listApps } as ClipboardGateway} />);
 
     await settleApps();
-    await settleHistory();
 
     await user.type(screen.getByRole('searchbox'), 'notes');
     await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
@@ -166,7 +273,6 @@ describe('the unified palette', () => {
     render(<App gateway={{ ...mockGateway, launchApp } as ClipboardGateway} />);
 
     await settleApps();
-    await settleHistory();
 
     await user.type(screen.getByRole('searchbox'), 'terminal');
     await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
@@ -271,19 +377,27 @@ describe('the unified palette', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await settleApps();
     await settleHistory();
 
-    // An application holds the selection by default; an application has no
-    // payload to preview, so the pane shows nothing of one.
-    expect(screen.queryByText('Synthetic project note for browser preview')).toBeNull();
-
-    // A query no application matches makes a history row the selection, and
-    // that is what the pane opens for.
-    await user.type(screen.getByRole('searchbox'), 'project note');
+    // The palette opens with a history row selected, and the pane opens
+    // for it: the history is the default mode. (The same text sits in the
+    // row and in the pane, so the query counts rather than finds one.)
     await waitFor(() =>
-      expect(screen.getByText('Synthetic project note for browser preview')).toBeVisible(),
+      expect(screen.getAllByText('Synthetic project note for browser preview').length)
+        .toBeGreaterThan(0),
     );
+
+    // An application holds the selection in applications category; an
+    // application has no payload to preview, so the pane shows nothing.
+    await user.keyboard('{Meta>}1{/Meta}');
+    await waitFor(() => {
+      expect(
+        historyResults()
+          .getAllByRole('option')
+          .some((option) => option.hasAttribute('data-path')),
+      ).toBe(true);
+      expect(screen.queryAllByText('Synthetic project note for browser preview')).toHaveLength(0);
+    });
   });
 
   it('keeps the row shortcuts of the history inert while an application is selected', async () => {
@@ -295,7 +409,6 @@ describe('the unified palette', () => {
     );
 
     await settleApps();
-    await settleHistory();
 
     await user.type(screen.getByRole('searchbox'), 'terminal');
     await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
@@ -309,27 +422,82 @@ describe('the unified palette', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it('gives Tab back to the browser: focus leaves the field, nothing toggles', async () => {
+  it('cycles the categories with Tab, and Shift+Tab still leaves the field', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await settleApps();
-    await settleHistory();
 
     const search = screen.getByRole('searchbox');
     expect(search).toHaveFocus();
 
+    // home → applications → history → vault → home: one ring, in tile
+    // order, the field keeping the caret the whole way.
     await user.keyboard('{Tab}');
+    await waitFor(() =>
+      expect(
+        historyResults()
+          .getAllByRole('option')
+          .some((option) => option.hasAttribute('data-path')),
+      ).toBe(true),
+    );
 
+    await user.keyboard('{Tab}');
+    await waitFor(() =>
+      expect(
+        historyResults()
+          .getAllByRole('option')
+          .some((option) => option.hasAttribute('data-event-id')),
+      ).toBe(true),
+    );
+
+    await user.keyboard('{Tab}');
+    await waitFor(() =>
+      expect(
+        historyResults()
+          .getAllByRole('option')
+          .some((option) => option.textContent?.includes('openai')),
+      ).toBe(true),
+    );
+
+    await user.keyboard('{Tab}');
+    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+    expect(search).toHaveFocus();
+
+    // Shift+Tab keeps the browser's meaning — the keyboard route out of
+    // the field to the controls below survives the Tab override.
+    await user.keyboard('{Shift>}{Tab}{/Shift}');
     expect(search).not.toHaveFocus();
-    // Nothing about the palette changed behind the focus move.
-    expect(appsResults().getAllByRole('option').length).toBeGreaterThan(0);
-    expect(historyResults().getAllByRole('option').length).toBeGreaterThan(0);
+  });
+
+  it('backs out with Escape one step at a time: query, then category, then home', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.keyboard('{Meta>}1{/Meta}');
+    await user.type(screen.getByRole('searchbox'), 'ter');
+
+    await user.keyboard('{Escape}');
+    // The query went first; the applications category is still on.
+    expect(screen.getByRole('searchbox')).toHaveValue('');
+    expect(
+      historyResults()
+        .getAllByRole('option')
+        .some((option) => option.hasAttribute('data-path')),
+    ).toBe(true);
+
+    await user.keyboard('{Escape}');
+    // The second Escape left the category and returned to the chooser.
+    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+
+    // A third Escape has nothing left to back out of, and hides nothing:
+    // hiding the palette is the shortcut's job, as it always was.
+    await user.keyboard('{Escape}');
+    expect(screen.getByRole('application', { name: 'Clipboard palette' })).toBeVisible();
+    expect(homeTiles()).toHaveLength(3);
   });
 
   it('clears the query with Escape and never closes the palette', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await settleApps();
     await settleHistory();
 
     await user.type(screen.getByRole('searchbox'), 'notes');
@@ -337,7 +505,7 @@ describe('the unified palette', () => {
 
     expect(screen.getByRole('searchbox')).toHaveValue('');
     expect(screen.getByRole('application', { name: 'Clipboard palette' })).toBeVisible();
-    expect(appsResults().getAllByRole('option').length).toBeGreaterThan(0);
+    expect(historyResults().getAllByRole('option').length).toBeGreaterThan(0);
   });
 
   it('reports a failed launch without repeating the path it was given', async () => {
@@ -348,7 +516,6 @@ describe('the unified palette', () => {
     render(<App gateway={{ ...mockGateway, launchApp } as ClipboardGateway} />);
 
     await settleApps();
-    await settleHistory();
 
     await user.type(screen.getByRole('searchbox'), 'terminal');
     await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
@@ -368,7 +535,6 @@ describe('the unified palette', () => {
     render(<App gateway={{ ...mockGateway, launchApp } as ClipboardGateway} />);
 
     await settleApps();
-    await settleHistory();
 
     await user.type(screen.getByRole('searchbox'), 'terminal');
     await waitFor(() => expect(appsResults().getAllByRole('option')).toHaveLength(1));
@@ -378,6 +544,9 @@ describe('the unified palette', () => {
     // One list means one selection: a refusal that belongs to an application
     // row has no business staying on screen once the user is reading history.
     await user.keyboard('{Escape}');
+    // First Escape cleared the query; the launch already returned the
+    // palette to the chooser, so enter the history from there.
+    await user.keyboard('{Meta>}2{/Meta}');
     const historyRow = await waitFor(() => {
       const row = historyResults()
         .getAllByRole('option')
@@ -393,7 +562,6 @@ describe('the unified palette', () => {
   it('leaves Tab to the dialog while one is open', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await settleApps();
     await settleHistory();
 
     await user.keyboard('{Meta>}i{/Meta}');

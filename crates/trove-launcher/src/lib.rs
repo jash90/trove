@@ -79,29 +79,81 @@ impl LaunchPathError {
     }
 }
 
-/// The roots the palette launcher scans, in catalog order. Missing ones
-/// (Setapp never installed, no `~/Applications`) are simply absent from the
-/// scan; their absence is not an error any user needs to be told about.
-pub fn default_scan_roots() -> Vec<PathBuf> {
+/// One scan root, carrying the policy that decides what counts as a
+/// launchable application inside it.
+///
+/// The policy exists because `LSUIElement` — "menu-bar agent, no Dock icon"
+/// — means two different things depending on where the bundle lives. Under
+/// `/System` it is the operating system's own machinery (Dock,
+/// ControlCenter, AirPlayUIAgent: a hundred agents nobody launches by
+/// name), and listing them would flood the catalog with rows Enter cannot
+/// meaningfully start. In the folders a user owns it is how ordinary
+/// applications say "I live in the menu bar": Raycast, Docker, a VPN in the
+/// menu bar — Spotlight lists these, and a launcher that hides them reports
+/// them as unfindable. `LSBackgroundOnly` stays unlisted everywhere: a
+/// daemon with no face at all is not something anyone launches by name,
+/// whichever folder it sits in.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScanRoot {
+    /// The directory the walk starts from.
+    pub path: PathBuf,
+    /// Whether `LSUIElement` bundles under this root are listed.
+    pub list_menu_bar_agents: bool,
+}
+
+impl ScanRoot {
+    /// A root whose bundles belong to the person using the machine:
+    /// installed on purpose, agents included.
+    pub fn user(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            list_menu_bar_agents: true,
+        }
+    }
+
+    /// A root whose bundles belong to the operating system: agents there
+    /// are machinery, not applications.
+    pub fn system(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            list_menu_bar_agents: false,
+        }
+    }
+}
+
+/// An unannotated path is treated as a system root — the strict policy. A
+/// caller that means otherwise says so with [`ScanRoot::user`], and injected
+/// test roots keep the behavior they have always had.
+impl From<PathBuf> for ScanRoot {
+    fn from(path: PathBuf) -> Self {
+        Self::system(path)
+    }
+}
+
+/// The roots the palette launcher scans, in catalog order, with the
+/// menu-bar-agent policy each carries. Missing ones (Setapp never installed,
+/// no `~/Applications`) are simply absent from the scan; their absence is
+/// not an error any user needs to be told about.
+pub fn default_scan_roots() -> Vec<ScanRoot> {
     let mut roots = vec![
-        PathBuf::from("/Applications"),
-        PathBuf::from("/System/Applications"),
-        // Mostly agents — the `LSUIElement` filter below is what keeps this
-        // root from flooding the list — but Finder lives here, and a launcher
+        ScanRoot::user("/Applications"),
+        ScanRoot::system("/System/Applications"),
+        // Mostly agents — the strict policy on this root is what keeps it
+        // from flooding the list — but Finder lives here, and a launcher
         // that cannot find Finder has a hole in it.
-        PathBuf::from("/System/Library/CoreServices"),
+        ScanRoot::system("/System/Library/CoreServices"),
         // The cryptex: modern macOS ships some applications (Safari is the
         // notable one) as a firmlink in `/Applications` whose canonical path
         // resolves here, outside every other root. Without this root the
         // catalog refuses them — and a launcher that cannot list Safari has
         // a hole the same size. Harmless where the path does not exist: the
         // scan canonicalizes each root and drops the ones that do not.
-        PathBuf::from("/System/Volumes/Preboot/Cryptexes/App/System/Applications"),
+        ScanRoot::system("/System/Volumes/Preboot/Cryptexes/App/System/Applications"),
     ];
     if let Some(base) = directories::BaseDirs::new() {
-        roots.push(base.home_dir().join("Applications"));
+        roots.push(ScanRoot::user(base.home_dir().join("Applications")));
     }
-    roots.push(PathBuf::from("/Applications/Setapp"));
+    roots.push(ScanRoot::user("/Applications/Setapp"));
     roots
 }
 
@@ -115,19 +167,23 @@ pub fn default_scan_roots() -> Vec<PathBuf> {
 /// whose canonical path escapes the root they were found under — the launch
 /// validator would refuse exactly those, and listing an application Enter
 /// cannot start is worse than not listing it.
-pub fn scan_applications(roots: &[PathBuf]) -> Vec<AppBundle> {
+pub fn scan_applications(roots: &[ScanRoot]) -> Vec<AppBundle> {
     // Canonical roots once, not per bundle: symlinks and firmlinks resolve
     // the same way for every candidate under a root.
-    let roots: Vec<PathBuf> = roots
-        .iter()
-        .filter_map(|root| fs::canonicalize(root).ok())
-        .collect();
-    // Deduped by canonical path: whichever directory entry found a bundle
-    // first wins, so an alias next to the original lists it once.
     let mut by_path: BTreeMap<PathBuf, AppBundle> = BTreeMap::new();
 
-    for root in &roots {
-        scan_directory(root, root, 0, &mut by_path);
+    for root in roots {
+        // An unreadable root is a fact about the filesystem, not a reason
+        // to give up on the rest of the catalog.
+        if let Ok(canonical_root) = fs::canonicalize(&root.path) {
+            scan_directory(
+                &canonical_root,
+                &canonical_root,
+                0,
+                root.list_menu_bar_agents,
+                &mut by_path,
+            );
+        }
     }
 
     let mut catalog: Vec<AppBundle> = by_path.into_values().collect();
@@ -147,6 +203,7 @@ fn scan_directory(
     root: &Path,
     directory: &Path,
     depth: usize,
+    list_menu_bar_agents: bool,
     by_path: &mut BTreeMap<PathBuf, AppBundle>,
 ) {
     if depth >= SCAN_DEPTH {
@@ -172,21 +229,26 @@ fn scan_directory(
         // cannot loop the walk.
         let is_directory = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
         if name.ends_with(".app") {
-            if let Some(bundle) = read_bundle(root, &path, &name) {
+            if let Some(bundle) = read_bundle(root, &path, &name, list_menu_bar_agents) {
                 by_path.insert(PathBuf::from(&bundle.path), bundle);
             }
             // Either way, a bundle is sealed: never descend into it.
             continue;
         }
         if is_directory {
-            scan_directory(root, &path, depth + 1, by_path);
+            scan_directory(root, &path, depth + 1, list_menu_bar_agents, by_path);
         }
     }
 }
 
 /// Turns one `*.app` directory into a catalog entry, or `None` when it should
 /// not be listed at all.
-fn read_bundle(root: &Path, path: &Path, name: &str) -> Option<AppBundle> {
+fn read_bundle(
+    root: &Path,
+    path: &Path,
+    name: &str,
+    list_menu_bar_agents: bool,
+) -> Option<AppBundle> {
     let canonical = fs::canonicalize(path).ok()?;
     // A file wearing the `.app` suffix, or a symlink pointing at one: the
     // catalog lists bundles, and the filesystem is the arbiter of what is.
@@ -218,12 +280,19 @@ fn read_bundle(root: &Path, path: &Path, name: &str) -> Option<AppBundle> {
         return None;
     }
     let info = read_info_plist(&plist_path);
-    // Faceless helpers: `LSUIElement` agents and `LSBackgroundOnly` daemons
-    // have no Dock presence and no icon to show. Without this check one
-    // system root alone adds hundreds of them. The flag is read in both the
+    // Background-only daemons have no face anywhere: no Dock presence, no
+    // menu bar, nothing launching them by hand could show. They stay
+    // unlisted in user roots too — an entry Enter cannot show the result of
+    // is a lie about every root it sits in. (Checked before `LSUIElement`
+    // so a bundle flying both flags stays hidden even where agents list.)
+    if plist_agent_flag(&info, "LSBackgroundOnly") {
+        return None;
+    }
+    // Menu-bar agents: listed where the user put them, hidden where the
+    // operating system did — see [`ScanRoot`]. The flag is read in both the
     // boolean form and the string form plists do ship, because a filter that
     // only understands one spelling is a filter some agents walk through.
-    if plist_agent_flag(&info, "LSUIElement") || plist_agent_flag(&info, "LSBackgroundOnly") {
+    if !list_menu_bar_agents && plist_agent_flag(&info, "LSUIElement") {
         return None;
     }
 

@@ -88,6 +88,11 @@ export interface AppSettings {
   retentionDays: number | null;
   denylistedApps: string[];
   linkPreviews: boolean;
+  /**
+   * Whether the palette splits into History and Applications modes (on) or
+   * answers both in one combined list (off).
+   */
+  paletteModes: boolean;
   keyvault: KeyvaultSettings;
 }
 

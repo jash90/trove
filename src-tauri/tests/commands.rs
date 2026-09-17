@@ -388,6 +388,7 @@ async fn settings_use_valid_defaults_and_persist_one_versioned_json_object() {
         retention_days: Some(365),
         denylisted_apps: vec!["com.example.synthetic".to_owned()],
         link_previews: false,
+        palette_modes: false,
         keyvault: Default::default(),
     };
     let saved = commands::save_settings_service(&state, requested.clone())
@@ -416,6 +417,30 @@ async fn settings_use_valid_defaults_and_persist_one_versioned_json_object() {
         commands::get_settings_service(&reopened).await.unwrap(),
         requested
     );
+}
+
+#[tokio::test]
+async fn a_settings_row_written_before_palette_modes_still_reads_with_the_default() {
+    // A row from the version before the setting existed carries no
+    // `paletteModes` at all; reading it must answer with the default, not
+    // with a parse error that would bury every other setting beside it.
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let legacy = serde_json::json!({
+        "schemaVersion": 1,
+        "hotkey": "CommandOrControl+Space",
+        "autostart": false,
+        "retentionDays": null,
+        "denylistedApps": [],
+        "linkPreviews": false
+    })
+    .to_string();
+    state.store.save_setting("app", &legacy).await.unwrap();
+
+    let settings = commands::get_settings_service(&state).await.unwrap();
+
+    assert!(settings.palette_modes, "modes are on until turned off");
+    assert!(!settings.link_previews, "the fields the row did carry hold");
 }
 
 #[tokio::test]
@@ -564,13 +589,13 @@ async fn copy_preparation_restores_text_and_sanitizes_missing_payload_errors() {
         .unwrap();
 
     assert_eq!(
-        commands::prepare_copy_text_service(&state, text.event_id, false)
+        commands::prepare_copy_payload_service(&state, text.event_id)
             .await
             .unwrap(),
-        "tekst do skopiowania"
+        commands::CopyPayload::Text("tekst do skopiowania".to_owned())
     );
     assert_eq!(
-        commands::prepare_copy_text_service(&state, missing.event_id, true)
+        commands::prepare_copy_payload_service(&state, missing.event_id)
             .await
             .unwrap_err(),
         "missing_payload"
@@ -578,22 +603,27 @@ async fn copy_preparation_restores_text_and_sanitizes_missing_payload_errors() {
 }
 
 #[tokio::test]
-async fn plain_text_copy_rejects_present_utf8_image_payload_before_any_clipboard_write() {
+async fn copy_preparation_returns_image_bytes_for_pasting_as_pixels() {
     let directory = tempfile::tempdir().unwrap();
     let state = AppState::open_data_dir(directory.path()).unwrap();
-    let image = state
+    // A real one-pixel PNG: the copy path decodes exactly these bytes back
+    // into pixels, so the fixture has to be an image and not bytes that
+    // merely claim to be one.
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(1, 1, image::Rgba([7, 11, 13, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let image_entry = state
         .store
-        .ingest(image_capture(vec![b'\t'; 32], 1_725_000_000_450))
+        .ingest(image_capture(png.clone(), 1_725_000_000_450))
         .await
         .unwrap();
 
-    let error = commands::prepare_copy_text_service(&state, image.event_id, true)
+    let payload = commands::prepare_copy_payload_service(&state, image_entry.event_id)
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(error, "copy_format_unavailable");
-    assert!(!error.contains("\t"));
-    assert!(!error.contains("image"));
+    assert_eq!(payload, commands::CopyPayload::Image(png));
 }
 
 #[test]
@@ -673,19 +703,19 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
     assert!(saved.get("schema_version").is_none());
 
     let state = app.state::<AppState>();
-    let image = state
-        .store
-        .ingest(image_capture(vec![b'\t'; 32], 1_725_000_000_451));
-    let image = tauri::async_runtime::block_on(image).unwrap();
+    let _ = state;
+    // A stable refusal over the same boundary: an event nobody recorded.
+    // (A present image payload no longer refuses — it pastes — so the
+    // boundary test asks for one that does.)
     let error = tauri::test::get_ipc_response(
         &window,
         ipc_request(
             "copy_event",
-            json!({ "eventId": image.event_id, "plainText": true, "paste": false }),
+            json!({ "eventId": 999_999, "plainText": true, "paste": false }),
         ),
     )
     .unwrap_err();
-    assert_eq!(error, json!("copy_format_unavailable"));
+    assert_eq!(error, json!("history_event_not_found"));
 }
 
 #[cfg(unix)]

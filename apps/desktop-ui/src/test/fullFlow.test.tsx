@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import axe from 'axe-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -24,6 +24,9 @@ const historyList = () =>
  */
 
 const settle = async (): Promise<void> => {
+  // The palette opens on its category chooser; entering the history is
+  // part of settling, the same way a user picks the tile.
+  fireEvent.keyDown(screen.getByRole('searchbox'), { key: '2' });
   await waitFor(() => expect(historyList().getAllByRole('option').length).toBeGreaterThan(0), {
     timeout: 2_000,
   });

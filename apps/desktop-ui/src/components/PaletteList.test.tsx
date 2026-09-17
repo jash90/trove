@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState, type KeyboardEventHandler } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -339,8 +339,11 @@ describe('clipboard palette states', () => {
     const search = vi.fn<ClipboardGateway['search']>(async () => page);
     render(<App gateway={makeGateway(search)} />);
 
-    expect(screen.getByRole('searchbox', { name: 'Search applications, secrets and history' })).toHaveFocus();
+    expect(screen.getByRole('searchbox', { name: 'Search history' })).toHaveFocus();
 
+    // The palette opens on its categories; the second tile digit enters
+    // the history these tests are about.
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: '2' });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150);
     });
@@ -368,11 +371,12 @@ describe('clipboard palette states', () => {
       rankedTruncated: false,
     };
     render(<App gateway={makeGateway(async () => page)} />);
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: '2' });
     await screen.findByRole('listbox', { name: 'Applications, secrets and history results' });
     const selectedRow = paletteList().getByRole('option', {
       name: /Synthetic clipboard item 2/,
     });
-    const search = screen.getByRole('searchbox', { name: 'Search applications, secrets and history' });
+    const search = screen.getByRole('searchbox', { name: 'Search history' });
 
     await user.click(selectedRow);
 
@@ -391,8 +395,9 @@ describe('clipboard palette states', () => {
       rankedTruncated: false,
     };
     render(<App gateway={makeGateway(async () => page)} />);
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: '2' });
     await screen.findByRole('listbox', { name: 'Applications, secrets and history results' });
-    const search = screen.getByRole('searchbox', { name: 'Search applications, secrets and history' });
+    const search = screen.getByRole('searchbox', { name: 'Search history' });
 
     await user.selectOptions(screen.getByRole('combobox', { name: 'Type filter' }), 'Images');
 
@@ -403,6 +408,7 @@ describe('clipboard palette states', () => {
     vi.useFakeTimers();
     const pending = new Promise<HistoryPage>(() => undefined);
     const { rerender } = render(<App gateway={makeGateway(() => pending)} />);
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: '2' });
 
     expect(screen.getByRole('status')).toHaveTextContent('Loading history');
 
@@ -431,7 +437,7 @@ describe('clipboard palette states', () => {
     expect(alert).not.toHaveTextContent('archive.json');
   });
 
-  it('speaks for the catalog when the history answered and had nothing', async () => {
+  it('speaks for the catalog only in applications mode, where the catalog is on screen', async () => {
     vi.useFakeTimers();
     const empty = async (): Promise<HistoryPage> => ({
       items: [],
@@ -439,13 +445,29 @@ describe('clipboard palette states', () => {
       rankedTruncated: false,
     });
 
-    // History ready and empty, catalog still reading the bundles: without a
-    // state of its own the panel would say nothing at all.
+    // History ready and empty while the catalog is still reading the
+    // bundles: history mode owes the user the history's own state, not a
+    // word about a list that is not on screen.
     const loadingCatalog = {
       ...makeGateway(empty),
       listApps: vi.fn(() => new Promise<AppEntry[]>(() => undefined)),
     } as unknown as ClipboardGateway;
     const { rerender } = render(<App gateway={loadingCatalog} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    // The palette opens on its categories; the second tile digit enters
+    // the history, whose state is then worth speaking.
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: '2' });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(screen.getByRole('status')).toHaveTextContent('The history is empty');
+
+    // ⌘1 flips straight to the applications side, and there the reading
+    // state says so: without a state of its own the panel would say
+    // nothing at all.
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: '1', metaKey: true });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150);
     });
