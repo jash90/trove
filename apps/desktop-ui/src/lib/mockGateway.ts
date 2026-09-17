@@ -11,6 +11,16 @@ import {
 
 let historyItems = SYNTHETIC_HISTORY_ITEMS.map((item) => ({ ...item }));
 let chatSeq = 0;
+let scanSeq = 0;
+let typesafeSettings: import('./contracts').TypeSafeSettings = { apiKey: '' };
+let scanProgress: import('./contracts').TypeSafeScanProgress = {
+  runId: '',
+  state: 'completed',
+  processed: 0,
+  total: 0,
+  flagged: [],
+  errorCode: null,
+};
 let chatStreamListener: ((event: import('./contracts').ChatStreamEvent) => void) | null = null;
 let chatSettings: import('./contracts').ChatSettings = {
   provider: 'zai',
@@ -211,6 +221,46 @@ export const mockGateway: ClipboardGateway = {
     return { ...chatSettings };
   },
   openChatWindow: async () => undefined,
+  getTypeSafeSettings: async () => ({ ...typesafeSettings }),
+  saveTypeSafeSettings: async (next) => {
+    typesafeSettings = { ...next };
+    return { ...typesafeSettings };
+  },
+  typesafeScanStart: async () => {
+    const runId = `scan-${++scanSeq}`;
+    scanProgress = {
+      runId,
+      state: 'running',
+      processed: 0,
+      total: 40,
+      flagged: [],
+      errorCode: null,
+    };
+    const ticker = setInterval(() => {
+      if (scanProgress?.runId !== runId || scanProgress.state !== 'running') {
+        clearInterval(ticker);
+        return;
+      }
+      scanProgress = {
+        ...scanProgress,
+        processed: Math.min(scanProgress.processed + 10, scanProgress.total),
+        flagged:
+          scanProgress.processed >= 20 && scanProgress.flagged.length === 0
+            ? [
+                {
+                  eventId: 2,
+                  preview: 'Moje hasło do banku: Kropka12!Malina',
+                  probability: 0.98,
+                },
+              ]
+            : scanProgress.flagged,
+        state: scanProgress.processed >= scanProgress.total ? 'completed' : 'running',
+      };
+    }, 400);
+    return { runId };
+  },
+  typesafeScanStatus: async () => ({ ...scanProgress }),
+  typesafeScanStop: async () => true,
   onChatEvent: (listener) => {
     chatStreamListener = listener;
     return () => {

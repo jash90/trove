@@ -529,7 +529,7 @@ describe('settings tabs', () => {
     await loadSettings();
 
     const tabs = screen.getAllByRole('tab');
-    expect(tabs).toHaveLength(7);
+    expect(tabs).toHaveLength(8);
     expect(screen.getByRole('tab', { name: 'Shortcut' })).toHaveAttribute('aria-selected', 'true');
 
     // The point of tabs: the other five sections are not on screen competing for the eye.
@@ -848,5 +848,46 @@ describe('expiryLabel', () => {
     expect(expiryLabel(now - 1, now)).toContain('Press Connect again');
     // Absent is not an error: the line simply is not shown, and the pairing is unaffected.
     expect(expiryLabel(null, now)).toBeNull();
+  });
+
+  it('saves the TypeSafe key and runs a scan with flags and delete', async () => {
+    const user = userEvent.setup();
+    const saveTypeSafeSettings = vi.fn(async () => ({ apiKey: 'apikey_test' }));
+    const scanStatus = vi.fn(async () => ({
+      runId: 'scan-1',
+      state: 'completed' as const,
+      processed: 40,
+      total: 40,
+      flagged: [
+        { eventId: 7, preview: 'Moje hasło do banku: Kropka12!Malina', probability: 0.98 },
+      ],
+      errorCode: null,
+    }));
+    const scanStart = vi.fn(async () => ({ runId: 'scan-1' }));
+    const deleteEvent = vi.fn(async () => undefined);
+    const gateway = makeGateway({
+      saveTypeSafeSettings,
+      typesafeScanStart: scanStart,
+      typesafeScanStatus: scanStatus,
+      deleteEvent,
+    });
+    render(<SettingsPanel gateway={gateway} />);
+    await loadSettings();
+
+    // The tab strip reaches the privacy pane by its label.
+    await openTab('Privacy');
+
+    const key = screen.getByLabelText('TypeSafe API key');
+    await user.clear(key);
+    await user.type(key, 'apikey_test');
+    await user.click(screen.getByRole('button', { name: 'Save key' }));
+    expect(saveTypeSafeSettings).toHaveBeenCalledWith({ apiKey: 'apikey_test' });
+
+    await user.click(screen.getByRole('button', { name: 'Scan history' }));
+    expect(scanStart).toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByText(/entries scanned, 1 worth a look/u)).toBeVisible());
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    expect(deleteEvent).toHaveBeenCalledWith(7);
   });
 });
