@@ -97,8 +97,20 @@ export interface ClipboardGateway {
   /**
    * The whole launchable catalog at once. The palette filters as the user
    * types, so there is no per-keystroke round trip to design here.
+   *
+   * When the core already has a catalog, the answer is that copy — the
+   * palette never waits — and a background rescan starts beside it.
    */
   listApps(): Promise<AppEntry[]>;
+  /**
+   * Calls back when a background catalog rescan found something new:
+   * an application appeared or vanished since the last answer. The palette
+   * refetches `listApps` on it, which returns the fresh copy at once.
+   *
+   * Optional, like every core signal: a gateway with no live core behind
+   * it has nothing to report.
+   */
+  onAppsChanged?(listener: () => void): () => void;
   /** Starts an application by the catalog path it was listed under. */
   launchApp(path: string): Promise<void>;
   /**
@@ -212,6 +224,7 @@ export const tauriGateway: ClipboardGateway = {
   getStorageStats: () =>
     invoke<StorageStats>('get_storage_stats').then(validateStorageStats),
   listApps: () => invoke<AppEntry[]>('list_apps').then(validateAppCatalog),
+  onAppsChanged: (listener) => subscribe('apps-catalog-changed', listener),
   launchApp: (path) => invoke<void>('launch_app', { path }),
   getAppIcon: (path) => invoke<Thumbnail | null>('get_app_icon', { path }),
   openAccessibilitySettings: () => invoke<void>('open_accessibility_settings_window'),

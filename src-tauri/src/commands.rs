@@ -3,7 +3,7 @@ use std::{collections::HashSet, path::PathBuf};
 use base64::Engine;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use trove_core::ContentFlags;
 use trove_import::{ImportAnalysis, ImportError, ImportProgress, ImportRunHandle};
@@ -485,14 +485,38 @@ pub async fn reveal_source(state: tauri::State<'_, AppState>, event_id: i64) -> 
 /// list at once — a few hundred entries, tens of kilobytes — because the
 /// palette filters as the user types, and an IPC round trip per keystroke
 /// would reintroduce exactly the latency the history list debounces away.
-pub async fn list_apps_service(state: &AppState, now_ms: i64) -> Result<Vec<AppBundle>, String> {
+///
+/// The first call in a run has nothing cached and pays the scan on the
+/// spot. Every later call answers from the cache immediately — the palette
+/// never waits and never blanks — while a background rescan runs beside it;
+/// when that scan finds a catalog different from the one before it,
+/// `on_refreshed` says so and the palette refetches. A scan that changed
+/// nothing says nothing, which is what keeps the refetch chain from
+/// feeding itself.
+pub async fn list_apps_service(
+    state: &AppState,
+    on_refreshed: impl FnOnce(bool) + Send + 'static,
+) -> Result<Vec<AppBundle>, String> {
+    if let Some(cached) = state.launcher.snapshot() {
+        state.launcher.refresh_in_background(on_refreshed);
+        return Ok(cached);
+    }
     let launcher = state.launcher.clone();
-    run_blocking("apps_unavailable", move || Ok(launcher.catalog(now_ms))).await
+    let catalog = run_blocking("apps_unavailable", move || Ok(launcher.refresh())).await?;
+    Ok(catalog)
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn list_apps(state: tauri::State<'_, AppState>) -> Result<Vec<AppBundle>, String> {
-    list_apps_service(state.inner(), current_time_ms()).await
+pub async fn list_apps<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<AppBundle>, String> {
+    let emitter = move |changed: bool| {
+        if changed {
+            let _ = app.emit(crate::state::APPS_CATALOG_CHANGED_EVENT, ());
+        }
+    };
+    list_apps_service(state.inner(), emitter).await
 }
 
 pub async fn launch_app_service(state: &AppState, path: String) -> Result<(), String> {

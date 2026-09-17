@@ -12,7 +12,7 @@ use std::{
 use tauri::Manager;
 use trove_app::{
     commands::{self, AppSettingsDto},
-    state::{AppState, LAUNCHER_CACHE_TTL_MS, LauncherState},
+    state::{AppState, LauncherState},
 };
 use trove_search::SearchRequest;
 use trove_store::{StoreConfig, StoreHandle};
@@ -738,7 +738,7 @@ async fn list_apps_returns_a_cached_camel_case_catalog_from_the_injected_roots()
     make_synthetic_app(apps_root.path(), "Synthetic.app", "Synthetic");
     state.launcher = LauncherState::scanning(vec![apps_root.path().to_path_buf()]);
 
-    let catalog = commands::list_apps_service(&state, 1_000).await.unwrap();
+    let catalog = commands::list_apps_service(&state, |_| {}).await.unwrap();
 
     assert_eq!(catalog.len(), 1);
     let json = serde_json::to_value(&catalog).unwrap();
@@ -747,27 +747,76 @@ async fn list_apps_returns_a_cached_camel_case_catalog_from_the_injected_roots()
     assert!(json[0].get("bundle_id").is_none());
 }
 
+/// A poll with a deadline, for facts a detached scan thread produces
+/// whenever it produces them. The scan over a two-bundle temporary root
+/// costs microseconds; the deadline only guards against a hang reading as
+/// a flake forever.
+fn eventually<F: FnMut() -> bool>(mut condition: F) {
+    for _ in 0..500 {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("condition never held before the deadline");
+}
+
 #[tokio::test]
-async fn the_launcher_catalog_is_rescanned_only_after_the_ttl_expires() {
+async fn a_cached_list_apps_answers_from_the_cache_and_rescans_in_the_background() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = AppState::open_data_dir(directory.path()).unwrap();
     let apps_root = tempfile::tempdir().unwrap();
     make_synthetic_app(apps_root.path(), "Early.app", "Early");
     state.launcher = LauncherState::scanning(vec![apps_root.path().to_path_buf()]);
 
-    let first = commands::list_apps_service(&state, 1_000).await.unwrap();
+    // The cold call has nothing cached and pays the scan itself.
+    let first = commands::list_apps_service(&state, |_| {}).await.unwrap();
     assert_eq!(first.len(), 1);
 
-    // Installed after the scan: invisible until the cache ages out, so an
-    // open palette does not pay for a directory walk on every keystroke.
+    // Installed after the scan: the next call must answer instantly with
+    // what it already has — the palette never blanks or waits — while a
+    // background scan notices the newcomer and says so exactly once.
     make_synthetic_app(apps_root.path(), "Late.app", "Late");
-    let still_cached = commands::list_apps_service(&state, 1_500).await.unwrap();
-    assert_eq!(still_cached.len(), 1);
+    let announced = Arc::new(AtomicBool::new(false));
+    let announced_for_callback = Arc::clone(&announced);
+    let stale = commands::list_apps_service(&state, move |changed| {
+        assert!(changed, "a brand-new application is a change");
+        announced_for_callback.store(true, Ordering::SeqCst);
+    })
+    .await
+    .unwrap();
+    assert_eq!(stale.len(), 1);
 
-    let refreshed = commands::list_apps_service(&state, 1_000 + LAUNCHER_CACHE_TTL_MS + 1)
-        .await
-        .unwrap();
-    assert_eq!(refreshed.len(), 2);
+    eventually(|| announced.load(Ordering::SeqCst));
+    // The announcement carries the payload: a refetch after it sees the new
+    // catalog without any further announcement, and that silence is what
+    // keeps the refetch chain from feeding itself.
+    let refetched = commands::list_apps_service(&state, |_| {
+        panic!("an unchanged catalog has nothing to announce");
+    })
+    .await
+    .unwrap();
+    assert_eq!(refetched.len(), 2);
+}
+
+#[tokio::test]
+async fn an_unchanged_background_scan_stays_silent() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = AppState::open_data_dir(directory.path()).unwrap();
+    let apps_root = tempfile::tempdir().unwrap();
+    make_synthetic_app(apps_root.path(), "Stable.app", "Stable");
+    state.launcher = LauncherState::scanning(vec![apps_root.path().to_path_buf()]);
+    commands::list_apps_service(&state, |_| {}).await.unwrap();
+
+    let verdict = Arc::new(AtomicBool::new(true));
+    let verdict_for_callback = Arc::clone(&verdict);
+    commands::list_apps_service(&state, move |changed| {
+        verdict_for_callback.store(changed, Ordering::SeqCst);
+    })
+    .await
+    .unwrap();
+
+    eventually(|| !verdict.load(Ordering::SeqCst));
 }
 
 #[tokio::test]
@@ -2066,7 +2115,7 @@ async fn a_cryptex_firmlink_application_catalogues_and_answers_an_icon() {
     let directory = tempfile::tempdir().unwrap();
     let state = AppState::open_data_dir(directory.path()).unwrap();
 
-    let catalog = state.launcher.catalog(0);
+    let catalog = state.launcher.refresh();
     assert!(
         catalog.iter().any(|app| app.name == "Safari"),
         "the cryptex firmlink must list Safari with the everyday roots"
