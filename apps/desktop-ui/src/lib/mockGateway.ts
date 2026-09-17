@@ -130,6 +130,7 @@ export const mockGateway: ClipboardGateway = {
   keyvaultResetPairing: async () => undefined,
   // The browser preview has no core behind it, so nothing ever changes.
   onHistoryChanged: () => () => undefined,
+  onAppsChanged: () => () => undefined,
   onLinkPreviewReady: () => () => undefined,
   getThumbnail: async (eventId) =>
     eventId === 103 ? { mimeType: 'image/png', base64: 'c3ludGhldGlj' } : null,

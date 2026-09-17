@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -8,11 +9,11 @@ use trove_import::ImportService;
 use trove_launcher::AppBundle;
 use trove_store::{DATABASE_FILENAME, StoreConfig, StoreHandle};
 
-/// How long a launcher catalog stays answerable without a rescan. Scanning a
-/// few hundred plists costs tens of milliseconds the palette should not pay
-/// on every entry; five minutes bounds how long a freshly installed
-/// application can stay invisible.
-pub const LAUNCHER_CACHE_TTL_MS: i64 = 5 * 60 * 1000;
+/// Announced when a background launcher scan produced a catalog different
+/// from the one before it. The palette refetches on this signal — and only
+/// on it, which is also the loop guard: a refetch that finds the catalog
+/// unchanged announces nothing, so the refresh chain ends by itself.
+pub const APPS_CATALOG_CHANGED_EVENT: &str = "apps-catalog-changed";
 
 /// One rendered application icon, in the shape the bridge carries images.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -23,23 +24,22 @@ pub struct AppIconDto {
 }
 
 /// The application catalog and the roots it was scanned from.
-///
-/// `now_ms` is a parameter of [`LauncherState::catalog`], not a wall-clock
-/// read inside it: staleness is a fact a test can state directly instead of
-/// one it has to sleep and hope for.
 #[derive(Clone)]
 pub struct LauncherState {
     roots: Arc<[PathBuf]>,
     cached: Arc<Mutex<Option<CachedCatalog>>>,
+    /// Whether a background scan is running. A palette that gains focus
+    /// repeatedly — the shortcut, the menu bar, Cmd-Tab — must not queue a
+    /// scan per focus; the one already running answers for all of them.
+    scan_in_flight: Arc<AtomicBool>,
     /// Rendered icons, remembered per canonical path. An icon is a fact
-    /// about a bundle that changes only with the bundle, so it outlives the
-    /// catalog's TTL; the map grows with the distinct applications actually
+    /// about a bundle that changes only with the bundle, so it outlives any
+    /// catalog refresh; the map grows with the distinct applications actually
     /// shown, which the virtualized list keeps to a handful at a time.
     icons: Arc<Mutex<HashMap<String, AppIconDto>>>,
 }
 
 struct CachedCatalog {
-    scanned_at_ms: i64,
     catalog: Vec<AppBundle>,
 }
 
@@ -48,6 +48,7 @@ impl LauncherState {
         Self {
             roots: Arc::from(roots),
             cached: Arc::new(Mutex::new(None)),
+            scan_in_flight: Arc::new(AtomicBool::new(false)),
             icons: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -57,26 +58,74 @@ impl LauncherState {
         &self.roots
     }
 
-    /// Returns the catalog, rescanning only when the cached copy has aged
-    /// out. The scan is blocking filesystem work; callers wrap it in
-    /// `spawn_blocking` at the command edge.
-    pub fn catalog(&self, now_ms: i64) -> Vec<AppBundle> {
+    /// The cached catalog, whatever its age. A refresh swaps the catalog in
+    /// only once the fresh one is complete, so this never observes a scan in
+    /// progress — the answer is either the whole previous catalog or none.
+    pub fn snapshot(&self) -> Option<Vec<AppBundle>> {
+        self.cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|entry| entry.catalog.clone())
+    }
+
+    /// Scans synchronously and replaces the cache. The cold path: the first
+    /// palette opening has nothing to show yet and pays the scan once. The
+    /// cache lock is held across the scan, so concurrent cold callers
+    /// serialize — and the one that waited on the lock takes the answer the
+    /// one that held it already wrote, rather than scanning again.
+    pub fn refresh(&self) -> Vec<AppBundle> {
         let mut cached = self
             .cached
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(entry) = cached
-            .as_ref()
-            .filter(|entry| now_ms.saturating_sub(entry.scanned_at_ms) < LAUNCHER_CACHE_TTL_MS)
-        {
+        if let Some(entry) = cached.as_ref() {
             return entry.catalog.clone();
         }
         let catalog = trove_launcher::scan_applications(&self.roots);
         *cached = Some(CachedCatalog {
-            scanned_at_ms: now_ms,
             catalog: catalog.clone(),
         });
         catalog
+    }
+
+    /// Scans on a background thread and swaps the result into the cache once
+    /// complete, leaving [`LauncherState::snapshot`] answerable throughout.
+    ///
+    /// Returns `false` — without spawning anything — when a scan is already
+    /// running: that one will finish this caller's work, and its completion
+    /// callback speaks for both. `on_done` receives whether the fresh catalog
+    /// differs from the one it replaced, so the caller can announce changes
+    /// and stay silent otherwise; the flag is released before the callback
+    /// runs, so a refetch the callback triggers can start its own scan.
+    pub fn refresh_in_background(&self, on_done: impl FnOnce(bool) + Send + 'static) -> bool {
+        if self
+            .scan_in_flight
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return false;
+        }
+        let roots = Arc::clone(&self.roots);
+        let cached = Arc::clone(&self.cached);
+        let scan_in_flight = Arc::clone(&self.scan_in_flight);
+        std::thread::spawn(move || {
+            let catalog = trove_launcher::scan_applications(&roots);
+            let changed = {
+                let mut guard = cached
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let changed = match guard.as_ref() {
+                    Some(previous) => previous.catalog != catalog,
+                    // Nothing to replace: everything about the catalog is new.
+                    None => true,
+                };
+                *guard = Some(CachedCatalog { catalog });
+                changed
+            };
+            scan_in_flight.store(false, Ordering::Release);
+            on_done(changed);
+        });
+        true
     }
 
     /// Returns the rendered icon for a catalog path, remembered after the
@@ -108,9 +157,10 @@ pub struct AppState {
     /// mutable state behind a lock rather than globals, so tests can hold a
     /// coordinator of their own.
     pub previews: Mutex<crate::links::FetchCoordinator>,
-    /// The launcher's application catalog. Scanned lazily and cached with a
-    /// TTL, because the palette is hidden most of the time and a startup
-    /// scan would cost every launch for a window nobody opened.
+    /// The launcher's application catalog. Scanned lazily on the first ask
+    /// and refreshed in the background on every later one, because the
+    /// palette is hidden most of the time and a startup scan would cost
+    /// every launch for a window nobody opened.
     pub launcher: LauncherState,
 }
 
@@ -198,6 +248,103 @@ fn adopt_legacy_data_dir(current: PathBuf, legacy: Option<PathBuf>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
+
+    /// A throwaway `.app` with a handwritten XML plist, in the shape the
+    /// launcher crate's own fixtures use: these tests never depend on what
+    /// is installed on the machine.
+    fn synthetic_app(root: &Path, dir_name: &str, bundle_name: &str) {
+        let contents = root.join(dir_name).join("Contents");
+        std::fs::create_dir_all(&contents).unwrap();
+        let info = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\
+             <plist version=\"1.0\"><dict><key>CFBundleName</key><string>{bundle_name}</string></dict></plist>"
+        );
+        std::fs::write(contents.join("Info.plist"), info).unwrap();
+    }
+
+    #[test]
+    fn snapshot_answers_only_what_a_completed_scan_left_behind() {
+        let root = tempfile::tempdir().unwrap();
+        synthetic_app(root.path(), "One.app", "One");
+        let launcher = LauncherState::scanning(vec![root.path().to_path_buf()]);
+
+        assert!(launcher.snapshot().is_none(), "nothing scanned yet");
+        assert_eq!(launcher.refresh().len(), 1);
+        assert_eq!(launcher.snapshot().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_refresh_in_flight_refuses_a_second_one_and_speaks_for_it() {
+        let root = tempfile::tempdir().unwrap();
+        synthetic_app(root.path(), "One.app", "One");
+        let launcher = LauncherState::scanning(vec![root.path().to_path_buf()]);
+        launcher.refresh();
+
+        // The previous catalog is answerable before the refresh starts.
+        assert_eq!(launcher.snapshot().map(|catalog| catalog.len()), Some(1));
+
+        // Hold the cache lock: the background scan finishes its directory
+        // walk and then blocks at the swap, keeping `scan_in_flight` set —
+        // the exact window a second palette opening would land in.
+        let guard = launcher
+            .cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (spoken, spoke) = mpsc::channel();
+        assert!(
+            launcher.refresh_in_background(move |changed| {
+                spoken.send(changed).unwrap();
+            }),
+            "no scan was running yet"
+        );
+        // The scan thread reaches the lock and waits; give it the chance.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !launcher.refresh_in_background(|_| {}),
+            "a scan is already in flight"
+        );
+        drop(guard);
+
+        // The in-flight flag is released before the callback runs, so the
+        // scan the callback may trigger is free to start.
+        let changed = spoke
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the background scan must finish once unblocked");
+        assert!(!changed, "nothing was installed in between");
+        assert_eq!(launcher.snapshot().map(|catalog| catalog.len()), Some(1));
+        let (spoken_again, spoke_again) = mpsc::channel();
+        assert!(
+            launcher.refresh_in_background(move |changed| {
+                spoken_again.send(changed).unwrap();
+            }),
+            "the flag is free again after the callback"
+        );
+        spoke_again
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the second scan must finish too");
+    }
+
+    #[test]
+    fn a_background_refresh_replaces_the_catalog_only_when_complete() {
+        let root = tempfile::tempdir().unwrap();
+        synthetic_app(root.path(), "One.app", "One");
+        let launcher = LauncherState::scanning(vec![root.path().to_path_buf()]);
+        assert_eq!(launcher.refresh().len(), 1);
+
+        synthetic_app(root.path(), "Two.app", "Two");
+        let (spoken, spoke) = mpsc::channel();
+        assert!(launcher.refresh_in_background(move |changed| {
+            spoken.send(changed).unwrap();
+        }));
+
+        let changed = spoke
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the scan must complete");
+        assert!(changed, "the catalog gained a bundle");
+        assert_eq!(launcher.snapshot().unwrap().len(), 2);
+    }
 
     fn with_history(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();

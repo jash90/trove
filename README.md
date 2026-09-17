@@ -136,15 +136,27 @@ history entry pastes), and `Escape` clears the query — nothing else, because
 with one field there is no mode to back out of and hiding the palette remains
 the global shortcut's job.
 
-The catalog is scanned lazily (never at startup), cached for five minutes, and
-covers `/Applications`, `/System/Applications`, `~/Applications`,
-`/System/Library/CoreServices` and `/Applications/Setapp` when present — two
-directory levels deep, so `/Applications/Utilities` is included. Bundles that
-mark themselves `LSUIElement` or `LSBackgroundOnly` (in either the boolean or
-the string form plists ship) are skipped: they are the faceless helpers, not
-applications anyone launches by name. Icons are asked for one row at a time,
-rendered by the core through NSWorkspace into a small PNG, and remembered for
-the session; a bundle with no icon to draw keeps the placeholder glyph.
+The catalog is scanned lazily — never at startup — on the palette's first
+opening, and every later opening re-checks the disk: the list answers
+instantly from what the last scan found while a fresh scan runs in the
+background beside it, and only when that scan sees an application appear or
+vanish does the list swap, whole, to the new catalog. Rows never disappear
+mid-refresh, and a freshly installed application shows up in the palette
+that is already open. The scan covers `/Applications`,
+`/System/Applications`, `~/Applications`, `/System/Library/CoreServices`
+and `/Applications/Setapp` when present — two directory levels deep, so
+`/Applications/Utilities` is included. Bundles that mark themselves
+`LSUIElement` or `LSBackgroundOnly` (in either the boolean or the string
+form plists ship) are skipped: they are the faceless helpers, not
+applications anyone launches by name. Typing narrows the catalog on the
+client as you type: a query matches the name's beginning, the beginning of
+any of its words (split on whatever separator the bundle shipped), its
+initials ("vsc" finds "Visual Studio Code"), the bundle directory's own
+name when the plist display name disagrees, the characters in order
+("chrm" finds "Chrome"), or the bundle identifier — best matches first,
+ties alphabetical. Icons are asked for one row at a time, rendered by the
+core through NSWorkspace into a small PNG, and remembered for the session;
+a bundle with no icon to draw keeps the placeholder glyph.
 
 Starting one is deliberately narrow: the path arriving from the interface must
 canonicalize to an `.app` directory under a root this application scanned, and
