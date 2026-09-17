@@ -2235,3 +2235,9 @@
   max-height: 180px;
   overflow-y: auto;
 }
+
+.chat-composer__refused {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+}

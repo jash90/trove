@@ -79,6 +79,7 @@ const ChatConversation = (): React.JSX.Element => {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [turnId, setTurnId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [refusedFiles, setRefusedFiles] = useState<string[]>([]);
   const [preview, setPreview] = useState<{ language: 'html' | 'svg' | 'jsx'; source: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -191,12 +192,25 @@ const ChatConversation = (): React.JSX.Element => {
     inputRef.current?.focus();
   }, [draft, attachments, messages, turnId, capable, gateway]);
 
+  /// What a file can be told it cannot be: the chat wires carry text and
+  /// images and nothing else — a PDF has no inline lane on chat
+  /// completions — so a file outside that is said so, by name, rather than
+  /// dropped in silence that reads as "images only".
+  const isTextFile = (file: File): boolean =>
+    file.type.startsWith('text/') ||
+    /\.(md|txt|json|csv|ya?ml|toml|rs|ts|tsx|js|jsx|py|go|java|c|h|cpp|sh|html|css|sql|swift|kt)$/iu.test(
+      file.name,
+    );
+
   const readAttachedFiles = (files: FileList | null): void => {
     if (files === null) return;
-    const next: ChatAttachment[] = [];
+    const refused: string[] = [];
     for (const file of Array.from(files).slice(0, 4)) {
       if (file.type.startsWith('image/')) {
-        if (file.size > 3 * 1024 * 1024) continue;
+        if (file.size > 3 * 1024 * 1024) {
+          refused.push(`${file.name} is over 3 MB`);
+          continue;
+        }
         const reader = new FileReader();
         reader.onload = () => {
           const dataUrl = String(reader.result ?? '');
@@ -207,8 +221,11 @@ const ChatConversation = (): React.JSX.Element => {
           ]);
         };
         reader.readAsDataURL(file);
-      } else if (file.type.startsWith('text/') || /\.(md|txt|json|csv|ya?ml|toml|rs|ts|tsx|js|jsx|py|go|java|c|h|cpp|sh|html|css|sql|swift|kt)$/iu.test(file.name)) {
-        if (file.size > 256 * 1024) continue;
+      } else if (isTextFile(file)) {
+        if (file.size > 256 * 1024) {
+          refused.push(`${file.name} is over 256 KB`);
+          continue;
+        }
         const reader = new FileReader();
         reader.onload = () => {
           setAttachments((previous) => [
@@ -217,9 +234,14 @@ const ChatConversation = (): React.JSX.Element => {
           ]);
         };
         reader.readAsText(file);
+      } else {
+        refused.push(`${file.name} — only images and text files can ride along`);
       }
     }
-    void Promise.all(next);
+    if (refused.length > 0) {
+      setRefusedFiles(refused);
+      setTimeout(() => setRefusedFiles([]), 6000);
+    }
   };
 
   const stop = useCallback((): void => {
@@ -370,6 +392,11 @@ const ChatConversation = (): React.JSX.Element => {
       </div>
 
       <footer className="chat-composer">
+        {refusedFiles.length > 0 ? (
+          <p className="chat-composer__refused" role="status">
+            {refusedFiles.join(' · ')}
+          </p>
+        ) : null}
         {attachments.length > 0 ? (
           <p className="chat-composer__files">
             {attachments.map((attachment, index) => (

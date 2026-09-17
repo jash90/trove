@@ -232,6 +232,22 @@ describe('ChatWindow', () => {
     expect(screen.queryByRole('dialog', { name: 'Artifact preview' })).toBeNull();
   });
 
+  it('says which files it cannot take, by name, instead of silence', async () => {
+    const user = userEvent.setup();
+    render(<ChatWindow gateway={mockGateway} />);
+
+    const input = screen.getByLabelText('Attach files', { selector: 'input' });
+    const pdf = new File(['%PDF-1.4 binary'], 'report.pdf', { type: 'application/pdf' });
+    fireEvent.change(input, { target: { files: [pdf] } });
+
+    const note = await screen.findByText(/report\.pdf/u);
+    expect(note.textContent).toContain('only images and text');
+    // A text file beside it still rides along.
+    const txt = new File(['hello'], 'note.txt', { type: 'text/plain' });
+    fireEvent.change(input, { target: { files: [txt] } });
+    await waitFor(() => expect(screen.getByText(/note\.txt/u)).toBeVisible());
+  });
+
   it('shows Shift+Enter as the newline, Enter as the send', async () => {
     const user = userEvent.setup();
     const gateway = streamGateway();
