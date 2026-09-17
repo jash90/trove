@@ -15,6 +15,8 @@ import {
   type ChatSettings,
   type ChatStreamEvent,
   type ChatTurn,
+  type TypeSafeScanProgress,
+  type TypeSafeSettings,
   type CopyResult,
   type ExportSummary,
   type HistoryPage,
@@ -105,6 +107,16 @@ export interface ClipboardGateway {
   saveChatSettings?(settings: ChatSettings): Promise<ChatSettings>;
   /** Opens the chat window, its own window beside the palette. */
   openChatWindow?(): Promise<void>;
+  /**
+   * The privacy scan: a deliberate, owner-started look through the local
+   * history for entries that should not be sitting in it. Sends the text
+   * of each entry and nothing else, to TypeSafe, with the owner's key.
+   */
+  getTypeSafeSettings?(): Promise<TypeSafeSettings>;
+  saveTypeSafeSettings?(settings: TypeSafeSettings): Promise<TypeSafeSettings>;
+  typesafeScanStart?(): Promise<{ runId: string }>;
+  typesafeScanStatus?(): Promise<TypeSafeScanProgress>;
+  typesafeScanStop?(): Promise<boolean>;
   /**
    * Calls back for every chat stream event: tokens as they arrive, the
    * settle when the turn ends — by answer, refusal or stop.
@@ -275,6 +287,12 @@ export const tauriGateway: ClipboardGateway = {
   saveChatSettings: (settings) =>
     invoke<ChatSettings>('save_chat_settings', { settings }),
   openChatWindow: () => invoke<void>('open_chat_window'),
+  getTypeSafeSettings: () => invoke<TypeSafeSettings>('get_typesafe_settings'),
+  saveTypeSafeSettings: (settings) =>
+    invoke<TypeSafeSettings>('save_typesafe_settings', { settings }),
+  typesafeScanStart: () => invoke<{ runId: string }>('typesafe_scan_start'),
+  typesafeScanStatus: () => invoke<TypeSafeScanProgress>('typesafe_scan_status'),
+  typesafeScanStop: () => invoke<boolean>('typesafe_scan_stop'),
   onChatEvent: (listener) => {
     const stopDelta = subscribe<{ id: string; part: string; text: string }>(
       'chat-delta',

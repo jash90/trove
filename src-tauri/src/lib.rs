@@ -8,6 +8,7 @@ pub mod maintenance;
 pub mod monitor;
 pub mod state;
 pub mod tray;
+pub mod typesafe;
 
 use tauri::Manager;
 

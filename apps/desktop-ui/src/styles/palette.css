@@ -2241,3 +2241,103 @@
   color: var(--muted);
   font-size: 11px;
 }
+
+/* The privacy scan tab: key, button, progress, and the flags it found. */
+
+.privacy-scan__actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.privacy-scan__run {
+  cursor: pointer;
+  padding: 8px 14px;
+  color: var(--paper);
+  background: var(--accent);
+  border: 0;
+  border-radius: 8px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.privacy-scan__run:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.privacy-scan__stop {
+  cursor: pointer;
+  padding: 8px 14px;
+  color: var(--muted);
+  background: #fbfaf6;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.privacy-scan__bar {
+  height: 6px;
+  margin: 10px 0;
+  border-radius: 4px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.privacy-scan__fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 300ms ease-out;
+}
+
+.privacy-scan__flags {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.privacy-scan__flag {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--paper-raised);
+}
+
+.privacy-scan__flag-preview {
+  flex: 1;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.privacy-scan__flag-probability {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.privacy-scan__flag-delete {
+  cursor: pointer;
+  padding: 4px 10px;
+  color: #9d3b3b;
+  background: transparent;
+  border: 1px solid #e2b5b5;
+  border-radius: 7px;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.privacy-scan__flag-delete:hover {
+  background: #fdf3f3;
+}

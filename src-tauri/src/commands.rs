@@ -67,6 +67,11 @@ macro_rules! trove_command_registry {
             save_generated_file => $crate::commands::save_generated_file,
             open_external_url => $crate::commands::open_external_url,
             copy_chat_text => $crate::commands::copy_chat_text,
+            get_typesafe_settings => $crate::commands::get_typesafe_settings,
+            save_typesafe_settings => $crate::commands::save_typesafe_settings,
+            typesafe_scan_start => $crate::commands::typesafe_scan_start,
+            typesafe_scan_status => $crate::commands::typesafe_scan_status,
+            typesafe_scan_stop => $crate::commands::typesafe_scan_stop,
             get_chat_settings => $crate::commands::get_chat_settings,
             save_chat_settings => $crate::commands::save_chat_settings,
             open_chat_window => $crate::commands::open_chat_window,
@@ -1143,6 +1148,40 @@ pub fn save_generated_file(path: String, contents: String) -> Result<(), String>
 #[tauri::command(rename_all = "camelCase")]
 pub fn open_external_url(url: String) -> Result<(), String> {
     crate::chat::open_external_url(&url)
+}
+
+/// Reads the privacy-scan settings (the API key, and nothing else).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_typesafe_settings(
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::typesafe::TypesafeSettingsDto, String> {
+    crate::typesafe::get_typesafe_settings_service(state.inner()).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn save_typesafe_settings(
+    state: tauri::State<'_, AppState>,
+    settings: crate::typesafe::TypesafeSettingsDto,
+) -> Result<crate::typesafe::TypesafeSettingsDto, String> {
+    crate::typesafe::save_typesafe_settings_service(state.inner(), settings).await
+}
+
+/// Starts the privacy scan. Answers with the run id; the interface polls
+/// `typesafe_scan_status` for progress, flags and the settled state.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn typesafe_scan_start(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    crate::typesafe::typesafe_scan_start_service(state.inner()).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn typesafe_scan_status() -> crate::typesafe::ScanProgressDto {
+    crate::typesafe::typesafe_scan_status_service()
+}
+
+/// Stops the scan in flight; it settles as completed with whatever it found.
+#[tauri::command(rename_all = "camelCase")]
+pub fn typesafe_scan_stop() -> Result<bool, String> {
+    crate::typesafe::typesafe_scan_stop_service()
 }
 
 /// Puts a copied code block on the clipboard — the same plugin write the

@@ -422,6 +422,26 @@ and are shown as fixed sentences. A conversation lives in the window's
 memory: closing the window only puts it away, and quitting the application
 is what ends it.
 
+## Privacy scan
+
+The Privacy tab in settings offers a scan: one deliberate look through the
+local history for entries that should not be sitting in it — pasted
+passwords, keys, tokens, government IDs, card numbers. It exists because
+people paste those constantly, and a history that keeps everything forever
+keeps them too.
+
+What it sends is the text of each entry and nothing else — no application
+names, no timestamps, no identifiers — in batches of twenty, to TypeSafe's
+judgment API (`api.typesafe.ai`), with the API key you give it in the same
+tab. It never runs on its own: the scan starts when the button is pressed
+and stops when it is stopped. An entry is flagged only when the model is
+sure (probability ≥ 0.9); honest unsureness — a bare account number with
+no context — flags nothing, which is the experiment's own weakest case
+doing its job. The flags live in the scan's memory alone: nothing is
+written to the database, a restarted application remembers none of it, and
+the list under the button shows each flagged entry with its probability
+and a Delete that uses the same command the history list does.
+
 ## Keyvault
 
 The application reads a personally-run keyvault through the device's shared
