@@ -4,7 +4,11 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, isSummoningShortcut, shortcutHint } from './App';
 import { mockGateway, type ClipboardGateway } from './lib/gateway';
-import { SYNTHETIC_APPS, SYNTHETIC_KEYVAULT_SECRETS } from './lib/fixtures';
+import {
+  SYNTHETIC_APPS,
+  SYNTHETIC_KEYVAULT_SECRETS,
+  SYNTHETIC_SETTINGS,
+} from './lib/fixtures';
 
 it('renders the private clipboard palette landmark', () => {
   render(<App />);
@@ -149,6 +153,35 @@ describe('the unified palette', () => {
     expect(
       historyResults().getAllByRole('option').filter((option) => option.hasAttribute('data-path')),
     ).toHaveLength(0);
+  });
+
+  it('opens chat with the categories turned off, where there are no tiles', async () => {
+    // The combined list has no chooser, so the chat reaches it by key and
+    // by the footer — the window is a destination, not a category.
+    const user = userEvent.setup();
+    const openChatWindow = vi.fn(async () => undefined);
+    const getSettings = vi.fn(async () => ({
+      ...SYNTHETIC_SETTINGS,
+      paletteModes: false,
+    }));
+    render(
+      <App
+        gateway={{ ...mockGateway, openChatWindow, getSettings } as ClipboardGateway}
+      />,
+    );
+    // The combined list answers: rows without picking anything.
+    await waitFor(() =>
+      expect(historyResults().getAllByRole('option').length).toBeGreaterThan(0),
+    );
+
+    await user.keyboard('{Meta>}4{/Meta}');
+    expect(openChatWindow).toHaveBeenCalledOnce();
+
+    await user.keyboard('{Meta>}k{/Meta}');
+    expect(openChatWindow).toHaveBeenCalledTimes(2);
+
+    await user.click(screen.getByRole('button', { name: 'Open the chat window' }));
+    expect(openChatWindow).toHaveBeenCalledTimes(3);
   });
 
   it('opens the chat window as the fourth tile', async () => {
