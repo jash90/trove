@@ -451,19 +451,22 @@ const ClipboardPalette = (): React.JSX.Element => {
       void gateway.openChatWindow?.().catch(() => undefined);
       return;
     }
+    // ⌘4 opens the chat window whatever the palette is showing: chat is a
+    // destination, not a category, and a palette with the categories turned
+    // off must not lose it.
+    if (primaryModifier && !event.shiftKey && key === PALETTE_CHAT_CATEGORY.key) {
+      event.preventDefault();
+      void gateway.openChatWindow?.().catch(() => undefined);
+      return;
+    }
     // Direct category picks, in tile order: ⌘1 applications, ⌘2 history,
-    // ⌘3 vault.
+    // ⌘3 vault. Meaningless with the categories off, so they wait for them.
     if (
       paletteModes &&
       primaryModifier &&
       !event.shiftKey &&
-      ['1', '2', '3', '4'].includes(key)
+      ['1', '2', '3'].includes(key)
     ) {
-      if (key === PALETTE_CHAT_CATEGORY.key) {
-        event.preventDefault();
-        void gateway.openChatWindow?.().catch(() => undefined);
-        return;
-      }
       const category = PALETTE_CATEGORIES.find((entry) => entry.key === key);
       if (category) {
         event.preventDefault();
@@ -575,7 +578,7 @@ const ClipboardPalette = (): React.JSX.Element => {
         ) : null}
         <footer className="palette-footer">
           <span>
-            ↵ open · ⌘C copy · ⌘⇧V plain · ⇥ mode
+            ↵ open · ⌘C copy · ⌘⇧V plain{paletteModes ? ' · ⇥ mode' : ''}
             {summoningShortcut === null ? '' : ` · ${shortcutHint(summoningShortcut)} summon`}
           </span>
           {/* Out of the way but still visible: a shortcut nobody was told about
