@@ -10,6 +10,13 @@ import {
 } from './fixtures';
 
 let historyItems = SYNTHETIC_HISTORY_ITEMS.map((item) => ({ ...item }));
+let chatSeq = 0;
+let chatStreamListener: ((event: import('./contracts').ChatStreamEvent) => void) | null = null;
+let chatSettings: import('./contracts').ChatSettings = {
+  provider: 'zai',
+  model: 'glm-4.6',
+  keys: { zai: '', openai: '', openrouter: '', anthropic: '' },
+};
 let settings = {
   ...SYNTHETIC_SETTINGS,
   denylistedApps: [...SYNTHETIC_SETTINGS.denylistedApps],
@@ -131,6 +138,85 @@ export const mockGateway: ClipboardGateway = {
   // The browser preview has no core behind it, so nothing ever changes.
   onHistoryChanged: () => () => undefined,
   onAppsChanged: () => () => undefined,
+  // Chat in the preview: a canned answer that streams the same way the
+  // real one does, so the window can be laid out without a provider.
+  chatSend: (messages) => {
+    const id = `mock-${chatSeq++}`;
+    const last = messages[messages.length - 1]?.content ?? '';
+    // Markdown on purpose: the preview renders the answer the way the real
+    // window does, so the renderer can be checked without a provider.
+    const reply = [
+      `Preview answer to **${last.slice(0, 40) || 'your message'}**.`,
+      '',
+      '## What renders here',
+      '',
+      '- headings, **bold**, *italics*, and `inline code`',
+      '- lists, and tables',
+      '',
+      '| feature | state |',
+      '| --- | --- |',
+      '| markdown | on |',
+      '| code blocks | saveable |',
+      '',
+      '```ts',
+      'const answer = 42;',
+      'export default answer;',
+      '```',
+      '',
+      '```html',
+      '<!doctype html><html><body style="font-family:sans-serif">',
+      '<h1 style="color:crimson">Live HTML</h1>',
+      '<button onclick="this.textContent=\'clicked\';parent.parent.postMessage({kind:\'artifact-probe\',text:\'html-script-ran\'},\'*\')">click me</button>',
+      '</body></html>',
+      '```',
+      '',
+      '```jsx',
+      'import { useEffect, useState } from "react";',
+      'export default function App() {',
+      '  const [n, setN] = useState(0);',
+      '  useEffect(() => {',
+      "    parent.parent.postMessage({ kind: 'artifact-probe', text: 'jsx-mounted' }, '*');",
+      '  }, []);',
+      '  return <h2 style={{color:"teal"}} onClick={() => setN(n + 1)}>React artifact {n}</h2>;',
+      '}',
+      '```',
+      '',
+      '> A quotation, for completeness.',
+    ].join('\n');
+    const emit = chatStreamListener;
+    // Streamed by lines rather than words: fences stay whole, which is the
+    // shape a real stream produces at its chunk boundaries anyway.
+    // A reasoning model's shape: the thinking first, the answer after —
+    // the stream the preview renders is the stream the real one produces.
+    const thinking = 'Considering the request briefly.\n';
+    const chunks = reply.split(/(?<=\n)/u);
+    setTimeout(() => emit?.({ kind: 'delta', id, part: 'reasoning', text: thinking }), 60);
+    chunks.forEach((chunk, index) => {
+      setTimeout(
+        () => emit?.({ kind: 'delta', id, part: 'answer', text: chunk }),
+        120 + 60 * (index + 1),
+      );
+    });
+    setTimeout(() => emit?.({ kind: 'done', id }), 180 + 60 * (chunks.length + 1));
+    return Promise.resolve({ id });
+  },
+  chatStop: async () => true,
+  chatListModels: async () => ['glm-4.5-air', 'glm-4.5-flash', 'glm-4.5', 'glm-4.6'],
+  saveGeneratedFile: async () => true,
+  copyChatText: async () => undefined,
+  openExternalUrl: async () => undefined,
+  getChatSettings: async () => ({ ...chatSettings }),
+  saveChatSettings: async (next) => {
+    chatSettings = { ...next };
+    return { ...chatSettings };
+  },
+  openChatWindow: async () => undefined,
+  onChatEvent: (listener) => {
+    chatStreamListener = listener;
+    return () => {
+      chatStreamListener = null;
+    };
+  },
   onLinkPreviewReady: () => () => undefined,
   getThumbnail: async (eventId) =>
     eventId === 103 ? { mimeType: 'image/png', base64: 'c3ludGhldGlj' } : null,

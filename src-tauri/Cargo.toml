@@ -22,6 +22,7 @@ trove-import = { path = "../crates/trove-import" }
 trove-keyvault = { path = "../crates/trove-keyvault" }
 trove-launcher = { path = "../crates/trove-launcher" }
 trove-link-preview = { path = "../crates/trove-link-preview" }
+reqwest.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos = { path = "../crates/platform-macos" }

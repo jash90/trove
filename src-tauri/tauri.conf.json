@@ -34,6 +34,19 @@
         "resizable": true,
         "visible": false,
         "alwaysOnTop": true
+      },
+      {
+        "label": "chat",
+        "title": "Chat — Trove",
+        "url": "index.html#chat",
+        "width": 560,
+        "height": 720,
+        "minWidth": 420,
+        "minHeight": 520,
+        "center": true,
+        "resizable": true,
+        "visible": false,
+        "alwaysOnTop": false
       }
     ],
     "security": {

@@ -125,12 +125,12 @@ registers.
 
 ## Launching applications
 
-The palette opens on its categories — Applications, Clipboard history and
-the Key vault as three tiles — and which list someone came for is a fact
-about them, not a decision the application makes. The tiles answer their
-digit (`1`, `2`, `3`), `Tab` walks the ring, `⌘1`/`⌘2`/`⌘3` pick from
-anywhere, and clicking works too; typing from the chooser means the
-history, the palette's own core. `Escape` backs out one step at a time —
+The palette opens on its categories — Applications, Clipboard history, the
+Key vault, and the Chat window — and which destination someone came for is
+a fact about them, not a decision the application makes. The tiles answer
+their digit (`1`–`4`), `Tab` walks the ring of lists, `⌘1`/`⌘2`/`⌘3`/`⌘4`
+pick from anywhere, and clicking works too; typing from the chooser means
+the history, the palette's own core. `Escape` backs out one step at a time —
 first the query, then the category, back to the chooser — and hiding the
 palette remains the global shortcut's job.
 
@@ -199,12 +199,14 @@ cargo tauri build --debug --no-bundle
 ```
 
 Checking that the built bundle references no remote resource at all (only XML
-namespaces are allowed, and those are never fetched):
+namespaces and the chat settings' default endpoint are allowed — the first is
+never fetched, and the second is a string the core reads from the settings row
+and calls only through its own client, never from the window):
 
 ```bash
 grep -rEoh 'https?://[^"'"'"' )]*' apps/desktop-ui/dist \
   --include='*.js' --include='*.css' --include='*.html' \
-  | grep -v 'www\.w3\.org' | sort -u
+  | grep -v 'www\.w3\.org' | grep -v 'api\.openai\.com' | sort -u
 ```
 
 Installer signing is out of scope for the first release — which is why the build
@@ -394,6 +396,31 @@ The cost in dependencies: HTTPS through `native-tls`, meaning the system
 certificate store. On macOS that is Security.framework, on Windows schannel;
 **on Linux it needs the OpenSSL headers at build time** — the one place this
 choice makes building harder on a target we do not verify anyway.
+
+## Chat
+
+The chat window — the fourth tile of the palette's chooser, `⌘K` or `⌘4`
+from the palette, or the Chat button in its footer — is a conversation with
+one model, in a window of its own. Four providers are offered exactly:
+**Z.ai** (GLM), **OpenAI**, **OpenRouter** and **Anthropic** — the first
+three on the OpenAI wire, Anthropic on its own Messages wire, both handled
+by the core. Each provider has its own API key field, all of them kept in
+this application's own database — the same trust boundary the database
+itself sits on, and the same place a keyvault token override lives; they
+are not read from the keyvault, and treating a data-directory compromise
+as a compromise of any key stored there is the honest rule. The model is
+picked from a list: fetched live from the provider's own model endpoint,
+with a standing set of suggestions when the list cannot be fetched. The
+answer streams token by token, Enter sends, Shift+Enter is a newline, and
+a stop button ends a long answer mid-stream.
+
+What crosses the network is what you would expect said plainly: the
+messages of the conversation, to the provider the base URL names. The key
+is read from the settings row only when a request is built, and never
+reaches a log line or an error message. Refusals arrive as stable codes
+and are shown as fixed sentences. A conversation lives in the window's
+memory: closing the window only puts it away, and quitting the application
+is what ends it.
 
 ## Keyvault
 

@@ -200,6 +200,106 @@ export interface ExportSummary {
   withoutPayload: number;
 }
 
+export type ChatProvider = 'zai' | 'zai-coding' | 'openai' | 'openrouter' | 'anthropic';
+
+export type ChatRole = 'system' | 'user' | 'assistant';
+
+/** One attached file: images for the models that see, text for all. */
+export interface ChatAttachment {
+  name: string;
+  kind: 'image' | 'text';
+  mimeType: string;
+  /** Base64 (image) or the file's own text (text). */
+  data: string;
+}
+
+/** One message of a chat conversation, as the bridge carries it. */
+export interface ChatMessage {
+  role: ChatRole;
+  content: string;
+  attachments?: ChatAttachment[];
+}
+
+/** One API key per provider; each is optional until that provider is used. */
+export interface ChatProviderKeys {
+  zai: string;
+  openai: string;
+  openrouter: string;
+  anthropic: string;
+}
+
+/**
+ * Where the chat window reaches a model: a provider, one of its models,
+ * and a key per provider. The keys are given here and stored in this
+ * application's own database — not read from the keyvault.
+ */
+export interface ChatSettings {
+  provider: ChatProvider;
+  model: string;
+  keys: ChatProviderKeys;
+}
+
+/**
+ * Which key field a provider reads. The Z.ai Coding Plan entry shares the
+ * Z.ai key: it is the same account's key, answered only on the plan's own
+ * endpoint.
+ */
+export const chatKeyField = (provider: ChatProvider): keyof ChatProviderKeys =>
+  provider === 'zai-coding' ? 'zai' : provider;
+
+/** The providers the window offers, with what the picker needs to know. */
+export const CHAT_PROVIDERS: readonly {
+  id: ChatProvider;
+  label: string;
+  /** Offered before anything is fetched, and kept beside the fetched list. */
+  suggestedModels: readonly string[];
+}[] = [
+  {
+    id: 'zai',
+    label: 'Z.ai',
+    suggestedModels: ['glm-4.6', 'glm-4.5', 'glm-4.5-air', 'glm-4.5-flash'],
+  },
+  {
+    id: 'zai-coding',
+    label: 'Z.ai (Coding Plan)',
+    suggestedModels: ['glm-4.6', 'glm-4.5', 'glm-4.5-air', 'glm-4.5-flash'],
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    suggestedModels: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1', 'gpt-4.1-mini', 'o3-mini'],
+  },
+  {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    suggestedModels: [], // a catalog this big is fetched, not suggested
+  },
+  {
+    id: 'anthropic',
+    label: 'Anthropic',
+    suggestedModels: [
+      'claude-sonnet-4-5',
+      'claude-haiku-4-5',
+      'claude-opus-4-1',
+      'claude-3-7-sonnet-latest',
+    ],
+  },
+];
+
+/** The handle a chat send returns; the answer streams as events carrying it. */
+export interface ChatTurn {
+  id: string;
+}
+
+/**
+ * What a chat stream event says: a token arrived — as the model's
+ * reasoning or as its answer — or the turn settled.
+ */
+export type ChatStreamEvent =
+  | { kind: 'delta'; id: string; part: 'reasoning' | 'answer'; text: string }
+  | { kind: 'done'; id: string }
+  | { kind: 'error'; id: string; code: string };
+
 export interface AppEntry {
   name: string;
   bundleId: string | null;

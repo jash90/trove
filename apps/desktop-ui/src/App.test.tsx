@@ -113,7 +113,10 @@ describe('the unified palette', () => {
   const pick = (key: string): void => {
     fireEvent.keyDown(screen.getByRole('searchbox'), { key });
   };
-  const homeTiles = () => screen.getAllByRole('button', { name: /Applications|Clipboard history|Key vault/u });
+  const homeTiles = () =>
+    screen.getAllByRole('button', {
+      name: /Applications|Clipboard history|Key vault|Chat/u,
+    });
   const settleHistory = async (): Promise<void> => {
     fireEvent.keyDown(screen.getByRole('searchbox'), { key: '2', metaKey: true });
     await waitFor(() =>
@@ -133,7 +136,7 @@ describe('the unified palette', () => {
 
     // The palette opens on the chooser: three categories, no list rows —
     // which list someone came for is a fact about them, not the app.
-    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+    await waitFor(() => expect(homeTiles()).toHaveLength(4));
     expect(
       screen.queryByRole('listbox', { name: 'Applications, secrets and history results' }),
     ).toBeNull();
@@ -148,9 +151,22 @@ describe('the unified palette', () => {
     ).toHaveLength(0);
   });
 
+  it('opens the chat window as the fourth tile', async () => {
+    const openChatWindow = vi.fn(async () => undefined);
+    render(<App gateway={{ ...mockGateway, openChatWindow } as ClipboardGateway} />);
+    await waitFor(() => expect(homeTiles()).toHaveLength(4));
+
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: '4' });
+
+    expect(openChatWindow).toHaveBeenCalledOnce();
+    // Opening the chat window is a destination, not a mode: the chooser
+    // stays where it was.
+    expect(homeTiles()).toHaveLength(4);
+  });
+
   it('picks a category with its tile digit, in tile order', async () => {
     render(<App />);
-    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+    await waitFor(() => expect(homeTiles()).toHaveLength(4));
 
     pick('1');
     await waitFor(() =>
@@ -167,7 +183,7 @@ describe('the unified palette', () => {
     // Escape clears the query; the second Escape is the way back home.
     fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
     fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
-    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+    await waitFor(() => expect(homeTiles()).toHaveLength(4));
   });
 
   it('shows the keys of the paired vault in its category', async () => {
@@ -189,10 +205,10 @@ describe('the unified palette', () => {
     // crosses the interface — and the palette lands back on the categories.
     await user.keyboard('{Enter}');
     expect(keyvaultCopySecret).toHaveBeenCalledWith('openai');
-    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+    await waitFor(() => expect(homeTiles()).toHaveLength(4));
   });
 
-  it('picks a category directly with ⌘1, ⌘2 and ⌘3, and from the buttons', async () => {
+  it('picks a category directly with ⌘1, ⌘2 and ⌘3, with no header control left', async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -223,15 +239,10 @@ describe('the unified palette', () => {
       ).toBe(true),
     );
 
-    // The buttons say the same thing the keyboard does.
-    await user.click(screen.getByRole('button', { name: 'Apps' }));
-    await waitFor(() =>
-      expect(
-        historyResults()
-          .getAllByRole('option')
-          .filter((option) => option.hasAttribute('data-path')).length,
-      ).toBeGreaterThan(0),
-    );
+    // The header carries no category control: the tiles and their keys are
+    // the one way in, and the top of the palette is the field.
+    expect(screen.queryByRole('group', { name: 'Palette categories' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Apps' })).toBeNull();
   });
 
   it('returns to the categories after launching an application', async () => {
@@ -247,7 +258,7 @@ describe('the unified palette', () => {
     expect(launchApp).toHaveBeenCalled();
     // The stay in a category ended with the errand: the next summoning
     // opens back on the categories.
-    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+    await waitFor(() => expect(homeTiles()).toHaveLength(4));
   });
 
   it('filters applications client-side while typing once fetched', async () => {
@@ -459,7 +470,7 @@ describe('the unified palette', () => {
     );
 
     await user.keyboard('{Tab}');
-    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+    await waitFor(() => expect(homeTiles()).toHaveLength(4));
     expect(search).toHaveFocus();
 
     // Shift+Tab keeps the browser's meaning — the keyboard route out of
@@ -486,13 +497,13 @@ describe('the unified palette', () => {
 
     await user.keyboard('{Escape}');
     // The second Escape left the category and returned to the chooser.
-    await waitFor(() => expect(homeTiles()).toHaveLength(3));
+    await waitFor(() => expect(homeTiles()).toHaveLength(4));
 
     // A third Escape has nothing left to back out of, and hides nothing:
     // hiding the palette is the shortcut's job, as it always was.
     await user.keyboard('{Escape}');
     expect(screen.getByRole('application', { name: 'Clipboard palette' })).toBeVisible();
-    expect(homeTiles()).toHaveLength(3);
+    expect(homeTiles()).toHaveLength(4);
   });
 
   it('clears the query with Escape and never closes the palette', async () => {

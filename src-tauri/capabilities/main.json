@@ -4,7 +4,8 @@
   "description": "Clipboard palette and settings window access",
   "windows": [
     "main",
-    "settings"
+    "settings",
+    "chat"
   ],
   "platforms": [
     "linux",
