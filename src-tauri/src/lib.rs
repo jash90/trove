@@ -24,13 +24,17 @@ pub fn run() {
         .setup(|app| {
             let data_dir = state::resolve_data_dir(app.handle())?;
             let app_state = state::AppState::open_data_dir(data_dir)?;
-            // The menu bar is where this application exists on screen. A Dock
-            // icon promises a window that spends its life hidden, and clicking
-            // it does nothing worth doing. `LSUIElement` in Info.plist keeps
-            // the tile from ever appearing in a built bundle; this covers
-            // `pnpm tauri dev`, where there is no bundle to read it from.
+            // The menu bar is where this application exists on screen, so it
+            // starts with no Dock tile unless the settings row asks for one.
+            // `LSUIElement` in Info.plist is what stops the tile appearing
+            // during launch, before any of this has run; this call is what
+            // brings it back for someone who wants it, and the only thing
+            // that applies the preference at all under `pnpm tauri dev`,
+            // where there is no bundle to read the plist from.
             #[cfg(target_os = "macos")]
-            let _ = app.handle().set_dock_visibility(false);
+            let _ = app
+                .handle()
+                .set_dock_visibility(commands::dock_icon_enabled(&app_state.store));
             // The shortcut the user chose, not the built-in one. Startup used
             // to register the default unconditionally, so a shortcut changed in
             // settings answered until the application was closed and then
@@ -74,6 +78,20 @@ pub fn run() {
             }
         })
         .invoke_handler(commands::invoke_handler())
-        .run(tauri::generate_context!())
-        .expect("error while running Trove");
+        .build(tauri::generate_context!())
+        .expect("error while building Trove")
+        .run(|app, event| {
+            // Clicking the Dock tile has to summon something, or the tile is
+            // a button that does nothing. macOS sends this when the tile is
+            // clicked with no window on screen, and the palette is what the
+            // click is asking for.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                hotkey::show_palette(app);
+            }
+            // Neither parameter is read off macOS, and the workspace builds
+            // with `-D warnings`.
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }

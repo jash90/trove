@@ -1,7 +1,8 @@
 //! The menu bar item.
 //!
-//! A clipboard manager runs all day with its window hidden, and this one has no
-//! Dock icon at all, so the menu bar is the only place it exists on screen. It answers the two questions the user
+//! A clipboard manager runs all day with its window hidden, and this one has
+//! no Dock icon unless the settings ask for one, so the menu bar is where it
+//! is certain to exist on screen. It answers the two questions the user
 //! actually has — is it still recording, and how do I stop it — and gets out of
 //! the way.
 

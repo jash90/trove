@@ -1661,9 +1661,10 @@ pub(crate) fn get_settings_blocking(store: &StoreHandle) -> Result<AppSettingsDt
 
 /// Persists settings and applies the parts that live outside the database.
 ///
-/// The shortcut is registered with the system, not stored in a row, so saving
-/// has to rebind it. Doing that only on the next launch means the settings
-/// screen shows one shortcut while another one answers.
+/// The shortcut is registered with the system and the Dock tile is a property
+/// of the running process, not rows in a table, so saving has to apply both.
+/// Doing that only on the next launch means the settings screen shows one
+/// state while another one is true.
 pub async fn save_settings_with_app<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &AppState,
@@ -1686,6 +1687,17 @@ pub async fn save_settings_with_app<R: tauri::Runtime>(
             Err(_) => active.set_registered(false),
         }
     }
+    // The Dock tile lives in the system's activation policy, not in a row, so
+    // saving has to apply it — for the same reason the shortcut is rebound
+    // here. Applying it only at the next launch would leave the checkbox
+    // saying one thing while the Dock said another.
+    //
+    // Called straight from this command thread on purpose: `AppHandle::
+    // set_dock_visibility` posts `Message::SetDockVisibility` to the event
+    // loop rather than touching `NSApp` here, so the activation-policy change
+    // lands on the main thread without a `run_on_main_thread` wrapper.
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(stored.dock_icon);
     Ok(stored)
 }
 
