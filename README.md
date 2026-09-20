@@ -82,10 +82,15 @@ it again hides it. Closing the window also only hides it — the application
 exits solely through "Quit" in the menu bar item, because a clipboard manager
 that stops running when its window closes quietly loses history.
 
-There is no Dock icon and no `⌘Tab` entry. The menu bar is where this
-application exists on screen: the window spends most of its life hidden and is
-summoned over whatever you are working in, so a Dock tile would advertise a
-window that is not there.
+There is no Dock icon and no `⌘Tab` entry unless you ask for one. The menu bar
+is where this application exists on screen: the window spends most of its life
+hidden and is summoned over whatever you are working in, so by default a Dock
+tile would advertise a window that is not there. **Settings → Shortcut → Show
+in the Dock** turns the tile on for anyone who would rather have it — it
+appears as soon as the settings are saved, clicking it summons the palette, and
+the preference survives a restart. The bundle still declares `LSUIElement`, so
+nothing flashes in the Dock during launch; the tile arrives a moment later,
+when the setting asks for it. macOS only.
 
 ### Spotlight holds ⌘Space
 
