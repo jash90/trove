@@ -8,9 +8,22 @@ pub mod maintenance;
 pub mod monitor;
 pub mod state;
 pub mod tray;
-pub mod typesafe;
 
 use tauri::Manager;
+
+/// Clears settings rows whose feature has been removed.
+///
+/// The privacy scan is gone, and the TypeSafe API key it kept must not
+/// outlive it: it is a live credential of the user's, sitting in a row that
+/// nothing reads any more. This runs at every launch and costs one DELETE
+/// against a key that is usually absent — cheap enough not to need a flag
+/// tracking whether it has run, and a flag would be one more thing that can
+/// be wrong.
+pub async fn purge_retired_settings(store: &trove_store::StoreHandle) {
+    // A failure here is not worth refusing to start over: the next launch
+    // tries again, and nothing downstream depends on the row being gone.
+    let _ = store.delete_setting("typesafe").await;
+}
 
 pub fn run() {
     tauri::Builder::default()
@@ -35,6 +48,10 @@ pub fn run() {
             let _ = app
                 .handle()
                 .set_dock_visibility(commands::dock_icon_enabled(&app_state.store));
+            let purge_store = app_state.store.clone();
+            tauri::async_runtime::spawn(async move {
+                purge_retired_settings(&purge_store).await;
+            });
             // The shortcut the user chose, not the built-in one. Startup used
             // to register the default unconditionally, so a shortcut changed in
             // settings answered until the application was closed and then

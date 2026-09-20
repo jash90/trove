@@ -727,11 +727,6 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "save_generated_file",
             "open_external_url",
             "copy_chat_text",
-            "get_typesafe_settings",
-            "save_typesafe_settings",
-            "typesafe_scan_start",
-            "typesafe_scan_status",
-            "typesafe_scan_stop",
             "get_chat_settings",
             "save_chat_settings",
             "open_chat_window",
@@ -2460,5 +2455,25 @@ fn both_windows_float_above_whatever_they_were_summoned_over() {
         window_named("settings")["alwaysOnTop"],
         serde_json::json!(true),
         "settings is opened from the palette and must come out above it"
+    );
+}
+
+#[tokio::test]
+async fn the_typesafe_api_key_a_previous_version_stored_is_purged() {
+    // The scan is gone, and the key it used must not outlive it: it is a
+    // live credential belonging to the user, sitting in a row nothing reads.
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    state
+        .store
+        .save_setting("typesafe", "{\"apiKey\":\"apikey_synthetic\"}")
+        .await
+        .unwrap();
+
+    trove_app::purge_retired_settings(&state.store).await;
+
+    assert!(
+        state.store.get_setting("typesafe").unwrap().is_none(),
+        "the retired scan's key does not survive the scan"
     );
 }
