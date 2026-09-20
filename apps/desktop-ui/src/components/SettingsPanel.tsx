@@ -4,7 +4,6 @@ import {
   KeyRound,
   LayoutGrid,
   Power,
-  ScanSearch,
   ShieldBan,
   Timer,
   Vault,
@@ -21,10 +20,8 @@ import type {
   ShortcutRelease,
   ShortcutStatus,
   StorageStats as StorageStatsContract,
-  TypeSafeScanProgress,
 } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
-import { PrivacyTab } from './PrivacyTab';
 import { SettingsTabs, type SettingsTab } from './SettingsTabs';
 import { StorageStats } from './StorageStats';
 
@@ -205,7 +202,6 @@ const SETTINGS_TABS: readonly SettingsTab[] = [
   { id: 'apps', label: 'Apps' },
   { id: 'links', label: 'Links' },
   { id: 'keyvault', label: 'Keyvault' },
-  { id: 'privacy', label: 'Privacy' },
   { id: 'storage', label: 'Storage' },
   { id: 'export', label: 'Export' },
 ];
@@ -318,9 +314,6 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [paletteModes, setPaletteModes] = useState(true);
   const [dockIcon, setDockIcon] = useState(false);
   const [vaultUrl, setVaultUrl] = useState('');
-  const [privacyKey, setPrivacyKey] = useState('');
-  const [privacySaved, setPrivacySaved] = useState(false);
-  const [scan, setScan] = useState<TypeSafeScanProgress | null>(null);
   const [vaultSecrets, setVaultSecrets] = useState<KeyvaultSecret[] | null>(null);
   const [pairing, setPairing] = useState<PairingStarted | null>(null);
   // Ticked by the poll below, so the time left is honest rather than frozen at whatever it was
@@ -390,10 +383,6 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setLinkPreviews(settings.linkPreviews);
       setPaletteModes(settings.paletteModes);
       setDockIcon(settings.dockIcon);
-      void gateway
-        .getTypeSafeSettings?.()
-        .then((typesafe) => setPrivacyKey(typesafe.apiKey))
-        .catch(() => undefined);
       setVaultUrl(settings.keyvault.url ?? '');
     })();
     return () => {
@@ -944,26 +933,6 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                     addresses are never queried.
                   </p>
                 </section>
-              ) : null}
-
-              {activeTab === 'privacy' ? (
-                <PrivacyTab
-                  gateway={gateway}
-                  apiKey={privacyKey}
-                  onApiKeyChange={setPrivacyKey}
-                  saved={privacySaved}
-                  onSaveKey={async () => {
-                    try {
-                      await gateway.saveTypeSafeSettings?.({ apiKey: privacyKey.trim() });
-                      setPrivacySaved(true);
-                      setTimeout(() => setPrivacySaved(false), 1500);
-                    } catch {
-                      /* the row says what it can; a silent no-op here is honest */
-                    }
-                  }}
-                  scan={scan}
-                  onScanChange={setScan}
-                />
               ) : null}
 
               {activeTab === 'keyvault' ? (
