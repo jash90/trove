@@ -2,12 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Trove lives on the menu bar. Its window spends most of its life hidden
-	     and is summoned by a keystroke over whatever the user is working in, so
-	     a Dock tile would advertise a window that is not there and a Cmd-Tab
-	     entry would offer a switch to nothing. Set here rather than only in
-	     code because this is the only thing that stops the tile appearing
-	     during launch, before any of our own code has run. -->
+	<!-- Trove starts on the menu bar. Its window spends most of its life
+	     hidden and is summoned by a keystroke over whatever the user is
+	     working in, so a Dock tile is off unless it is asked for in
+	     Settings → Shortcut. This key is what stops a tile appearing during
+	     launch, before any of our own code has run; the setting brings it
+	     back at runtime for anyone who wants one, which the activation
+	     policy allows even for an LSUIElement bundle. -->
 	<key>LSUIElement</key>
 	<true/>
 </dict>

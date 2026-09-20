@@ -2,8 +2,8 @@ import {
   Download,
   Globe,
   KeyRound,
+  LayoutGrid,
   Power,
-  ScanSearch,
   ShieldBan,
   Timer,
   Vault,
@@ -20,10 +20,8 @@ import type {
   ShortcutRelease,
   ShortcutStatus,
   StorageStats as StorageStatsContract,
-  TypeSafeScanProgress,
 } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
-import { PrivacyTab } from './PrivacyTab';
 import { SettingsTabs, type SettingsTab } from './SettingsTabs';
 import { StorageStats } from './StorageStats';
 
@@ -204,7 +202,6 @@ const SETTINGS_TABS: readonly SettingsTab[] = [
   { id: 'apps', label: 'Apps' },
   { id: 'links', label: 'Links' },
   { id: 'keyvault', label: 'Keyvault' },
-  { id: 'privacy', label: 'Privacy' },
   { id: 'storage', label: 'Storage' },
   { id: 'export', label: 'Export' },
 ];
@@ -315,10 +312,8 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [stats, setStats] = useState<StorageStatsContract | null>(null);
   const [linkPreviews, setLinkPreviews] = useState(true);
   const [paletteModes, setPaletteModes] = useState(true);
+  const [dockIcon, setDockIcon] = useState(false);
   const [vaultUrl, setVaultUrl] = useState('');
-  const [privacyKey, setPrivacyKey] = useState('');
-  const [privacySaved, setPrivacySaved] = useState(false);
-  const [scan, setScan] = useState<TypeSafeScanProgress | null>(null);
   const [vaultSecrets, setVaultSecrets] = useState<KeyvaultSecret[] | null>(null);
   const [pairing, setPairing] = useState<PairingStarted | null>(null);
   // Ticked by the poll below, so the time left is honest rather than frozen at whatever it was
@@ -387,10 +382,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setDenylist(settings.denylistedApps.join('\n'));
       setLinkPreviews(settings.linkPreviews);
       setPaletteModes(settings.paletteModes);
-      void gateway
-        .getTypeSafeSettings?.()
-        .then((typesafe) => setPrivacyKey(typesafe.apiKey))
-        .catch(() => undefined);
+      setDockIcon(settings.dockIcon);
       setVaultUrl(settings.keyvault.url ?? '');
     })();
     return () => {
@@ -463,6 +455,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       denylistedApps: nextDenylist,
       linkPreviews,
       paletteModes,
+      dockIcon,
       // Overrides over the device identity file, each independent of the
       // other. A blank field travels as an absent one, meaning "use the
       // device's value". The private key is never sent: it is not ours to hold.
@@ -818,6 +811,23 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                       <Power size={14} aria-hidden="true" /> Launch at login
                     </span>
                   </label>
+                  <label className="settings-toggle" htmlFor="settings-dock-icon">
+                    <input
+                      id="settings-dock-icon"
+                      type="checkbox"
+                      checked={dockIcon}
+                      onChange={(event) => setDockIcon(event.currentTarget.checked)}
+                    />
+                    <span>
+                      <LayoutGrid size={14} aria-hidden="true" /> Show in the Dock
+                    </span>
+                  </label>
+                  <p className="settings-help">
+                    Off, Trove lives on the menu bar alone — no Dock tile and no ⌘Tab entry,
+                    which suits a window that is summoned by a keystroke and put away again.
+                    On, the tile appears and clicking it summons the palette. Saving applies
+                    it immediately; macOS only.
+                  </p>
                 </section>
               ) : null}
 
@@ -923,26 +933,6 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                     addresses are never queried.
                   </p>
                 </section>
-              ) : null}
-
-              {activeTab === 'privacy' ? (
-                <PrivacyTab
-                  gateway={gateway}
-                  apiKey={privacyKey}
-                  onApiKeyChange={setPrivacyKey}
-                  saved={privacySaved}
-                  onSaveKey={async () => {
-                    try {
-                      await gateway.saveTypeSafeSettings?.({ apiKey: privacyKey.trim() });
-                      setPrivacySaved(true);
-                      setTimeout(() => setPrivacySaved(false), 1500);
-                    } catch {
-                      /* the row says what it can; a silent no-op here is honest */
-                    }
-                  }}
-                  scan={scan}
-                  onScanChange={setScan}
-                />
               ) : null}
 
               {activeTab === 'keyvault' ? (

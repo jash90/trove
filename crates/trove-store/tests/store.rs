@@ -2531,3 +2531,26 @@ async fn imported_duplicates_respect_the_occurrence_cap() {
         trove_store::MAX_OCCURRENCES_PER_CONTENT as usize
     );
 }
+
+#[tokio::test]
+async fn a_deleted_setting_is_gone_and_deleting_it_again_is_not_an_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = StoreHandle::open(StoreConfig::in_data_dir(directory.path())).unwrap();
+
+    store.save_setting("synthetic", "{\"a\":1}").await.unwrap();
+    assert!(store.get_setting("synthetic").unwrap().is_some());
+
+    store.delete_setting("synthetic").await.unwrap();
+    assert!(store.get_setting("synthetic").unwrap().is_none());
+
+    // Idempotent on purpose: the caller is a cleanup that runs at every
+    // launch, and a missing key is the state it is trying to reach.
+    store.delete_setting("synthetic").await.unwrap();
+
+    // The validator that guards writes guards this too: an uppercase key is
+    // not one this table accepts.
+    assert!(matches!(
+        store.delete_setting("NOT_VALID").await,
+        Err(StoreError::InvalidAppSetting)
+    ));
+}

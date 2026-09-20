@@ -93,6 +93,14 @@ export interface AppSettings {
    * answers both in one combined list (off).
    */
   paletteModes: boolean;
+  /**
+   * Whether the application shows a Dock tile (macOS).
+   *
+   * Off by default: the menu bar item is where Trove exists on screen, and
+   * its window spends most of its life hidden. On, the tile appears and
+   * clicking it summons the palette.
+   */
+  dockIcon: boolean;
   keyvault: KeyvaultSettings;
 }
 
@@ -201,30 +209,6 @@ export interface ExportSummary {
 }
 
 export type ChatProvider = 'zai' | 'zai-coding' | 'openai' | 'openrouter' | 'anthropic';
-
-/** The privacy scan's settings: a TypeSafe API key, and nothing else. */
-export interface TypeSafeSettings {
-  apiKey: string;
-}
-
-/** One entry the scan flagged as sensitive. */
-export interface FlaggedEntry {
-  eventId: number;
-  preview: string;
-  probability: number;
-}
-
-export type TypeSafeScanState = 'running' | 'completed' | 'failed';
-
-/** Where one privacy scan stands, polled while it runs. */
-export interface TypeSafeScanProgress {
-  runId: string;
-  state: TypeSafeScanState;
-  processed: number;
-  total: number;
-  flagged: FlaggedEntry[];
-  errorCode: string | null;
-}
 
 export type ChatRole = 'system' | 'user' | 'assistant';
 

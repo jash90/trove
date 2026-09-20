@@ -389,6 +389,7 @@ async fn settings_use_valid_defaults_and_persist_one_versioned_json_object() {
         denylisted_apps: vec!["com.example.synthetic".to_owned()],
         link_previews: false,
         palette_modes: false,
+        dock_icon: true,
         keyvault: Default::default(),
     };
     let saved = commands::save_settings_service(&state, requested.clone())
@@ -441,6 +442,55 @@ async fn a_settings_row_written_before_palette_modes_still_reads_with_the_defaul
 
     assert!(settings.palette_modes, "modes are on until turned off");
     assert!(!settings.link_previews, "the fields the row did carry hold");
+}
+
+#[tokio::test]
+async fn a_settings_row_written_before_the_dock_icon_still_reads_with_the_default() {
+    // A row from the version before the setting existed carries no
+    // `dockIcon` at all. Reading it must answer with the default — no tile,
+    // which is what every version so far did — and not with a parse error
+    // that would bury every other setting beside it.
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let legacy = serde_json::json!({
+        "schemaVersion": 1,
+        "hotkey": "CommandOrControl+Space",
+        "autostart": false,
+        "retentionDays": null,
+        "denylistedApps": [],
+        "linkPreviews": false,
+        "paletteModes": true
+    })
+    .to_string();
+    state.store.save_setting("app", &legacy).await.unwrap();
+
+    let settings = commands::get_settings_service(&state).await.unwrap();
+
+    assert!(
+        !settings.dock_icon,
+        "the menu bar is where it lives until someone asks for the tile"
+    );
+    assert!(!settings.link_previews, "the fields the row did carry hold");
+}
+
+#[tokio::test]
+async fn the_dock_icon_the_user_asked_for_survives_a_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    // Struct-update syntax, not a field reassignment after `default()`:
+    // integration tests are linted too, and clippy rejects the latter.
+    let requested = AppSettingsDto {
+        dock_icon: true,
+        ..AppSettingsDto::default()
+    };
+
+    commands::save_settings_service(&state, requested.clone())
+        .await
+        .unwrap();
+    drop(state);
+
+    let reopened = AppState::open_data_dir(directory.path()).unwrap();
+    assert!(commands::dock_icon_enabled(&reopened.store));
 }
 
 #[tokio::test]
@@ -677,11 +727,6 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "save_generated_file",
             "open_external_url",
             "copy_chat_text",
-            "get_typesafe_settings",
-            "save_typesafe_settings",
-            "typesafe_scan_start",
-            "typesafe_scan_status",
-            "typesafe_scan_stop",
             "get_chat_settings",
             "save_chat_settings",
             "open_chat_window",
@@ -2356,13 +2401,17 @@ async fn an_unregistrable_shortcut_is_refused_on_save_and_never_locks_the_screen
     assert_eq!(read_back.hotkey, "Meta+");
 }
 
-/// Trove lives on the menu bar, so it has no Dock tile and no Cmd-Tab entry.
+/// Whether a Dock tile shows up *after* launch is the `dockIcon` setting's call,
+/// applied at runtime by `set_dock_visibility`. But nothing the app's own code
+/// does can undo the first frame: if the bundle doesn't declare `LSUIElement`,
+/// macOS puts a tile up the moment the process starts, before any Rust or JS
+/// of ours has run. That flash is what this test guards against.
 ///
 /// Asserted against the file rather than against the running application for
 /// the same reason the window levels below are: this is where the decision is
 /// made, and it is made before any of this application's own code runs.
 #[test]
-fn the_application_never_appears_in_the_dock() {
+fn the_bundle_never_flashes_a_dock_tile_during_launch() {
     let info: plist::Value =
         plist::from_bytes(include_bytes!("../Info.plist")).expect("Info.plist must parse");
     let ui_element = info
@@ -2373,7 +2422,7 @@ fn the_application_never_appears_in_the_dock() {
     assert_eq!(
         ui_element,
         Some(true),
-        "a Dock icon advertises a window that spends its life hidden"
+        "without LSUIElement, macOS shows a Dock tile for the instant between process start and the app's own runtime decision about dockIcon"
     );
 }
 
@@ -2410,5 +2459,25 @@ fn both_windows_float_above_whatever_they_were_summoned_over() {
         window_named("settings")["alwaysOnTop"],
         serde_json::json!(true),
         "settings is opened from the palette and must come out above it"
+    );
+}
+
+#[tokio::test]
+async fn the_typesafe_api_key_a_previous_version_stored_is_purged() {
+    // The scan is gone, and the key it used must not outlive it: it is a
+    // live credential belonging to the user, sitting in a row nothing reads.
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    state
+        .store
+        .save_setting("typesafe", "{\"apiKey\":\"apikey_synthetic\"}")
+        .await
+        .unwrap();
+
+    trove_app::purge_retired_settings(&state.store).await;
+
+    assert!(
+        state.store.get_setting("typesafe").unwrap().is_none(),
+        "the retired scan's key does not survive the scan"
     );
 }

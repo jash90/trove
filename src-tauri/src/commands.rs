@@ -67,11 +67,6 @@ macro_rules! trove_command_registry {
             save_generated_file => $crate::commands::save_generated_file,
             open_external_url => $crate::commands::open_external_url,
             copy_chat_text => $crate::commands::copy_chat_text,
-            get_typesafe_settings => $crate::commands::get_typesafe_settings,
-            save_typesafe_settings => $crate::commands::save_typesafe_settings,
-            typesafe_scan_start => $crate::commands::typesafe_scan_start,
-            typesafe_scan_status => $crate::commands::typesafe_scan_status,
-            typesafe_scan_stop => $crate::commands::typesafe_scan_stop,
             get_chat_settings => $crate::commands::get_chat_settings,
             save_chat_settings => $crate::commands::save_chat_settings,
             open_chat_window => $crate::commands::open_chat_window,
@@ -161,6 +156,16 @@ pub struct AppSettingsDto {
     /// serde so a settings row written before it existed still reads.
     #[serde(default = "default_palette_modes")]
     pub palette_modes: bool,
+    /// Whether the application shows a Dock tile.
+    ///
+    /// Off by default, which is what `LSUIElement` in `Info.plist` already
+    /// says: this is a menu bar application whose window spends its life
+    /// hidden. The setting exists because that is a preference and not a
+    /// law — a Dock tile also buys a Cmd-Tab entry, and some people would
+    /// rather have both. Defaulted through serde so a settings row written
+    /// before it existed still reads.
+    #[serde(default = "default_dock_icon")]
+    pub dock_icon: bool,
     /// Where the keyvault pane looks, when it is configured at all.
     ///
     /// Defaulted through serde so a settings row written before it existed
@@ -282,6 +287,12 @@ fn default_palette_modes() -> bool {
     true
 }
 
+/// The Dock tile is off by default. Every version before this one had none,
+/// so anything else would hand a tile to every existing install on upgrade.
+fn default_dock_icon() -> bool {
+    false
+}
+
 impl Default for AppSettingsDto {
     fn default() -> Self {
         Self {
@@ -292,6 +303,7 @@ impl Default for AppSettingsDto {
             denylisted_apps: Vec::new(),
             link_previews: default_link_previews(),
             palette_modes: default_palette_modes(),
+            dock_icon: default_dock_icon(),
             keyvault: KeyvaultSettingsDto::default(),
         }
     }
@@ -1150,40 +1162,6 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     crate::chat::open_external_url(&url)
 }
 
-/// Reads the privacy-scan settings (the API key, and nothing else).
-#[tauri::command(rename_all = "camelCase")]
-pub async fn get_typesafe_settings(
-    state: tauri::State<'_, AppState>,
-) -> Result<crate::typesafe::TypesafeSettingsDto, String> {
-    crate::typesafe::get_typesafe_settings_service(state.inner()).await
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub async fn save_typesafe_settings(
-    state: tauri::State<'_, AppState>,
-    settings: crate::typesafe::TypesafeSettingsDto,
-) -> Result<crate::typesafe::TypesafeSettingsDto, String> {
-    crate::typesafe::save_typesafe_settings_service(state.inner(), settings).await
-}
-
-/// Starts the privacy scan. Answers with the run id; the interface polls
-/// `typesafe_scan_status` for progress, flags and the settled state.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn typesafe_scan_start(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    crate::typesafe::typesafe_scan_start_service(state.inner()).await
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn typesafe_scan_status() -> crate::typesafe::ScanProgressDto {
-    crate::typesafe::typesafe_scan_status_service()
-}
-
-/// Stops the scan in flight; it settles as completed with whatever it found.
-#[tauri::command(rename_all = "camelCase")]
-pub fn typesafe_scan_stop() -> Result<bool, String> {
-    crate::typesafe::typesafe_scan_stop_service()
-}
-
 /// Puts a copied code block on the clipboard — the same plugin write the
 /// history's copy path uses, bounded the same way.
 #[tauri::command(rename_all = "camelCase")]
@@ -1606,6 +1584,16 @@ pub fn link_previews_enabled(store: &StoreHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the user asked for a Dock tile.
+///
+/// An unreadable settings row means no tile: that is the state every version
+/// before this one shipped, so it is the one that cannot surprise anyone.
+pub fn dock_icon_enabled(store: &StoreHandle) -> bool {
+    get_settings_blocking(store)
+        .map(|settings| settings.dock_icon)
+        .unwrap_or(false)
+}
+
 pub fn denylisted_apps(store: &StoreHandle) -> Vec<String> {
     get_settings_blocking(store)
         .map(|settings| settings.denylisted_apps)
@@ -1634,9 +1622,10 @@ pub(crate) fn get_settings_blocking(store: &StoreHandle) -> Result<AppSettingsDt
 
 /// Persists settings and applies the parts that live outside the database.
 ///
-/// The shortcut is registered with the system, not stored in a row, so saving
-/// has to rebind it. Doing that only on the next launch means the settings
-/// screen shows one shortcut while another one answers.
+/// The shortcut is registered with the system and the Dock tile is a property
+/// of the running process, not rows in a table, so saving has to apply both.
+/// Doing that only on the next launch means the settings screen shows one
+/// state while another one is true.
 pub async fn save_settings_with_app<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &AppState,
@@ -1659,6 +1648,17 @@ pub async fn save_settings_with_app<R: tauri::Runtime>(
             Err(_) => active.set_registered(false),
         }
     }
+    // The Dock tile lives in the system's activation policy, not in a row, so
+    // saving has to apply it — for the same reason the shortcut is rebound
+    // here. Applying it only at the next launch would leave the checkbox
+    // saying one thing while the Dock said another.
+    //
+    // Called straight from this command thread on purpose: `AppHandle::
+    // set_dock_visibility` posts `Message::SetDockVisibility` to the event
+    // loop rather than touching `NSApp` here, so the activation-policy change
+    // lands on the main thread without a `run_on_main_thread` wrapper.
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(stored.dock_icon);
     Ok(stored)
 }
 

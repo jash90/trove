@@ -748,6 +748,10 @@ enum WriteCommand {
         value_json: String,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    DeleteSetting {
+        key: String,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     BeginImport {
         input: BeginImportRun,
         reply: oneshot::Sender<Result<ImportWorkerLease, StoreError>>,
@@ -1020,6 +1024,23 @@ impl StoreHandle {
             .send(WriteCommand::SaveSetting {
                 key: key.to_owned(),
                 value_json: value_json.to_owned(),
+                reply,
+            })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        response
+            .await
+            .map_err(|_| StoreError::WriterResponseDropped)?
+    }
+
+    pub async fn delete_setting(&self, key: &str) -> Result<(), StoreError> {
+        validate_setting_pair(key, "")?;
+        let (reply, response) = oneshot::channel();
+        self.runtime
+            .runtime
+            .writer_sender()?
+            .send(WriteCommand::DeleteSetting {
+                key: key.to_owned(),
                 reply,
             })
             .await
@@ -1353,6 +1374,11 @@ fn handle_command(
                 save_setting(connection, &key, &value_json)
             }));
         }
+        WriteCommand::DeleteSetting { key, reply } => {
+            let _ = reply.send(with_storage_boundary(boundary, || {
+                delete_setting(connection, &key)
+            }));
+        }
         WriteCommand::BeginImport { input, reply } => {
             let _ = reply.send(with_storage_boundary(boundary, || {
                 begin_import(connection, &input)
@@ -1438,6 +1464,18 @@ fn save_setting(
            updated_at_ms = excluded.updated_at_ms",
         params![key, value_json, now_ms()],
     )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Removes a settings row, whether or not it was there.
+///
+/// Idempotent because its caller is a cleanup that runs at every launch:
+/// "already gone" is the state it wants, not a failure to report.
+fn delete_setting(connection: &mut Connection, key: &str) -> Result<(), StoreError> {
+    validate_setting_pair(key, "")?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute("DELETE FROM app_setting WHERE key = ?1", params![key])?;
     transaction.commit()?;
     Ok(())
 }

@@ -34,6 +34,7 @@ const persistedSettings: AppSettings = {
   hotkey: 'CommandOrControl+Space',
   autostart: false,
   paletteModes: true,
+  dockIcon: false,
   retentionDays: 30,
   denylistedApps: ['com.acme.private'],
   linkPreviews: true,
@@ -412,6 +413,40 @@ describe('SettingsPanel validation and transactions', () => {
     expect(screen.getByText(/saved: on/i)).toBeVisible();
     expect(screen.getByText(/system: off/i)).toBeVisible();
   });
+
+  it('saves the Dock tile the user ticked', async () => {
+    // The tile is a property of the running process, so the only evidence
+    // this pane can give is that the value reached the core. What the core
+    // does with it is covered on the Rust side.
+    const saveSettings = vi.fn(async (nextSettings: AppSettings) => nextSettings);
+    const user = userEvent.setup();
+    render(<SettingsPanel gateway={makeGateway({ saveSettings })} />);
+    await loadSettings();
+
+    expect(screen.getByRole('checkbox', { name: 'Show in the Dock' })).not.toBeChecked();
+    await user.click(screen.getByRole('checkbox', { name: 'Show in the Dock' }));
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+
+    await waitFor(() => expect(saveSettings).toHaveBeenCalled());
+    expect(saveSettings.mock.calls[0]?.[0].dockIcon).toBe(true);
+  });
+
+  it('shows the Dock tile the settings row remembers', async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsPanel
+        gateway={makeGateway({
+          getSettings: vi.fn(async () => ({ ...persistedSettings, dockIcon: true })),
+        })}
+      />,
+    );
+    await loadSettings();
+
+    expect(screen.getByRole('checkbox', { name: 'Show in the Dock' })).toBeChecked();
+    // Untouched, it goes back exactly as it came.
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Settings saved'));
+  });
 });
 
 describe('Settings page and storage semantics', () => {
@@ -529,10 +564,10 @@ describe('settings tabs', () => {
     await loadSettings();
 
     const tabs = screen.getAllByRole('tab');
-    expect(tabs).toHaveLength(8);
+    expect(tabs).toHaveLength(7);
     expect(screen.getByRole('tab', { name: 'Shortcut' })).toHaveAttribute('aria-selected', 'true');
 
-    // The point of tabs: the other five sections are not on screen competing for the eye.
+    // The point of tabs: the other six sections are not on screen competing for the eye.
     expect(screen.getByRole('textbox', { name: 'Global shortcut' })).toBeVisible();
     expect(screen.queryByRole('spinbutton', { name: 'Days kept' })).not.toBeInTheDocument();
 
@@ -848,46 +883,5 @@ describe('expiryLabel', () => {
     expect(expiryLabel(now - 1, now)).toContain('Press Connect again');
     // Absent is not an error: the line simply is not shown, and the pairing is unaffected.
     expect(expiryLabel(null, now)).toBeNull();
-  });
-
-  it('saves the TypeSafe key and runs a scan with flags and delete', async () => {
-    const user = userEvent.setup();
-    const saveTypeSafeSettings = vi.fn(async () => ({ apiKey: 'apikey_test' }));
-    const scanStatus = vi.fn(async () => ({
-      runId: 'scan-1',
-      state: 'completed' as const,
-      processed: 40,
-      total: 40,
-      flagged: [
-        { eventId: 7, preview: 'Moje hasło do banku: Kropka12!Malina', probability: 0.98 },
-      ],
-      errorCode: null,
-    }));
-    const scanStart = vi.fn(async () => ({ runId: 'scan-1' }));
-    const deleteEvent = vi.fn(async () => undefined);
-    const gateway = makeGateway({
-      saveTypeSafeSettings,
-      typesafeScanStart: scanStart,
-      typesafeScanStatus: scanStatus,
-      deleteEvent,
-    });
-    render(<SettingsPanel gateway={gateway} />);
-    await loadSettings();
-
-    // The tab strip reaches the privacy pane by its label.
-    await openTab('Privacy');
-
-    const key = screen.getByLabelText('TypeSafe API key');
-    await user.clear(key);
-    await user.type(key, 'apikey_test');
-    await user.click(screen.getByRole('button', { name: 'Save key' }));
-    expect(saveTypeSafeSettings).toHaveBeenCalledWith({ apiKey: 'apikey_test' });
-
-    await user.click(screen.getByRole('button', { name: 'Scan history' }));
-    expect(scanStart).toHaveBeenCalled();
-    await waitFor(() => expect(screen.getByText(/entries scanned, 1 worth a look/u)).toBeVisible());
-
-    await user.click(screen.getByRole('button', { name: 'Delete' }));
-    expect(deleteEvent).toHaveBeenCalledWith(7);
   });
 });
