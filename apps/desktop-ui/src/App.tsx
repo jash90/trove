@@ -29,10 +29,7 @@ import { useSelectedPreview } from "./hooks/useSelectedPreview";
 import { useLinkPreview } from "./hooks/useLinkPreview";
 import { useThumbnail } from "./hooks/useThumbnail";
 import { HISTORY_PAGE_SIZE } from "./lib/contracts";
-import {
-  SNAP_SHORTCUTS,
-  defaultSnapShortcuts,
-} from "./lib/snapShortcuts";
+import { SNAP_SHORTCUTS, defaultSnapShortcuts } from "./lib/snapShortcuts";
 import { filterApps } from "./lib/appSearch";
 import {
   buildPaletteItems,

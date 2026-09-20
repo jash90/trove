@@ -418,9 +418,7 @@ mod platform {
     /// Main-thread only, like every AppKit query; returns nothing off it and
     /// when nobody else is in front.
     fn frontmost_pid() -> Option<i32> {
-        if objc2::MainThreadMarker::new().is_none() {
-            return None;
-        }
+        objc2::MainThreadMarker::new()?;
         // SAFETY: reading the shared workspace singleton and the frontmost
         // application record is a query with no preconditions.
         let frontmost = unsafe { NSWorkspace::sharedWorkspace().frontmostApplication() };
@@ -441,6 +439,104 @@ mod platform {
             return SnapOutcome::Refused;
         };
         snap_window_of(mtm, pid, action)
+    }
+
+    /// The application the user was in before this one came forward — the
+    /// last window worth snapping when the palette is entered by a click
+    /// rather than by its summoning shortcut, which remembers at show time.
+    ///
+    /// The window server's own z-order is the truth here: the first
+    /// normal-layer window on screen that is not ours is the window that was
+    /// in front, which is the same fact the user remembers, not a guess.
+    /// There is no public "previously active" API to ask instead.
+    pub fn previous_active_pid() -> Option<i32> {
+        // SAFETY: the list, its dictionaries and the key strings are created
+        // and released here, and every value is copied out as a plain i32.
+        unsafe {
+            let list = CGWindowListCopyWindowInfo(K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY, 0);
+            if list.is_null() {
+                return None;
+            }
+            let pid_key = cf_string(b"kCGWindowOwnerPID\0");
+            let layer_key = cf_string(b"kCGWindowLayer\0");
+            let own = std::process::id() as i32;
+            let count = CFArrayGetCount(list);
+            let mut found = None;
+            for index in 0..count {
+                let window = CFArrayGetValueAtIndex(list, index);
+                if window.is_null() {
+                    continue;
+                }
+                // Only the ordinary window layer: menus, the Dock and
+                // floating system chrome sit above it and are never what
+                // the user was working in.
+                if dictionary_i32(window, layer_key) != Some(0) {
+                    continue;
+                }
+                match dictionary_i32(window, pid_key) {
+                    Some(pid) if pid > 0 && pid != own => {
+                        found = Some(pid);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if !pid_key.is_null() {
+                CFRelease(pid_key);
+            }
+            if !layer_key.is_null() {
+                CFRelease(layer_key);
+            }
+            CFRelease(list);
+            found
+        }
+    }
+
+    /// The z-order listing the window server keeps, front to back.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGWindowListCopyWindowInfo(options: u32, relative_to: u32) -> *const std::ffi::c_void;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFArrayGetCount(array: *const std::ffi::c_void) -> i64;
+        fn CFArrayGetValueAtIndex(array: *const std::ffi::c_void, index: i64) -> *const std::ffi::c_void;
+        fn CFDictionaryGetValue(
+            dictionary: *const std::ffi::c_void,
+            key: *const std::ffi::c_void,
+        ) -> *const std::ffi::c_void;
+        fn CFNumberGetValue(
+            number: *const std::ffi::c_void,
+            the_type: i32,
+            value_ptr: *mut std::ffi::c_void,
+        ) -> bool;
+    }
+
+    const K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY: u32 = 1 << 0;
+    /// `kCFNumberIntType` — the widest the window-info dictionaries use for
+    /// pids and layers, converted on the way out.
+    const K_CF_NUMBER_INT_TYPE: i32 = 9;
+
+    fn dictionary_i32(
+        dictionary: *const std::ffi::c_void,
+        key: *const std::ffi::c_void,
+    ) -> Option<i32> {
+        // SAFETY: the value is a CFNumber belonging to the dictionary, and
+        // the buffer is one i32 wide, which the type conversion honours.
+        unsafe {
+            let number = CFDictionaryGetValue(dictionary, key);
+            if number.is_null() {
+                return None;
+            }
+            let mut value: i32 = 0;
+            CFNumberGetValue(
+                number,
+                K_CF_NUMBER_INT_TYPE,
+                &mut value as *mut _ as *mut std::ffi::c_void,
+            )
+            .then_some(value)
+        }
     }
 
     /// The visible area of each screen, in Accessibility coordinates.
@@ -634,7 +730,7 @@ mod platform {
 }
 
 #[cfg(target_os = "macos")]
-pub use platform::{snap, snap_pid};
+pub use platform::{previous_active_pid, snap, snap_pid};
 
 #[cfg(not(target_os = "macos"))]
 pub fn snap(_action: SnapAction) -> SnapOutcome {

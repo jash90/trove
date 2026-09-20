@@ -353,6 +353,30 @@ pub fn forget_paste_target<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Remembers the application the palette took the front from.
+///
+/// Called whenever the palette comes forward — not only when its shortcut
+/// summons it — because a click into the floating palette owes its snaps
+/// the same target a summon would record: the window the user was last
+/// working in, whoever they touched most recently before this window rose.
+pub fn remember_target_on_focus<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(target) = app.try_state::<PasteTarget>() {
+        target.remember(last_active_before_us());
+    }
+}
+
+/// The most recently active application that is not this one, by the
+/// system's own ledger of who was in front when.
+#[cfg(target_os = "macos")]
+fn last_active_before_us() -> Option<i32> {
+    platform_macos::window_snap::previous_active_pid()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn last_active_before_us() -> Option<i32> {
+    None
+}
+
 #[cfg(target_os = "macos")]
 fn current_frontmost_pid() -> Option<i32> {
     platform_macos::frontmost_pid()

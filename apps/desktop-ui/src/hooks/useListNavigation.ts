@@ -1,4 +1,4 @@
-import { useEffect, useState, type KeyboardEvent } from 'react';
+import { useEffect, useState, type KeyboardEvent } from "react";
 
 interface UseListNavigationOptions<T> {
   items: readonly T[];
@@ -23,7 +23,7 @@ interface UseListNavigationResult {
  * duplicating it, so both lists move the same way because they share one
  * implementation, not because someone kept them in step by hand.
  */
-export const useListNavigation = <T,>({
+export const useListNavigation = <T>({
   items,
   keyOf,
   onActivate,
@@ -34,7 +34,9 @@ export const useListNavigation = <T,>({
   );
   const selectedKey = items.some((item) => keyOf(item) === storedSelectedKey)
     ? storedSelectedKey
-    : (items.length > 0 ? keyOf(items[0]!) : null);
+    : items.length > 0
+      ? keyOf(items[0]!)
+      : null;
 
   // Remember only a real selection. Writing the fallback back in would erase
   // what the user picked the moment a query narrows past it, so widening the
@@ -50,26 +52,28 @@ export const useListNavigation = <T,>({
     let nextIndex: number | null = null;
 
     switch (event.key) {
-      case 'ArrowDown':
+      case "ArrowDown":
         nextIndex = Math.min(Math.max(currentIndex, 0) + 1, items.length - 1);
         break;
-      case 'ArrowUp':
+      case "ArrowUp":
         nextIndex = Math.max(currentIndex - 1, 0);
         break;
-      case 'Home':
+      case "Home":
         nextIndex = 0;
         break;
-      case 'End':
+      case "End":
         nextIndex = items.length - 1;
         break;
-      case 'Enter':
+      case "Enter":
         if (selectedKey !== null) {
           event.preventDefault();
-          const item = items.find((candidate) => keyOf(candidate) === selectedKey);
+          const item = items.find(
+            (candidate) => keyOf(candidate) === selectedKey,
+          );
           if (item !== undefined) void onActivate(item);
         }
         return;
-      case 'Escape':
+      case "Escape":
         event.preventDefault();
         onEscape();
         return;

@@ -1,14 +1,17 @@
-import { FileJson, FolderOpen, KeyRound, ShieldAlert, X } from 'lucide-react';
-import { useEffect, useRef, useState, type KeyboardEventHandler } from 'react';
+import { FileJson, FolderOpen, KeyRound, ShieldAlert, X } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEventHandler } from "react";
 
-import { useModalFocus } from '../hooks/useModalFocus';
-import type { ImportProgress as ImportProgressContract, ImportSummary } from '../lib/contracts';
-import type { ClipboardGateway } from '../lib/gateway';
-import { ImportAnalysis } from './ImportAnalysis';
-import { ImportProgress as ImportProgressView } from './ImportProgress';
-import { ImportSummary as ImportSummaryView } from './ImportSummary';
+import { useModalFocus } from "../hooks/useModalFocus";
+import type {
+  ImportProgress as ImportProgressContract,
+  ImportSummary,
+} from "../lib/contracts";
+import type { ClipboardGateway } from "../lib/gateway";
+import { ImportAnalysis } from "./ImportAnalysis";
+import { ImportProgress as ImportProgressView } from "./ImportProgress";
+import { ImportSummary as ImportSummaryView } from "./ImportSummary";
 
-import type { ImportAnalysis as ImportAnalysisContract } from '../lib/contracts';
+import type { ImportAnalysis as ImportAnalysisContract } from "../lib/contracts";
 
 interface ImportWizardProps {
   gateway: ClipboardGateway;
@@ -17,24 +20,25 @@ interface ImportWizardProps {
 }
 
 type WizardPhase =
-  | { tag: 'idle' }
-  | { tag: 'analyzing' }
-  | { tag: 'password' }
-  | { tag: 'confirm'; analysis: ImportAnalysisContract }
-  | { tag: 'cancelling'; analysis: ImportAnalysisContract }
-  | { tag: 'running'; runId: string; recovering: boolean }
-  | { tag: 'complete'; summary: ImportSummary }
-  | { tag: 'failed' };
+  | { tag: "idle" }
+  | { tag: "analyzing" }
+  | { tag: "password" }
+  | { tag: "confirm"; analysis: ImportAnalysisContract }
+  | { tag: "cancelling"; analysis: ImportAnalysisContract }
+  | { tag: "running"; runId: string; recovering: boolean }
+  | { tag: "complete"; summary: ImportSummary }
+  | { tag: "failed" };
 
 // Every message here is a fixed literal. Gateway errors may embed a path or a
 // payload fragment, so their text never reaches the DOM.
-const ANALYSIS_ERROR = 'The archive could not be analysed. Check that the file or directory is a Raycast or SuperCmd export.';
-const DISCARD_ERROR = 'The prepared import could not be cancelled. Try again.';
-const PASSWORD_ERROR = 'The password does not match this file. Try again.';
+const ANALYSIS_ERROR =
+  "The archive could not be analysed. Check that the file or directory is a Raycast or SuperCmd export.";
+const DISCARD_ERROR = "The prepared import could not be cancelled. Try again.";
+const PASSWORD_ERROR = "The password does not match this file. Try again.";
 
 /// The backend answers with a stable code, never a message.
-const PASSWORD_REQUIRED = 'rayconfig_password_required';
-const PASSWORD_INVALID = 'rayconfig_password_invalid';
+const PASSWORD_REQUIRED = "rayconfig_password_required";
+const PASSWORD_INVALID = "rayconfig_password_invalid";
 
 /// Reads the code out of a rejected gateway call.
 ///
@@ -52,7 +56,7 @@ export const ImportWizard = ({
   onClose,
   pollIntervalMs = 400,
 }: ImportWizardProps): React.JSX.Element => {
-  const [phase, setPhase] = useState<WizardPhase>({ tag: 'idle' });
+  const [phase, setPhase] = useState<WizardPhase>({ tag: "idle" });
   const [progress, setProgress] = useState<ImportProgressContract | null>(null);
   const [error, setError] = useState<string | null>(null);
   const primaryRef = useRef<HTMLButtonElement>(null);
@@ -60,8 +64,13 @@ export const ImportWizard = ({
   // Resolves the password prompt from inside the analyze closure, so the
   // password is a local value rather than component state and cannot be
   // rendered, retained, or sent twice.
-  const passwordAnswer = useRef<((password: string | null) => void) | null>(null);
-  const modalFocus = useModalFocus({ active: true, initialFocusRef: primaryRef });
+  const passwordAnswer = useRef<((password: string | null) => void) | null>(
+    null,
+  );
+  const modalFocus = useModalFocus({
+    active: true,
+    initialFocusRef: primaryRef,
+  });
 
   useEffect(
     () => () => {
@@ -72,7 +81,7 @@ export const ImportWizard = ({
     [],
   );
 
-  const runId = phase.tag === 'running' ? phase.runId : null;
+  const runId = phase.tag === "running" ? phase.runId : null;
 
   useEffect(() => {
     if (runId === null) return;
@@ -84,20 +93,20 @@ export const ImportWizard = ({
       try {
         next = await gateway.getImportStatus(runId);
       } catch {
-        if (!cancelled) setPhase({ tag: 'failed' });
+        if (!cancelled) setPhase({ tag: "failed" });
         return;
       }
       if (cancelled) return;
       if (next.runId !== runId) {
-        setPhase({ tag: 'failed' });
+        setPhase({ tag: "failed" });
         return;
       }
-      if (next.state === 'failed') {
-        setPhase({ tag: 'failed' });
+      if (next.state === "failed") {
+        setPhase({ tag: "failed" });
         return;
       }
-      if (next.state === 'completed' && next.summary !== null) {
-        setPhase({ tag: 'complete', summary: next.summary });
+      if (next.state === "completed" && next.summary !== null) {
+        setPhase({ tag: "complete", summary: next.summary });
         return;
       }
       setProgress(next);
@@ -114,18 +123,20 @@ export const ImportWizard = ({
   const askForPassword = (): Promise<string | null> =>
     new Promise((resolve) => {
       passwordAnswer.current = resolve;
-      setPhase({ tag: 'password' });
+      setPhase({ tag: "password" });
     });
 
   const submitPassword = (password: string | null): void => {
     const answer = passwordAnswer.current;
     passwordAnswer.current = null;
     // Clear the field before anything else can read it again.
-    if (passwordInputRef.current) passwordInputRef.current.value = '';
+    if (passwordInputRef.current) passwordInputRef.current.value = "";
     answer?.(password);
   };
 
-  const analyze = async (choose: () => Promise<string | null>): Promise<void> => {
+  const analyze = async (
+    choose: () => Promise<string | null>,
+  ): Promise<void> => {
     setError(null);
     // The path lives only inside this call. It is never stored in state, so it
     // cannot reach the DOM or a later gateway call. The password is asked for
@@ -133,29 +144,29 @@ export const ImportWizard = ({
     // wrong password must not mean picking the file again.
     const path = await choose().catch(() => null);
     if (path === null) return;
-    setPhase({ tag: 'analyzing' });
+    setPhase({ tag: "analyzing" });
     let password: string | undefined;
     for (;;) {
       try {
         const analysis = await gateway.analyzeImport(path, password);
-        setPhase({ tag: 'confirm', analysis });
+        setPhase({ tag: "confirm", analysis });
         return;
       } catch (cause) {
         const code = errorCode(cause);
         if (code !== PASSWORD_REQUIRED && code !== PASSWORD_INVALID) {
-          setPhase({ tag: 'idle' });
+          setPhase({ tag: "idle" });
           setError(ANALYSIS_ERROR);
           return;
         }
         setError(code === PASSWORD_INVALID ? PASSWORD_ERROR : null);
         const answer = await askForPassword();
         if (answer === null) {
-          setPhase({ tag: 'idle' });
+          setPhase({ tag: "idle" });
           setError(null);
           return;
         }
         password = answer;
-        setPhase({ tag: 'analyzing' });
+        setPhase({ tag: "analyzing" });
       }
     }
   };
@@ -169,50 +180,54 @@ export const ImportWizard = ({
     } catch {
       // The response was lost, not necessarily the run. The analysis ID is the
       // run ID by contract, so recovery polls it instead of discarding blindly.
-      setPhase({ tag: 'running', runId: analysis.analysisId, recovering: true });
+      setPhase({
+        tag: "running",
+        runId: analysis.analysisId,
+        recovering: true,
+      });
       return;
     }
     if (handleRunId !== analysis.analysisId) {
-      setPhase({ tag: 'failed' });
+      setPhase({ tag: "failed" });
       return;
     }
-    setPhase({ tag: 'running', runId: handleRunId, recovering: false });
+    setPhase({ tag: "running", runId: handleRunId, recovering: false });
   };
 
   const cancel = async (analysis: ImportAnalysisContract): Promise<void> => {
     setError(null);
-    setPhase({ tag: 'cancelling', analysis });
+    setPhase({ tag: "cancelling", analysis });
     try {
       await gateway.discardImportAnalysis(analysis.analysisId);
     } catch {
-      setPhase({ tag: 'confirm', analysis });
+      setPhase({ tag: "confirm", analysis });
       setError(DISCARD_ERROR);
       return;
     }
     // The prepared analysis is gone, so the dialog must not keep offering it.
     // Reset before closing: the host may keep this instance mounted.
     setProgress(null);
-    setPhase({ tag: 'idle' });
+    setPhase({ tag: "idle" });
     onClose?.();
   };
 
   const requestClose = (): void => {
-    if (phase.tag === 'confirm') {
+    if (phase.tag === "confirm") {
       void cancel(phase.analysis);
       return;
     }
-    if (phase.tag === 'password') {
+    if (phase.tag === "password") {
       submitPassword(null);
       onClose?.();
       return;
     }
-    if (phase.tag === 'cancelling' || phase.tag === 'analyzing') return;
+    if (phase.tag === "cancelling" || phase.tag === "analyzing") return;
     onClose?.();
   };
 
   const handleKeyDown: KeyboardEventHandler<HTMLDivElement> = (event) => {
     modalFocus.onKeyDown(event);
-    if (event.key === 'Escape') {
+    if (event.key === "Escape") {
       event.preventDefault();
       requestClose();
     }
@@ -225,12 +240,12 @@ export const ImportWizard = ({
   requestCloseRef.current = requestClose;
   useEffect(() => {
     const onDocumentKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== "Escape") return;
       event.preventDefault();
       requestCloseRef.current();
     };
-    document.addEventListener('keydown', onDocumentKeyDown);
-    return () => document.removeEventListener('keydown', onDocumentKeyDown);
+    document.addEventListener("keydown", onDocumentKeyDown);
+    return () => document.removeEventListener("keydown", onDocumentKeyDown);
   }, []);
 
   return (
@@ -267,7 +282,7 @@ export const ImportWizard = ({
           </p>
         ) : null}
 
-        {phase.tag === 'idle' ? (
+        {phase.tag === "idle" ? (
           <div className="workflow-choices">
             <button
               ref={primaryRef}
@@ -280,7 +295,9 @@ export const ImportWizard = ({
             </button>
             <button
               type="button"
-              onClick={() => void analyze(() => gateway.chooseImportDirectory())}
+              onClick={() =>
+                void analyze(() => gateway.chooseImportDirectory())
+              }
             >
               <FolderOpen size={16} aria-hidden="true" />
               Choose an export folder
@@ -288,23 +305,23 @@ export const ImportWizard = ({
           </div>
         ) : null}
 
-        {phase.tag === 'analyzing' ? (
+        {phase.tag === "analyzing" ? (
           <p className="workflow-pending" role="status">
             Analysing the archive…
           </p>
         ) : null}
 
-        {phase.tag === 'password' ? (
+        {phase.tag === "password" ? (
           <form
             className="workflow-password"
             onSubmit={(event) => {
               event.preventDefault();
-              submitPassword(passwordInputRef.current?.value ?? '');
+              submitPassword(passwordInputRef.current?.value ?? "");
             }}
           >
             <p className="workflow-note">
-              This export is encrypted. The password is used only to
-              odczytania — nie jest nigdzie zapisywane.
+              This export is encrypted. The password is used only to odczytania
+              — nie jest nigdzie zapisywane.
             </p>
             <label className="workflow-field" htmlFor="rayconfig-password">
               <KeyRound size={15} aria-hidden="true" />
@@ -331,21 +348,21 @@ export const ImportWizard = ({
           </form>
         ) : null}
 
-        {phase.tag === 'confirm' || phase.tag === 'cancelling' ? (
+        {phase.tag === "confirm" || phase.tag === "cancelling" ? (
           <>
             <ImportAnalysis analysis={phase.analysis} />
             <div className="workflow-actions">
               <button
                 type="button"
-                disabled={phase.tag === 'cancelling'}
+                disabled={phase.tag === "cancelling"}
                 onClick={() => void cancel(phase.analysis)}
               >
-                {phase.tag === 'cancelling' ? 'Cancelling…' : 'Cancel import'}
+                {phase.tag === "cancelling" ? "Cancelling…" : "Cancel import"}
               </button>
               <button
                 type="button"
                 className="workflow-primary"
-                disabled={phase.tag === 'cancelling'}
+                disabled={phase.tag === "cancelling"}
                 onClick={() => void start(phase.analysis)}
               >
                 Rozpocznij import
@@ -354,12 +371,12 @@ export const ImportWizard = ({
           </>
         ) : null}
 
-        {phase.tag === 'running' ? (
+        {phase.tag === "running" ? (
           <ImportProgressView
             progress={
               progress ?? {
                 runId: phase.runId,
-                state: 'running',
+                state: "running",
                 processed: 0,
                 total: 0,
                 imported: 0,
@@ -370,18 +387,25 @@ export const ImportWizard = ({
                 summary: null,
               }
             }
-            phase={phase.recovering && progress === null ? 'recovering' : 'running'}
+            phase={
+              phase.recovering && progress === null ? "recovering" : "running"
+            }
           />
         ) : null}
 
-        {phase.tag === 'complete' ? <ImportSummaryView summary={phase.summary} /> : null}
+        {phase.tag === "complete" ? (
+          <ImportSummaryView summary={phase.summary} />
+        ) : null}
 
-        {phase.tag === 'failed' ? (
-          <section className="import-failure" aria-labelledby="import-failure-title">
+        {phase.tag === "failed" ? (
+          <section
+            className="import-failure"
+            aria-labelledby="import-failure-title"
+          >
             <h2 id="import-failure-title">The import did not finish</h2>
             <p>
-              The state of the run is unknown. Open the import again — repeating the
-              same archive creates no duplicates.
+              The state of the run is unknown. Open the import again — repeating
+              the same archive creates no duplicates.
             </p>
           </section>
         ) : null}

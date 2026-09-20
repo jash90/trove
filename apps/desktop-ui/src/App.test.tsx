@@ -251,9 +251,7 @@ describe("the unified palette", () => {
     const snapWindow = vi.fn(async () => true);
     const user = userEvent.setup();
     render(
-      <App
-        gateway={{ ...mockGateway, snapWindow } as ClipboardGateway}
-      />,
+      <App gateway={{ ...mockGateway, snapWindow } as ClipboardGateway} />,
     );
     await waitFor(() => expect(homeTiles()).toHaveLength(5));
 
@@ -274,9 +272,7 @@ describe("the unified palette", () => {
     const snapWindow = vi.fn(async () => false);
     const user = userEvent.setup();
     render(
-      <App
-        gateway={{ ...mockGateway, snapWindow } as ClipboardGateway}
-      />,
+      <App gateway={{ ...mockGateway, snapWindow } as ClipboardGateway} />,
     );
     await waitFor(() => expect(homeTiles()).toHaveLength(5));
 
@@ -284,9 +280,9 @@ describe("the unified palette", () => {
     await user.keyboard("{Enter}");
 
     expect(snapWindow).toHaveBeenCalledWith("leftHalf");
-    expect(
-      await screen.findByRole("alert"),
-    ).toHaveTextContent("That window could not be arranged.");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "That window could not be arranged.",
+    );
     // Still in the category — a refused snap is not a reason to leave it.
     expect(screen.getAllByRole("option")).toHaveLength(10);
   });
@@ -675,9 +671,7 @@ describe("the unified palette", () => {
     // The fourth Tab passes through the Windows category — ten
     // arrangements, no query — on its way back to the chooser.
     await user.keyboard("{Tab}");
-    await waitFor(() =>
-      expect(screen.getAllByRole("option")).toHaveLength(10),
-    );
+    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(10));
 
     await user.keyboard("{Tab}");
     await waitFor(() => expect(homeTiles()).toHaveLength(5));

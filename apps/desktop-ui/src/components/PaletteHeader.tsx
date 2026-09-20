@@ -1,8 +1,8 @@
-import { Search } from 'lucide-react';
-import type { ChangeEventHandler, KeyboardEventHandler, Ref } from 'react';
+import { Search } from "lucide-react";
+import type { ChangeEventHandler, KeyboardEventHandler, Ref } from "react";
 
-import { formatCount } from '../lib/format';
-import { TypeFilter } from './TypeFilter';
+import { formatCount } from "../lib/format";
+import { TypeFilter } from "./TypeFilter";
 
 /** One category the palette can be showing. */
 export type PaletteMode = "history" | "apps" | "vault" | "windows";
@@ -13,7 +13,7 @@ export type PaletteMode = "history" | "apps" | "vault" | "windows";
  * settings can restore, where the field drives everything at once and the
  * category control is not on screen at all.
  */
-export type PaletteView = PaletteMode | 'all' | 'home';
+export type PaletteView = PaletteMode | "all" | "home";
 
 /** The categories in picker order. */
 export const PALETTE_CATEGORIES: readonly {
@@ -21,15 +21,15 @@ export const PALETTE_CATEGORIES: readonly {
   key: string;
   label: string;
 }[] = [
-  { mode: 'apps', key: '1', label: 'Applications' },
-  { mode: 'history', key: '2', label: 'Clipboard history' },
-  { mode: 'vault', key: '3', label: 'Key vault' },
-  { mode: 'windows', key: '4', label: 'Windows' },
+  { mode: "apps", key: "1", label: "Applications" },
+  { mode: "history", key: "2", label: "Clipboard history" },
+  { mode: "vault", key: "3", label: "Key vault" },
+  { mode: "windows", key: "4", label: "Windows" },
 ];
 
 /** The chat tile: not a palette view but a window of its own, opened from
  * the chooser like the rest and living beside it. */
-export const PALETTE_CHAT_CATEGORY = { key: '5', label: 'Chat' } as const;
+export const PALETTE_CHAT_CATEGORY = { key: "5", label: "Chat" } as const;
 
 interface PaletteHeaderProps {
   query: string;
@@ -72,31 +72,37 @@ export const PaletteHeader = ({
   const handleChange: ChangeEventHandler<HTMLInputElement> = (event) => {
     onQueryChange(event.currentTarget.value);
   };
-  const combined = mode === 'all';
-  const onHome = mode === 'home';
-  const searchLabel = mode === 'apps'
-    ? 'Search applications'
-    : mode === 'vault'
-      ? 'Search the vault'
-      : mode === 'windows'
-        ? 'Arrange windows'
-        : 'Search history';
+  const combined = mode === "all";
+  const onHome = mode === "home";
+  const searchLabel =
+    mode === "apps"
+      ? "Search applications"
+      : mode === "vault"
+        ? "Search the vault"
+        : mode === "windows"
+          ? "Arrange windows"
+          : "Search history";
   const searchPlaceholder = onHome
-    ? 'Search history, or pick a category…'
-    : mode === 'apps'
-      ? 'Search applications…'
-      : mode === 'vault'
-        ? 'Search the vault…'
-        : mode === 'windows'
-          ? 'Pick an arrangement…'
-          : mode === 'history'
-            ? 'Search history…'
-            : 'Search applications and history…';
+    ? "Search history, or pick a category…"
+    : mode === "apps"
+      ? "Search applications…"
+      : mode === "vault"
+        ? "Search the vault…"
+        : mode === "windows"
+          ? "Pick an arrangement…"
+          : mode === "history"
+            ? "Search history…"
+            : "Search applications and history…";
 
   return (
     <header className="palette-header">
       <label className="search-field" htmlFor="history-search">
-        <Search className="search-field__icon" size={19} strokeWidth={1.8} aria-hidden="true" />
+        <Search
+          className="search-field__icon"
+          size={19}
+          strokeWidth={1.8}
+          aria-hidden="true"
+        />
         <span className="sr-only">{searchLabel}</span>
         <input
           ref={searchInputRef}
@@ -118,15 +124,15 @@ export const PaletteHeader = ({
             Announced only once it settles — mid-typing it would read out a
             new number on every letter. */}
         <span
-          className={`search-field__count${refreshing ? ' is-refreshing' : ''}`}
+          className={`search-field__count${refreshing ? " is-refreshing" : ""}`}
           aria-live="polite"
           aria-busy={refreshing}
         >
           {formatCount(resultCount)}
-          {resultsTruncated ? '+' : ''}
+          {resultsTruncated ? "+" : ""}
         </span>
       </label>
-      {mode === 'history' || mode === 'all' ? (
+      {mode === "history" || mode === "all" ? (
         <TypeFilter query={query} onQueryChange={onQueryChange} />
       ) : null}
     </header>

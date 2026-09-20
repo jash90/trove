@@ -174,11 +174,17 @@ pub async fn snap_window<R: tauri::Runtime>(
         let Some(action) = platform_macos::SnapAction::from_id(&action_id) else {
             return Err("unknown_snap_action".to_owned());
         };
-        let Some(pid) = app
+        // The remembered target first — the window the palette was summoned
+        // or clicked away from — and the window server's z-order when nothing
+        // is remembered: a fresh launch that activated itself leaves the
+        // target empty, and the frontmost window that is not ours is still
+        // exactly the window the user means.
+        let pid = app
             .try_state::<crate::hotkey::PasteTarget>()
             .and_then(|target| target.current())
             .filter(|pid| *pid > 0)
-        else {
+            .or_else(platform_macos::window_snap::previous_active_pid);
+        let Some(pid) = pid else {
             return Ok(false);
         };
         // AppKit's window queries answer from the main thread; the channel
