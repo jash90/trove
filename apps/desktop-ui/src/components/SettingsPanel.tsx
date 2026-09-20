@@ -9,8 +9,14 @@ import {
   Timer,
   Vault,
   X,
-} from 'lucide-react';
-import { useEffect, useRef, useState, type FormEventHandler, type KeyboardEventHandler } from 'react';
+} from "lucide-react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEventHandler,
+  type KeyboardEventHandler,
+} from "react";
 
 import type {
   AppSettings,
@@ -21,11 +27,11 @@ import type {
   ShortcutRelease,
   ShortcutStatus,
   StorageStats as StorageStatsContract,
-} from '../lib/contracts';
-import type { ClipboardGateway } from '../lib/gateway';
-import { SNAP_SHORTCUTS, defaultSnapShortcuts } from '../lib/snapShortcuts';
-import { SettingsTabs, type SettingsTab } from './SettingsTabs';
-import { StorageStats } from './StorageStats';
+} from "../lib/contracts";
+import type { ClipboardGateway } from "../lib/gateway";
+import { SNAP_SHORTCUTS, defaultSnapShortcuts } from "../lib/snapShortcuts";
+import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
+import { StorageStats } from "./StorageStats";
 
 const MAX_DENYLIST_ENTRIES = 200;
 const MAX_DENYLIST_ENTRY_BYTES = 256;
@@ -40,30 +46,31 @@ const MAX_RETENTION_DAYS = 3_650;
  * the chord Rectangle's corner snaps live on.
  */
 const PRIMARY_MODIFIERS = new Map([
-  ['commandorcontrol', 'CommandOrControl'],
-  ['command', 'Command'],
-  ['control', 'Control'],
+  ["commandorcontrol", "CommandOrControl"],
+  ["command", "Command"],
+  ["control", "Control"],
 ]);
 const SECONDARY_MODIFIERS = new Map([
-  ['alt', 'Alt'],
-  ['shift', 'Shift'],
+  ["alt", "Alt"],
+  ["shift", "Shift"],
 ]);
-const HOTKEY_KEY_PATTERN = /^(?:[A-Z0-9]|SPACE|ARROW(?:LEFT|RIGHT|UP|DOWN)|F(?:[1-9]|1\d|2[0-4]))$/u;
+const HOTKEY_KEY_PATTERN =
+  /^(?:[A-Z0-9]|SPACE|ARROW(?:LEFT|RIGHT|UP|DOWN)|F(?:[1-9]|1\d|2[0-4]))$/u;
 /** Keys the platform syntax spells out rather than showing as a character. */
 const NAMED_KEYS: Record<string, string> = {
-  SPACE: 'Space',
-  ARROWLEFT: 'ArrowLeft',
-  ARROWRIGHT: 'ArrowRight',
-  ARROWUP: 'ArrowUp',
-  ARROWDOWN: 'ArrowDown',
+  SPACE: "Space",
+  ARROWLEFT: "ArrowLeft",
+  ARROWRIGHT: "ArrowRight",
+  ARROWUP: "ArrowUp",
+  ARROWDOWN: "ArrowDown",
 };
 const DENYLIST_ENTRY_PATTERN = /^[a-z0-9._-]+$/u;
 
 export const normalizePlatformHotkey = (value: string): string => {
   const invalid = (): never => {
-    throw new Error('invalid_hotkey');
+    throw new Error("invalid_hotkey");
   };
-  const parts = value.split('+').map((part) => part.trim());
+  const parts = value.split("+").map((part) => part.trim());
   if (parts.length < 2 || parts.some((part) => part.length === 0)) invalid();
 
   const upper = parts.at(-1)!.toUpperCase();
@@ -82,7 +89,7 @@ export const normalizePlatformHotkey = (value: string): string => {
       // Control beside a command-family token is an extra modifier (⌘⌃),
       // not a second primary; Control twice, or two command-family tokens,
       // are one key held twice and remain nonsense.
-      if (token === 'control') {
+      if (token === "control") {
         if (controlHeld) invalid();
         controlHeld = true;
         continue;
@@ -99,21 +106,21 @@ export const normalizePlatformHotkey = (value: string): string => {
   // Control standing alone is itself a primary; beside a command-family one
   // it stays the extra modifier it was recorded as.
   if (primary === null && controlHeld) {
-    primary = 'Control';
+    primary = "Control";
     controlHeld = false;
   }
   // Alt on its own is enough — ⌥Space is an ordinary launcher shortcut, and the systems people
   // compare this against bind exactly that. Shift on its own is not: Shift+A is how a capital A
   // is typed, so a global binding on it would swallow ordinary typing everywhere.
-  if (primary === null && !secondary.has('Alt')) invalid();
+  if (primary === null && !secondary.has("Alt")) invalid();
 
   return [
     ...(primary === null ? [] : [primary]),
-    ...(secondary.has('Alt') ? ['Alt'] : []),
-    ...(secondary.has('Shift') ? ['Shift'] : []),
-    ...(controlHeld ? ['Control'] : []),
+    ...(secondary.has("Alt") ? ["Alt"] : []),
+    ...(secondary.has("Shift") ? ["Shift"] : []),
+    ...(controlHeld ? ["Control"] : []),
     key,
-  ].join('+');
+  ].join("+");
 };
 
 /**
@@ -141,9 +148,10 @@ export const acceleratorFromKeyEvent = (event: {
   const key = (() => {
     if (/^Key[A-Z]$/u.test(event.code)) return event.code.slice(3);
     if (/^Digit[0-9]$/u.test(event.code)) return event.code.slice(5);
-    if (event.code === 'Space') return 'SPACE';
+    if (event.code === "Space") return "SPACE";
     if (/^F(?:[1-9]|1\d|2[0-4])$/u.test(event.code)) return event.code;
-    if (/^Arrow(?:Left|Right|Up|Down)$/u.test(event.code)) return event.code.toUpperCase();
+    if (/^Arrow(?:Left|Right|Up|Down)$/u.test(event.code))
+      return event.code.toUpperCase();
     return null;
   })();
   if (key === null) return null;
@@ -151,16 +159,20 @@ export const acceleratorFromKeyEvent = (event: {
   // ⌘⌃ are two different keys and a chord worth recording — Rectangle's
   // corner snaps live on it — so Control rides along beside a command
   // primary rather than being rejected as a second one.
-  const primary = event.metaKey ? 'CommandOrControl' : event.ctrlKey ? 'Control' : null;
+  const primary = event.metaKey
+    ? "CommandOrControl"
+    : event.ctrlKey
+      ? "Control"
+      : null;
   if (primary === null && !event.altKey) return null;
 
   const parts = primary === null ? [] : [primary];
-  if (event.altKey) parts.push('Alt');
-  if (event.shiftKey) parts.push('Shift');
-  if (event.ctrlKey && event.metaKey) parts.push('Control');
+  if (event.altKey) parts.push("Alt");
+  if (event.shiftKey) parts.push("Shift");
+  if (event.ctrlKey && event.metaKey) parts.push("Control");
   parts.push(key);
   try {
-    return normalizePlatformHotkey(parts.join('+'));
+    return normalizePlatformHotkey(parts.join("+"));
   } catch {
     return null;
   }
@@ -179,19 +191,21 @@ export const normalizeExecutableDenylistEntry = (value: string): string => {
     new TextEncoder().encode(lowered).length > MAX_DENYLIST_ENTRY_BYTES ||
     !DENYLIST_ENTRY_PATTERN.test(lowered)
   ) {
-    throw new Error('invalid_denylist_entry');
+    throw new Error("invalid_denylist_entry");
   }
   return lowered;
 };
 
-export const normalizeDenylistEntries = (entries: readonly string[]): string[] => {
+export const normalizeDenylistEntries = (
+  entries: readonly string[],
+): string[] => {
   const normalized = new Set<string>();
   for (const entry of entries) {
     if (entry.trim().length === 0) continue;
     normalized.add(normalizeExecutableDenylistEntry(entry));
   }
   if (normalized.size > MAX_DENYLIST_ENTRIES) {
-    throw new Error('denylist_too_large');
+    throw new Error("denylist_too_large");
   }
   return [...normalized];
 };
@@ -201,26 +215,33 @@ interface SettingsPanelProps {
   onClose?: () => void;
 }
 
-type StorageStatus = 'loading' | 'ready' | 'unavailable';
+type StorageStatus = "loading" | "ready" | "unavailable";
 
-const TRANSACTION_ERROR = 'The settings could not be applied. Nothing was saved.';
+const TRANSACTION_ERROR =
+  "The settings could not be applied. Nothing was saved.";
 const EXPORT_ERROR =
-  'The export could not be written. Check that the directory is empty and writable.';
-const RETENTION_ERROR = 'Give a whole number of days from 1 to 3650.';
-const HOTKEY_ERROR = 'A shortcut needs a modifier and one letter, digit or function key.';
-const SNAP_ERROR = 'Every window shortcut needs a modifier and one key.';
+  "The export could not be written. Check that the directory is empty and writable.";
+const RETENTION_ERROR = "Give a whole number of days from 1 to 3650.";
+const HOTKEY_ERROR =
+  "A shortcut needs a modifier and one letter, digit or function key.";
+const SNAP_ERROR = "Every window shortcut needs a modifier and one key.";
 const SNAP_DUPLICATE_ERROR =
-  'Each window shortcut, and the global one, must be a different combination.';
-const DENYLIST_ERROR = 'The exclusion list holds an invalid entry, or is too long.';
+  "Each window shortcut, and the global one, must be a different combination.";
+const DENYLIST_ERROR =
+  "The exclusion list holds an invalid entry, or is too long.";
 const KEYVAULT_SAVE_FIRST =
-  'Save the vault address, token and private key first — the pane reads what is saved.';
+  "Save the vault address, token and private key first — the pane reads what is saved.";
 
 /**
  * The code out of a rejected vault call. The core rejects with the bare code
  * string — not an Error — so both shapes are read; anything else is unknown.
  */
 export const vaultErrorCode = (error: unknown): string =>
-  typeof error === 'string' ? error : error instanceof Error ? error.message : '';
+  typeof error === "string"
+    ? error
+    : error instanceof Error
+      ? error.message
+      : "";
 
 /** One plain sentence per vault denial. Codes only reach here; never values. */
 /** What to say when a pairing stops for a reason that is not success. */
@@ -232,86 +253,89 @@ export const vaultErrorCode = (error: unknown): string =>
 /// Labels are short because a tab label is not a heading — seven of them share one row, and the
 /// full names are in the section headings where there is room for them.
 const SETTINGS_TABS: readonly SettingsTab[] = [
-  { id: 'shortcut', label: 'Shortcut' },
-  { id: 'windows', label: 'Windows' },
-  { id: 'retention', label: 'Retention' },
-  { id: 'apps', label: 'Apps' },
-  { id: 'links', label: 'Links' },
-  { id: 'keyvault', label: 'Keyvault' },
-  { id: 'storage', label: 'Storage' },
-  { id: 'export', label: 'Export' },
+  { id: "shortcut", label: "Shortcut" },
+  { id: "windows", label: "Windows" },
+  { id: "retention", label: "Retention" },
+  { id: "apps", label: "Apps" },
+  { id: "links", label: "Links" },
+  { id: "keyvault", label: "Keyvault" },
+  { id: "storage", label: "Storage" },
+  { id: "export", label: "Export" },
 ];
 
-export const expiryLabel = (expiresAt: number | null, now: number): string | null => {
+export const expiryLabel = (
+  expiresAt: number | null,
+  now: number,
+): string | null => {
   if (expiresAt === null) return null;
   const minutes = Math.floor((expiresAt - now) / 60_000);
-  if (minutes <= 0) return 'This code has expired. Press Connect again.';
-  if (minutes === 1) return 'This code works for about a minute more.';
+  if (minutes <= 0) return "This code has expired. Press Connect again.";
+  if (minutes === 1) return "This code works for about a minute more.";
   return `This code works for about ${minutes} more minutes.`;
 };
 
 export const pairingMessage = (status: string): string => {
   switch (status) {
-    case 'paired':
-      return 'Connected. This device has its own key and its own token now.';
-    case 'expired':
-      return 'That connection request expired. Start again.';
-    case 'alreadyClaimed':
-      return 'That connection was already collected — by something other than this application. Start again, and approve only the fingerprint shown here.';
-    case 'notFound':
-      return 'That connection request no longer exists. Start again.';
+    case "paired":
+      return "Connected. This device has its own key and its own token now.";
+    case "expired":
+      return "That connection request expired. Start again.";
+    case "alreadyClaimed":
+      return "That connection was already collected — by something other than this application. Start again, and approve only the fingerprint shown here.";
+    case "notFound":
+      return "That connection request no longer exists. Start again.";
     default:
-      return 'Connecting stopped unexpectedly.';
+      return "Connecting stopped unexpectedly.";
   }
 };
 
 export const keyvaultErrorMessage = (code: string): string => {
   switch (code) {
-    case 'keyvault_vault_api_not_advertised':
-      return 'That address answers, but nothing there says where its vault is. Check the address, or update the vault so its page advertises one.';
-    case 'keyvault_no_vault_address':
-      return 'Nothing here names a vault yet. Type its address above, then connect.';
-    case 'keyvault_pairing_page_unknown':
-      return 'This vault has not published where its web interface lives, so there is nowhere to send you to approve.';
-    case 'keyvault_browser_failed':
-      return 'Could not open a browser to finish connecting.';
-    case 'keyvault_pairing_failed':
-      return 'Could not start connecting to that vault.';
-    case 'keyvault_device_identity_invalid':
-      return 'The device vault identity at ~/.config/keyvault/agent.json could not be read.';
-    case 'keyvault_not_configured':
+    case "keyvault_vault_api_not_advertised":
+      return "That address answers, but nothing there says where its vault is. Check the address, or update the vault so its page advertises one.";
+    case "keyvault_no_vault_address":
+      return "Nothing here names a vault yet. Type its address above, then connect.";
+    case "keyvault_pairing_page_unknown":
+      return "This vault has not published where its web interface lives, so there is nowhere to send you to approve.";
+    case "keyvault_browser_failed":
+      return "Could not open a browser to finish connecting.";
+    case "keyvault_pairing_failed":
+      return "Could not start connecting to that vault.";
+    case "keyvault_device_identity_invalid":
+      return "The device vault identity at ~/.config/keyvault/agent.json could not be read.";
+    case "keyvault_not_configured":
       return KEYVAULT_SAVE_FIRST;
-    case 'keyvault_invalid_config':
-    case 'keyvault_invalid_url':
-    case 'keyvault_invalid_token':
-    case 'keyvault_invalid_private_key':
-      return 'The saved vault configuration is incomplete or malformed — check all three fields.';
-    case 'keyvault_unauthorized':
-      return 'The token was refused — create a new one in the vault.';
-    case 'keyvault_agent_access_disabled':
-      return 'The vault will not hand this secret to agents — enable agent access for it there.';
-    case 'keyvault_not_found':
-      return 'No such secret inside this token’s scope.';
-    case 'keyvault_rate_limited':
-      return 'The vault allows one read a second — try again in a moment.';
-    case 'keyvault_decrypt_failed':
-      return 'The private key does not match the one the vault seals to.';
-    case 'keyvault_pairing_payload_invalid':
-      return 'Connecting got as far as the vault answering, but what it sent back was not a complete identity. The vault deployment is misconfigured.';
-    case 'keyvault_device_identity_missing':
-      return 'This device has no vault identity yet. Use Connect to pair it.';
-    case 'keyvault_bad_response':
-      return 'The vault replied in a shape this version does not understand.';
-    case 'keyvault_invalid_slug':
-      return 'That secret name is not one the vault can hold.';
-    case 'keyvault_envelope_invalid':
-    case 'keyvault_envelope_unsupported_version':
-    case 'keyvault_envelope_too_large':
-      return 'The sealed answer from the vault was not one this version can open.';
-    case 'keyvault_transport_failed':
-      return 'The vault could not be reached. Check the address and the connection.';
+    case "keyvault_invalid_config":
+    case "keyvault_invalid_url":
+    case "keyvault_invalid_token":
+    case "keyvault_invalid_private_key":
+      return "The saved vault configuration is incomplete or malformed — check all three fields.";
+    case "keyvault_unauthorized":
+      return "The token was refused — create a new one in the vault.";
+    case "keyvault_agent_access_disabled":
+      return "The vault will not hand this secret to agents — enable agent access for it there.";
+    case "keyvault_not_found":
+      return "No such secret inside this token’s scope.";
+    case "keyvault_rate_limited":
+      return "The vault allows one read a second — try again in a moment.";
+    case "keyvault_decrypt_failed":
+      return "The private key does not match the one the vault seals to.";
+    case "keyvault_pairing_payload_invalid":
+      return "Connecting got as far as the vault answering, but what it sent back was not a complete identity. The vault deployment is misconfigured.";
+    case "keyvault_device_identity_missing":
+      return "This device has no vault identity yet. Use Connect to pair it.";
+    case "keyvault_bad_response":
+      return "The vault replied in a shape this version does not understand.";
+    case "keyvault_invalid_slug":
+      return "That secret name is not one the vault can hold.";
+    case "keyvault_envelope_invalid":
+    case "keyvault_envelope_unsupported_version":
+    case "keyvault_envelope_too_large":
+      return "The sealed answer from the vault was not one this version can open.";
+    case "keyvault_transport_failed":
+      return "The vault could not be reached. Check the address and the connection.";
     default:
-      return 'The vault answered with something this pane could not read.';
+      return "The vault answered with something this pane could not read.";
   }
 };
 
@@ -324,34 +348,42 @@ export const keyvaultErrorMessage = (code: string): string => {
  * Reporting that as done would send them off to press a key that still opens
  * Spotlight.
  */
-export const shortcutReleaseNotice = (outcome: ShortcutRelease): string | null => {
+export const shortcutReleaseNotice = (
+  outcome: ShortcutRelease,
+): string | null => {
   switch (outcome) {
-    case 'applied':
+    case "applied":
       return null;
-    case 'alreadyFree':
-      return 'Nothing in the system was holding that shortcut.';
-    case 'needsLogout':
-      return 'Saved. It takes effect after you log out and back in.';
+    case "alreadyFree":
+      return "Nothing in the system was holding that shortcut.";
+    case "needsLogout":
+      return "Saved. It takes effect after you log out and back in.";
     default:
-      return 'Trove could not change the system shortcut. Open Keyboard Shortcuts, turn the conflicting one off, then try again.';
+      return "Trove could not change the system shortcut. Open Keyboard Shortcuts, turn the conflicting one off, then try again.";
   }
 };
 
-export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.JSX.Element => {
+export const SettingsPanel = ({
+  gateway,
+  onClose,
+}: SettingsPanelProps): React.JSX.Element => {
   const [persisted, setPersisted] = useState<AppSettings | null>(null);
-  const [hotkey, setHotkey] = useState('');
+  const [hotkey, setHotkey] = useState("");
   const [autostart, setAutostart] = useState(false);
   const [nativeAutostart, setNativeAutostart] = useState<boolean | null>(null);
   const [unlimitedRetention, setUnlimitedRetention] = useState(false);
-  const [retentionDays, setRetentionDays] = useState('');
-  const [denylist, setDenylist] = useState('');
+  const [retentionDays, setRetentionDays] = useState("");
+  const [denylist, setDenylist] = useState("");
   const [stats, setStats] = useState<StorageStatsContract | null>(null);
   const [linkPreviews, setLinkPreviews] = useState(true);
   const [paletteModes, setPaletteModes] = useState(true);
   const [dockIcon, setDockIcon] = useState(false);
-  const [snapShortcuts, setSnapShortcuts] = useState<Record<string, string>>(defaultSnapShortcuts);
-  const [vaultUrl, setVaultUrl] = useState('');
-  const [vaultSecrets, setVaultSecrets] = useState<KeyvaultSecret[] | null>(null);
+  const [snapShortcuts, setSnapShortcuts] =
+    useState<Record<string, string>>(defaultSnapShortcuts);
+  const [vaultUrl, setVaultUrl] = useState("");
+  const [vaultSecrets, setVaultSecrets] = useState<KeyvaultSecret[] | null>(
+    null,
+  );
   const [pairing, setPairing] = useState<PairingStarted | null>(null);
   // Ticked by the poll below, so the time left is honest rather than frozen at whatever it was
   // when the pairing started.
@@ -366,14 +398,17 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [vaultError, setVaultError] = useState<string | null>(null);
   const [vaultCopiedSlug, setVaultCopiedSlug] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
-  const [exportSummary, setExportSummary] = useState<ExportSummaryContract | null>(null);
-  const [storageStatus, setStorageStatus] = useState<StorageStatus>('loading');
+  const [exportSummary, setExportSummary] =
+    useState<ExportSummaryContract | null>(null);
+  const [storageStatus, setStorageStatus] = useState<StorageStatus>("loading");
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [pending, setPending] = useState(false);
   // Read from the system rather than remembered: what holds a chord is decided
   // outside this application and can change while it runs.
-  const [shortcutStatus, setShortcutStatus] = useState<ShortcutStatus | null>(null);
+  const [shortcutStatus, setShortcutStatus] = useState<ShortcutStatus | null>(
+    null,
+  );
   const [shortcutBusy, setShortcutBusy] = useState(false);
   const [shortcutNotice, setShortcutNotice] = useState<string | null>(null);
   const hotkeyRef = useRef<HTMLInputElement>(null);
@@ -387,7 +422,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setShortcutNotice(shortcutReleaseNotice(await change()));
       // Read the system back rather than assuming the change took: the point of
       // the row is to say what is true now, not what was asked for.
-      setShortcutStatus((await gateway.getShortcutStatus?.().catch(() => null)) ?? null);
+      setShortcutStatus(
+        (await gateway.getShortcutStatus?.().catch(() => null)) ?? null,
+      );
     } finally {
       setShortcutBusy(false);
     }
@@ -405,7 +442,8 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
         gateway.getSettings(),
         gateway.isAutostartEnabled().catch(() => null),
         gateway.keyvaultIdentity().catch(() => null),
-        gateway.getShortcutStatus?.().catch(() => null) ?? Promise.resolve(null),
+        gateway.getShortcutStatus?.().catch(() => null) ??
+          Promise.resolve(null),
       ]);
       if (cancelled) return;
       setShortcutStatus(shortcut);
@@ -415,13 +453,18 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setAutostart(settings.autostart);
       setNativeAutostart(native);
       setUnlimitedRetention(settings.retentionDays === null);
-      setRetentionDays(settings.retentionDays === null ? '' : String(settings.retentionDays));
-      setDenylist(settings.denylistedApps.join('\n'));
+      setRetentionDays(
+        settings.retentionDays === null ? "" : String(settings.retentionDays),
+      );
+      setDenylist(settings.denylistedApps.join("\n"));
       setLinkPreviews(settings.linkPreviews);
       setPaletteModes(settings.paletteModes);
       setDockIcon(settings.dockIcon);
-      setSnapShortcuts({ ...defaultSnapShortcuts(), ...settings.snapShortcuts });
-      setVaultUrl(settings.keyvault.url ?? '');
+      setSnapShortcuts({
+        ...defaultSnapShortcuts(),
+        ...settings.snapShortcuts,
+      });
+      setVaultUrl(settings.keyvault.url ?? "");
     })();
     return () => {
       cancelled = true;
@@ -435,9 +478,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
         const next = await gateway.getStorageStats();
         if (cancelled) return;
         setStats(next);
-        setStorageStatus('ready');
+        setStorageStatus("ready");
       } catch {
-        if (!cancelled) setStorageStatus('unavailable');
+        if (!cancelled) setStorageStatus("unavailable");
       }
     })();
     return () => {
@@ -469,7 +512,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       const taken = new Set<string>([nextHotkey]);
       nextSnapShortcuts = {};
       for (const { id } of SNAP_SHORTCUTS) {
-        const chord = normalizePlatformHotkey(snapShortcuts[id] ?? '');
+        const chord = normalizePlatformHotkey(snapShortcuts[id] ?? "");
         if (taken.has(chord)) {
           setError(SNAP_DUPLICATE_ERROR);
           return;
@@ -499,7 +542,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
 
     let nextDenylist: string[];
     try {
-      nextDenylist = normalizeDenylistEntries(denylist.split('\n'));
+      nextDenylist = normalizeDenylistEntries(denylist.split("\n"));
     } catch {
       setError(DENYLIST_ERROR);
       return;
@@ -528,13 +571,16 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       // Autostart lives in the OS, not in the database, so it cannot join the
       // settings transaction. Apply it first and undo it if persistence fails,
       // then re-read the real state instead of trusting the rollback.
-      const autostartChanged = nativeAutostart !== null && nativeAutostart !== autostart;
+      const autostartChanged =
+        nativeAutostart !== null && nativeAutostart !== autostart;
       if (autostartChanged) {
         try {
           await gateway.setAutostartEnabled(autostart);
         } catch {
           setError(TRANSACTION_ERROR);
-          setNativeAutostart(await gateway.isAutostartEnabled().catch(() => null));
+          setNativeAutostart(
+            await gateway.isAutostartEnabled().catch(() => null),
+          );
           setPending(false);
           return;
         }
@@ -591,12 +637,12 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
     setVaultError(null);
     setVaultSecrets(null);
     setPairNotice(null);
-    const previous = identity?.url ?? '';
+    const previous = identity?.url ?? "";
     try {
       await gateway.keyvaultResetPairing();
       setIdentity(await gateway.keyvaultIdentity());
       setVaultUrl(previous);
-      setPairNotice('Pairing forgotten. Connect again when you are ready.');
+      setPairNotice("Pairing forgotten. Connect again when you are ready.");
     } catch (error) {
       setVaultError(keyvaultErrorMessage(vaultErrorCode(error)));
     }
@@ -620,12 +666,12 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
         setNow(Date.now());
         try {
           const { status } = await gateway.keyvaultPairPoll();
-          if (stopped || status === 'pending') return;
+          if (stopped || status === "pending") return;
           setPairing(null);
           setPairNotice(pairingMessage(status));
           // A pairing that worked leaves this install configured, so the list it could not fetch
           // a moment ago is worth fetching now.
-          if (status === 'paired') {
+          if (status === "paired") {
             // Pairing clears the overrides in the database, so the fields on screen are now
             // showing values nobody stored. Left alone they keep warning that they outrank the
             // pairing that just replaced them, which is the opposite of true — and if anyone
@@ -637,7 +683,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
               ]);
               setPersisted(settings);
               setIdentity(paired);
-              setVaultUrl(settings.keyvault.url ?? '');
+              setVaultUrl(settings.keyvault.url ?? "");
             } catch {
               /* the pairing stands regardless; the next open reloads these anyway */
             }
@@ -711,14 +757,16 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   };
 
   const handleKeyDown: KeyboardEventHandler<HTMLDivElement> = (event) => {
-    if (event.key === 'Escape') {
+    if (event.key === "Escape") {
       event.preventDefault();
       onClose?.();
     }
   };
 
   const autostartMismatch =
-    persisted !== null && nativeAutostart !== null && persisted.autostart !== nativeAutostart;
+    persisted !== null &&
+    nativeAutostart !== null &&
+    persisted.autostart !== nativeAutostart;
 
   return (
     <div className="settings-page">
@@ -736,8 +784,8 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
         </header>
 
         <p id="settings-dialog-description" className="workflow-warning">
-          Settings stay local. Nothing is synchronised or sent beyond
-          this device.
+          Settings stay local. Nothing is synchronised or sent beyond this
+          device.
         </p>
 
         {persisted === null ? (
@@ -756,22 +804,29 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
             ) : null}
             {autostartMismatch ? (
               <p className="workflow-status" role="status">
-                The autostart state differs from the saved setting.{' '}
-                <span>saved: {persisted.autostart ? 'on' : 'off'}</span>
-                {', '}
-                <span>system: {nativeAutostart ? 'on' : 'off'}</span>
+                The autostart state differs from the saved setting.{" "}
+                <span>saved: {persisted.autostart ? "on" : "off"}</span>
+                {", "}
+                <span>system: {nativeAutostart ? "on" : "off"}</span>
               </p>
             ) : null}
 
-            <SettingsTabs tabs={SETTINGS_TABS} active={activeTab} onSelect={setActiveTab} />
+            <SettingsTabs
+              tabs={SETTINGS_TABS}
+              active={activeTab}
+              onSelect={setActiveTab}
+            />
             <div
               className="settings-panel"
               role="tabpanel"
               id={`settings-panel-${activeTab}`}
               aria-labelledby={`settings-tab-${activeTab}`}
             >
-              {activeTab === 'shortcut' ? (
-                <section className="settings-section" aria-labelledby="settings-hotkey-title">
+              {activeTab === "shortcut" ? (
+                <section
+                  className="settings-section"
+                  aria-labelledby="settings-hotkey-title"
+                >
                   <div className="settings-section-heading">
                     <span className="settings-section-icon" aria-hidden="true">
                       <KeyRound size={16} />
@@ -792,7 +847,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                       readOnly
                       value={hotkey}
                       onKeyDown={(event) => {
-                        if (event.key === 'Escape') return;
+                        if (event.key === "Escape") return;
                         event.preventDefault();
                         const recorded = acceleratorFromKeyEvent(event);
                         if (recorded !== null) setHotkey(recorded);
@@ -802,21 +857,35 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                   {shortcutStatus !== null && shortcutStatus.heldBySystem ? (
                     <div className="settings-notice" role="status">
                       <p>
-                        <strong>{shortcutStatus.hotkey.replace('CommandOrControl', '⌘')}</strong> is
-                        a system shortcut, so macOS answers it before Trove ever sees it. Trove can
-                        turn that system shortcut off for you.
+                        <strong>
+                          {shortcutStatus.hotkey.replace(
+                            "CommandOrControl",
+                            "⌘",
+                          )}
+                        </strong>{" "}
+                        is a system shortcut, so macOS answers it before Trove
+                        ever sees it. Trove can turn that system shortcut off
+                        for you.
                       </p>
                       <div className="settings-notice-actions">
                         <button
                           type="button"
                           disabled={shortcutBusy}
-                          onClick={() => void runShortcutChange(gateway.freeSummoningShortcut)}
+                          onClick={() =>
+                            void runShortcutChange(
+                              gateway.freeSummoningShortcut,
+                            )
+                          }
                         >
                           Free it for Trove
                         </button>
                         <button
                           type="button"
-                          onClick={() => void gateway.openKeyboardSettings?.().catch(() => undefined)}
+                          onClick={() =>
+                            void gateway
+                              .openKeyboardSettings?.()
+                              .catch(() => undefined)
+                          }
                         >
                           Open Keyboard Shortcuts
                         </button>
@@ -827,12 +896,19 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                   !shortcutStatus.heldBySystem &&
                   shortcutStatus.releasedIds.length > 0 ? (
                     <div className="settings-notice" role="status">
-                      <p>Trove turned a system shortcut off to free this combination.</p>
+                      <p>
+                        Trove turned a system shortcut off to free this
+                        combination.
+                      </p>
                       <div className="settings-notice-actions">
                         <button
                           type="button"
                           disabled={shortcutBusy}
-                          onClick={() => void runShortcutChange(gateway.restoreSystemShortcut)}
+                          onClick={() =>
+                            void runShortcutChange(
+                              gateway.restoreSystemShortcut,
+                            )
+                          }
                         >
                           Give it back to the system
                         </button>
@@ -842,8 +918,9 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                   {shortcutStatus !== null && !shortcutStatus.registered ? (
                     <div className="settings-notice" role="status">
                       <p>
-                        Another application is holding this combination, so Trove could not register
-                        it. Record a different one above, or quit whatever is holding it.
+                        Another application is holding this combination, so
+                        Trove could not register it. Record a different one
+                        above, or quit whatever is holding it.
                       </p>
                     </div>
                   ) : null}
@@ -853,45 +930,61 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                     </p>
                   ) : null}
                   <p className="settings-help">
-                    Click the field and press the combination you want — hold <kbd>⌘</kbd>,
-                    <kbd>⌃</kbd> or <kbd>⌥</kbd> and press a key. Shift alone is not recorded: it
-                    would swallow ordinary typing everywhere else. Saving changes the
-                    active shortcut immediately; if the new one is already taken by another
+                    Click the field and press the combination you want — hold{" "}
+                    <kbd>⌘</kbd>,<kbd>⌃</kbd> or <kbd>⌥</kbd> and press a key.
+                    Shift alone is not recorded: it would swallow ordinary
+                    typing everywhere else. Saving changes the active shortcut
+                    immediately; if the new one is already taken by another
                     application, the previous one stays in force.
                   </p>
-                  <label className="settings-toggle" htmlFor="settings-autostart">
+                  <label
+                    className="settings-toggle"
+                    htmlFor="settings-autostart"
+                  >
                     <input
                       id="settings-autostart"
                       type="checkbox"
                       checked={autostart}
-                      onChange={(event) => setAutostart(event.currentTarget.checked)}
+                      onChange={(event) =>
+                        setAutostart(event.currentTarget.checked)
+                      }
                     />
                     <span>
                       <Power size={14} aria-hidden="true" /> Launch at login
                     </span>
                   </label>
-                  <label className="settings-toggle" htmlFor="settings-dock-icon">
+                  <label
+                    className="settings-toggle"
+                    htmlFor="settings-dock-icon"
+                  >
                     <input
                       id="settings-dock-icon"
                       type="checkbox"
                       checked={dockIcon}
-                      onChange={(event) => setDockIcon(event.currentTarget.checked)}
+                      onChange={(event) =>
+                        setDockIcon(event.currentTarget.checked)
+                      }
                     />
                     <span>
-                      <LayoutGrid size={14} aria-hidden="true" /> Show in the Dock
+                      <LayoutGrid size={14} aria-hidden="true" /> Show in the
+                      Dock
                     </span>
                   </label>
                   <p className="settings-help">
-                    Off, Trove lives on the menu bar alone — no Dock tile and no ⌘Tab entry,
-                    which suits a window that is summoned by a keystroke and put away again.
-                    On, the tile appears and clicking it summons the palette. Saving applies
-                    it immediately; macOS only.
+                    Off, Trove lives on the menu bar alone — no Dock tile and no
+                    ⌘Tab entry, which suits a window that is summoned by a
+                    keystroke and put away again. On, the tile appears and
+                    clicking it summons the palette. Saving applies it
+                    immediately; macOS only.
                   </p>
                 </section>
               ) : null}
 
-              {activeTab === 'windows' ? (
-                <section className="settings-section" aria-labelledby="settings-windows-title">
+              {activeTab === "windows" ? (
+                <section
+                  className="settings-section"
+                  aria-labelledby="settings-windows-title"
+                >
                   <div className="settings-section-heading">
                     <span className="settings-section-icon" aria-hidden="true">
                       <Move size={16} />
@@ -899,12 +992,17 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                     <h2 id="settings-windows-title">Window snapping</h2>
                   </div>
                   <p className="settings-help">
-                    Moves the frontmost window, the way Rectangle does. It needs the same
-                    Accessibility permission as pasting, and recording works like the global
-                    shortcut above: press the combination you want.
+                    Moves the frontmost window, the way Rectangle does. It needs
+                    the same Accessibility permission as pasting, and recording
+                    works like the global shortcut above: press the combination
+                    you want.
                   </p>
                   {SNAP_SHORTCUTS.map(({ id, label }) => (
-                    <label className="settings-field" htmlFor={`settings-snap-${id}`} key={id}>
+                    <label
+                      className="settings-field"
+                      htmlFor={`settings-snap-${id}`}
+                      key={id}
+                    >
                       <span>{label}</span>
                       <input
                         id={`settings-snap-${id}`}
@@ -914,13 +1012,16 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                         // Recorded, not typed — the same contract as the global
                         // shortcut field.
                         readOnly
-                        value={snapShortcuts[id] ?? ''}
+                        value={snapShortcuts[id] ?? ""}
                         onKeyDown={(event) => {
-                          if (event.key === 'Escape') return;
+                          if (event.key === "Escape") return;
                           event.preventDefault();
                           const recorded = acceleratorFromKeyEvent(event);
                           if (recorded !== null) {
-                            setSnapShortcuts((previous) => ({ ...previous, [id]: recorded }));
+                            setSnapShortcuts((previous) => ({
+                              ...previous,
+                              [id]: recorded,
+                            }));
                           }
                         }}
                       />
@@ -929,24 +1030,35 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 </section>
               ) : null}
 
-              {activeTab === 'retention' ? (
-                <section className="settings-section" aria-labelledby="settings-retention-title">
+              {activeTab === "retention" ? (
+                <section
+                  className="settings-section"
+                  aria-labelledby="settings-retention-title"
+                >
                   <div className="settings-section-heading">
                     <span className="settings-section-icon" aria-hidden="true">
                       <Timer size={16} />
                     </span>
                     <h2 id="settings-retention-title">History retention</h2>
                   </div>
-                  <label className="settings-toggle" htmlFor="settings-retention-unlimited">
+                  <label
+                    className="settings-toggle"
+                    htmlFor="settings-retention-unlimited"
+                  >
                     <input
                       id="settings-retention-unlimited"
                       type="checkbox"
                       checked={unlimitedRetention}
-                      onChange={(event) => setUnlimitedRetention(event.currentTarget.checked)}
+                      onChange={(event) =>
+                        setUnlimitedRetention(event.currentTarget.checked)
+                      }
                     />
                     <span>Bez limitu retencji</span>
                   </label>
-                  <label className="settings-field" htmlFor="settings-retention-days">
+                  <label
+                    className="settings-field"
+                    htmlFor="settings-retention-days"
+                  >
                     <span>Days kept</span>
                     <input
                       id="settings-retention-days"
@@ -956,18 +1068,24 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                       step={1}
                       disabled={unlimitedRetention}
                       value={retentionDays}
-                      onChange={(event) => setRetentionDays(event.currentTarget.value)}
+                      onChange={(event) =>
+                        setRetentionDays(event.currentTarget.value)
+                      }
                     />
                   </label>
                   <p className="settings-help">
-                    History is unlimited by default. Turning retention on permanently deletes
-                    entries older than the given number of days.
+                    History is unlimited by default. Turning retention on
+                    permanently deletes entries older than the given number of
+                    days.
                   </p>
                 </section>
               ) : null}
 
-              {activeTab === 'apps' ? (
-                <section className="settings-section" aria-labelledby="settings-denylist-title">
+              {activeTab === "apps" ? (
+                <section
+                  className="settings-section"
+                  aria-labelledby="settings-denylist-title"
+                >
                   <div className="settings-section-heading">
                     <span className="settings-section-icon" aria-hidden="true">
                       <ShieldBan size={16} />
@@ -978,15 +1096,18 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                     <input
                       type="checkbox"
                       checked={paletteModes}
-                      onChange={(event) => setPaletteModes(event.currentTarget.checked)}
+                      onChange={(event) =>
+                        setPaletteModes(event.currentTarget.checked)
+                      }
                     />
                     Open the palette on its categories
                   </label>
                   <p className="settings-help">
-                    On, the palette opens on three categories — Applications, Clipboard history
-                    and the Key vault — picked with 1/2/3 or Tab, and typing means the history.
-                    Off, one combined list answers everything at once. Takes effect the next time
-                    the palette is summoned.
+                    On, the palette opens on three categories — Applications,
+                    Clipboard history and the Key vault — picked with 1/2/3 or
+                    Tab, and typing means the history. Off, one combined list
+                    answers everything at once. Takes effect the next time the
+                    palette is summoned.
                   </p>
                   <label className="settings-field" htmlFor="settings-denylist">
                     <span>Bundle identifiers or executable names</span>
@@ -995,22 +1116,27 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                       rows={4}
                       spellCheck={false}
                       value={denylist}
-                      onChange={(event) => setDenylist(event.currentTarget.value)}
+                      onChange={(event) =>
+                        setDenylist(event.currentTarget.value)
+                      }
                     />
                   </label>
                   <p className="settings-help">
-                    One entry per line, at most {MAX_DENYLIST_ENTRIES}. Content copied
-                    in these applications never reaches the history.
+                    One entry per line, at most {MAX_DENYLIST_ENTRIES}. Content
+                    copied in these applications never reaches the history.
                   </p>
                 </section>
               ) : null}
 
-              {activeTab === 'storage' ? (
+              {activeTab === "storage" ? (
                 <StorageStats stats={stats} status={storageStatus} />
               ) : null}
 
-              {activeTab === 'links' ? (
-                <section className="settings-section" aria-labelledby="settings-links-title">
+              {activeTab === "links" ? (
+                <section
+                  className="settings-section"
+                  aria-labelledby="settings-links-title"
+                >
                   <h2 id="settings-links-title">
                     <Globe size={15} aria-hidden="true" />
                     Link previews
@@ -1019,27 +1145,36 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                     <input
                       type="checkbox"
                       checked={linkPreviews}
-                      onChange={(event) => setLinkPreviews(event.currentTarget.checked)}
+                      onChange={(event) =>
+                        setLinkPreviews(event.currentTarget.checked)
+                      }
                     />
                     Fetch the page title and icon
                   </label>
                   <p className="settings-help">
-                    This is the only place the application talks to the network. On, it
-                    means opening the palette queries the pages visible in the list —
-                    each of them then learns that you are looking at your clipboard. The result
-                    is remembered, so the same page is asked once. Local and private
-                    addresses are never queried.
+                    This is the only place the application talks to the network.
+                    On, it means opening the palette queries the pages visible
+                    in the list — each of them then learns that you are looking
+                    at your clipboard. The result is remembered, so the same
+                    page is asked once. Local and private addresses are never
+                    queried.
                   </p>
                 </section>
               ) : null}
 
-              {activeTab === 'keyvault' ? (
-                <section className="settings-section" aria-labelledby="settings-keyvault-title">
+              {activeTab === "keyvault" ? (
+                <section
+                  className="settings-section"
+                  aria-labelledby="settings-keyvault-title"
+                >
                   <h2 id="settings-keyvault-title">
                     <Vault size={15} aria-hidden="true" />
                     Keyvault
                   </h2>
-                  <label className="settings-field" htmlFor="settings-keyvault-url">
+                  <label
+                    className="settings-field"
+                    htmlFor="settings-keyvault-url"
+                  >
                     <span>Vault address</span>
                     <input
                       id="settings-keyvault-url"
@@ -1051,27 +1186,33 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                       // what the settings row remembers. Editing it would change nothing — reads go
                       // to the pairing — and a field that looks editable and is ignored is precisely
                       // the trap this pane used to be.
-                      value={paired ? (identity?.url ?? '') : vaultUrl}
+                      value={paired ? (identity?.url ?? "") : vaultUrl}
                       disabled={paired}
-                      onChange={(event) => setVaultUrl(event.currentTarget.value)}
+                      onChange={(event) =>
+                        setVaultUrl(event.currentTarget.value)
+                      }
                     />
                   </label>
                   <p className="settings-help">
                     {paired ? (
                       <>
-                        This device is paired. It has its own key and its own token, and neither can
-                        be typed in here. <strong>Reset</strong> forgets the pairing so you can
-                        connect again — it only forgets it locally, so the device stays listed in the
-                        vault until the next pairing retires it or you revoke it there.
+                        This device is paired. It has its own key and its own
+                        token, and neither can be typed in here.{" "}
+                        <strong>Reset</strong> forgets the pairing so you can
+                        connect again — it only forgets it locally, so the
+                        device stays listed in the vault until the next pairing
+                        retires it or you revoke it there.
                       </>
                     ) : (
                       <>
-                        <strong>Connect</strong> pairs this device: it generates a key here, sends
-                        only the public half, and the browser hands back a token of its own — nothing
-                        is pasted, and the key never leaves this machine. Put in the address you open
-                        your vault at in a browser. The vault answers with sealed envelopes; a copied
-                        key goes to the clipboard without ever being recorded in the history or shown
-                        here.
+                        <strong>Connect</strong> pairs this device: it generates
+                        a key here, sends only the public half, and the browser
+                        hands back a token of its own — nothing is pasted, and
+                        the key never leaves this machine. Put in the address
+                        you open your vault at in a browser. The vault answers
+                        with sealed envelopes; a copied key goes to the
+                        clipboard without ever being recorded in the history or
+                        shown here.
                       </>
                     )}
                   </p>
@@ -1079,9 +1220,11 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                     <button
                       type="button"
                       onClick={() => void connectToVault()}
-                      disabled={vaultBusy || pending || paired || pairing !== null}
+                      disabled={
+                        vaultBusy || pending || paired || pairing !== null
+                      }
                     >
-                      {pairing !== null ? 'Waiting for approval…' : 'Connect'}
+                      {pairing !== null ? "Waiting for approval…" : "Connect"}
                     </button>
                     {paired ? (
                       <button
@@ -1097,21 +1240,29 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                       onClick={() => void testVaultConnection()}
                       disabled={vaultBusy || pending}
                     >
-                      {vaultBusy ? 'Talking to the vault…' : 'Test connection'}
+                      {vaultBusy ? "Talking to the vault…" : "Test connection"}
                     </button>
                   </div>
                   {pairing !== null ? (
                     <div className="settings-pairing" role="status">
                       <p>
-                        A browser was opened to approve this. It is your <strong>default</strong>
-                        browser, which may not be the one you are signed into the vault in — if the
-                        page asks you to sign in again, copy the link below and open it where you
-                        already are.
+                        A browser was opened to approve this. It is your{" "}
+                        <strong>default</strong>
+                        browser, which may not be the one you are signed into
+                        the vault in — if the page asks you to sign in again,
+                        copy the link below and open it where you already are.
                       </p>
 
-                      <label className="settings-field" htmlFor="settings-pairing-url">
+                      <label
+                        className="settings-field"
+                        htmlFor="settings-pairing-url"
+                      >
                         <span>Pairing link</span>
-                        <input id="settings-pairing-url" readOnly value={pairing.url} />
+                        <input
+                          id="settings-pairing-url"
+                          readOnly
+                          value={pairing.url}
+                        />
                       </label>
                       <div className="workflow-actions workflow-actions--start">
                         <button
@@ -1125,26 +1276,34 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                               .catch(() => setCopied(false));
                           }}
                         >
-                          {copied ? 'Copied' : 'Copy link'}
+                          {copied ? "Copied" : "Copy link"}
                         </button>
-                        <button type="button" onClick={() => void cancelPairing()}>
+                        <button
+                          type="button"
+                          onClick={() => void cancelPairing()}
+                        >
                           Cancel
                         </button>
                       </div>
 
                       <p className="settings-help">
-                        Or open <code>/pair</code> on your vault and paste this code:
+                        Or open <code>/pair</code> on your vault and paste this
+                        code:
                       </p>
                       <p className="settings-pair-code">{pairing.code}</p>
 
                       <p className="settings-help">
-                        Check the page shows this fingerprint — it is what ties that page to this
-                        application.
+                        Check the page shows this fingerprint — it is what ties
+                        that page to this application.
                       </p>
-                      <p className="settings-pair-fingerprint">{pairing.fingerprint}</p>
+                      <p className="settings-pair-fingerprint">
+                        {pairing.fingerprint}
+                      </p>
 
                       {expiryLabel(pairing.expiresAt, now) !== null ? (
-                        <p className="settings-help">{expiryLabel(pairing.expiresAt, now)}</p>
+                        <p className="settings-help">
+                          {expiryLabel(pairing.expiresAt, now)}
+                        </p>
                       ) : null}
                     </div>
                   ) : null}
@@ -1160,7 +1319,8 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                   ) : null}
                   {vaultCopiedSlug !== null ? (
                     <p className="workflow-status" role="status">
-                      {vaultCopiedSlug} is on the clipboard. Paste it where it is needed.
+                      {vaultCopiedSlug} is on the clipboard. Paste it where it
+                      is needed.
                     </p>
                   ) : null}
                   {vaultSecrets !== null ? (
@@ -1169,11 +1329,16 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                         The token can read no secrets.
                       </p>
                     ) : (
-                      <ul className="settings-keyvault-list" aria-label="Vault secrets">
+                      <ul
+                        className="settings-keyvault-list"
+                        aria-label="Vault secrets"
+                      >
                         {vaultSecrets.map((secret) => (
                           <li key={secret.slug}>
                             <span>{secret.name}</span>
-                            <span className="settings-keyvault-slug">{secret.slug}</span>
+                            <span className="settings-keyvault-slug">
+                              {secret.slug}
+                            </span>
                             <button
                               type="button"
                               aria-label={`Copy ${secret.slug}`}
@@ -1190,26 +1355,34 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                 </section>
               ) : null}
 
-              {activeTab === 'export' ? (
-                <section className="settings-section" aria-labelledby="settings-export-title">
+              {activeTab === "export" ? (
+                <section
+                  className="settings-section"
+                  aria-labelledby="settings-export-title"
+                >
                   <h2 id="settings-export-title">
                     <Download size={15} aria-hidden="true" />
                     History export
                   </h2>
                   <p className="settings-help">
-                    Writes the whole history in SuperCmd format — {'clipboard.json'},
-                    {' clipboard.csv'} i katalog {'images'} z obrazami. Ten sam format
-                    importer czyta z powrotem.
+                    Writes the whole history in SuperCmd format —{" "}
+                    {"clipboard.json"},{" clipboard.csv"} i katalog {"images"} z
+                    obrazami. Ten sam format importer czyta z powrotem.
                   </p>
                   <div className="workflow-actions workflow-actions--start">
-                    <button type="button" onClick={() => void runExport()} disabled={exporting}>
-                      {exporting ? 'Exporting…' : 'Export history'}
+                    <button
+                      type="button"
+                      onClick={() => void runExport()}
+                      disabled={exporting}
+                    >
+                      {exporting ? "Exporting…" : "Export history"}
                     </button>
                   </div>
                   {exportSummary ? (
                     <p className="workflow-status" role="status">
-                      Wrote {exportSummary.records} entries, of which {exportSummary.images}{' '}
-                      carry an image. {exportSummary.withoutPayload} bez zapisanej contents —
+                      Wrote {exportSummary.records} entries, of which{" "}
+                      {exportSummary.images} carry an image.{" "}
+                      {exportSummary.withoutPayload} bez zapisanej contents —
                       were exported as metadata only.
                     </p>
                   ) : null}
@@ -1218,8 +1391,12 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
             </div>
 
             <div className="workflow-actions">
-              <button type="submit" className="workflow-primary" disabled={pending}>
-                {pending ? 'Saving…' : 'Save settings'}
+              <button
+                type="submit"
+                className="workflow-primary"
+                disabled={pending}
+              >
+                {pending ? "Saving…" : "Save settings"}
               </button>
             </div>
           </form>

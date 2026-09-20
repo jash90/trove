@@ -1,7 +1,7 @@
 import { useEffect, useState, type KeyboardEvent } from 'react';
 
 interface UseListNavigationOptions<T> {
-  items: T[];
+  items: readonly T[];
   /** The stable identity of one item: an event id as a string, an app path. */
   keyOf: (item: T) => string;
   onActivate: (item: T) => void | Promise<void>;

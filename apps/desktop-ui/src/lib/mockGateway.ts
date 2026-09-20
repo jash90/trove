@@ -76,8 +76,8 @@ export const mockGateway: ClipboardGateway = {
   // walks the same steps the encrypted flow does on a real export.
   analyzeImport: async (path, password) => {
     if (path.toLowerCase().endsWith('.rayconfig')) {
-      if (password === undefined) throw 'rayconfig_password_required';
-      if (password !== 'synthetic') throw 'rayconfig_password_invalid';
+      if (password === undefined) throw new Error('rayconfig_password_required');
+      if (password !== 'synthetic') throw new Error('rayconfig_password_invalid');
     }
     return {
       analysisId: SYNTHETIC_IMPORT_PROGRESS.runId,
@@ -211,6 +211,9 @@ export const mockGateway: ClipboardGateway = {
     return { ...chatSettings };
   },
   openChatWindow: async () => undefined,
+  // A browser preview cannot move anyone's windows; resolving true keeps
+  // the palette's flow walkable where Tauri is absent.
+  snapWindow: async () => true,
   onChatEvent: (listener) => {
     chatStreamListener = listener;
     return () => {

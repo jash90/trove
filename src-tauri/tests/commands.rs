@@ -731,6 +731,7 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "get_chat_settings",
             "save_chat_settings",
             "open_chat_window",
+            "snap_window",
         ]
     );
 

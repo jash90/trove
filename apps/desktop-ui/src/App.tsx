@@ -29,6 +29,10 @@ import { useSelectedPreview } from "./hooks/useSelectedPreview";
 import { useLinkPreview } from "./hooks/useLinkPreview";
 import { useThumbnail } from "./hooks/useThumbnail";
 import { HISTORY_PAGE_SIZE } from "./lib/contracts";
+import {
+  SNAP_SHORTCUTS,
+  defaultSnapShortcuts,
+} from "./lib/snapShortcuts";
 import { filterApps } from "./lib/appSearch";
 import {
   buildPaletteItems,
@@ -144,6 +148,10 @@ const ClipboardPalette = (): React.JSX.Element => {
   // Whether the palette has modes at all — a setting, read below and
   // refreshed each time the palette comes back to the front.
   const [paletteModes, setPaletteModes] = useState(true);
+  // The snap chords as configured, so the Windows category shows what the
+  // keyboard actually answers — including anything rebound in settings.
+  const [snapChords, setSnapChords] =
+    useState<Record<string, string>>(defaultSnapShortcuts);
   // The home tile the arrows have landed on — null until one is moved, so a
   // fresh palette keeps Enter meaning the first row of the list the tiles
   // sit above. Cleared on leaving home, so the walk always starts over.
@@ -200,6 +208,10 @@ const ClipboardPalette = (): React.JSX.Element => {
         .then((settings) => {
           setSummoningShortcut(settings.hotkey);
           setPaletteModes(settings.paletteModes);
+          setSnapChords({
+            ...defaultSnapShortcuts(),
+            ...settings.snapShortcuts,
+          });
         })
         .catch(() => undefined);
     } catch {
@@ -316,6 +328,28 @@ const ClipboardPalette = (): React.JSX.Element => {
     },
   });
 
+  // A snap from the palette aims at the window the user was working in —
+  // the same target a paste would land in — so activating one is a question
+  // to the gateway, answered with whether the window moved.
+  const handleSnapActivate = (id: string): void => {
+    gateway
+      .snapWindow?.(id)
+      .then((moved) => {
+        if (moved) hideWindow();
+        else setLaunchError("That window could not be arranged.");
+      })
+      .catch(() => setLaunchError("That window could not be arranged."));
+  };
+
+  // The Windows category walks its rows with the same hook the lists use:
+  // arrows move, Enter commits, Escape is one step back to the chooser.
+  const snapNavigation = useListNavigation({
+    items: SNAP_SHORTCUTS,
+    keyOf: (entry) => entry.id,
+    onActivate: (entry) => handleSnapActivate(entry.id),
+    onEscape: () => setMode("home"),
+  });
+
   const selected =
     paletteItems.find((entry) => keyOfItem(entry) === navigation.selectedKey) ??
     null;
@@ -324,13 +358,20 @@ const ClipboardPalette = (): React.JSX.Element => {
   const selectedHistoryId = selectedHistoryItem?.eventId ?? null;
   const selectedIndex = selected === null ? -1 : paletteItems.indexOf(selected);
   const activeDescendant =
-    selected === null
-      ? undefined
-      : selected.kind === "app"
-        ? `app-option-${selectedIndex}`
-        : selected.kind === "vault"
-          ? `vault-option-${selectedIndex}`
-          : `history-option-${selectedHistoryId}`;
+    view === "windows"
+      ? (() => {
+          const index = SNAP_SHORTCUTS.findIndex(
+            (entry) => entry.id === snapNavigation.selectedKey,
+          );
+          return index >= 0 ? `snap-option-${index}` : undefined;
+        })()
+      : selected === null
+        ? undefined
+        : selected.kind === "app"
+          ? `app-option-${selectedIndex}`
+          : selected.kind === "vault"
+            ? `vault-option-${selectedIndex}`
+            : `history-option-${selectedHistoryId}`;
 
   const preview = useSelectedPreview(gateway, selectedHistoryId);
   const thumbnail = useThumbnail(
@@ -439,7 +480,7 @@ const ClipboardPalette = (): React.JSX.Element => {
     if (
       paletteModes &&
       mode === "home" &&
-      ["1", "2", "3", "4"].includes(event.key) &&
+      ["1", "2", "3", "4", "5"].includes(event.key) &&
       !event.metaKey &&
       !event.ctrlKey &&
       !event.altKey
@@ -483,7 +524,12 @@ const ClipboardPalette = (): React.JSX.Element => {
       });
       return;
     }
-    if (actions.deleteTargetId === null) navigation.handleKeyDown(event);
+    if (actions.deleteTargetId === null) {
+      // The Windows category is a list of its own: its rows answer the
+      // arrows and Enter, not the unified list's.
+      if (view === "windows") snapNavigation.handleKeyDown(event);
+      else navigation.handleKeyDown(event);
+    }
   };
   // Hidden rather than closed, the same as every other way the palette goes
   // away: closing it would end the process and take the history recording with
@@ -550,7 +596,7 @@ const ClipboardPalette = (): React.JSX.Element => {
       void gateway.openChatWindow?.().catch(() => undefined);
       return;
     }
-    // ⌘4 opens the chat window whatever the palette is showing: chat is a
+    // ⌘5 opens the chat window whatever the palette is showing: chat is a
     // destination, not a category, and a palette with the categories turned
     // off must not lose it.
     if (
@@ -563,12 +609,13 @@ const ClipboardPalette = (): React.JSX.Element => {
       return;
     }
     // Direct category picks, in tile order: ⌘1 applications, ⌘2 history,
-    // ⌘3 vault. Meaningless with the categories off, so they wait for them.
+    // ⌘3 vault, ⌘4 windows. Meaningless with the categories off, so they
+    // wait for them.
     if (
       paletteModes &&
       primaryModifier &&
       !event.shiftKey &&
-      ["1", "2", "3"].includes(key)
+      ["1", "2", "3", "4"].includes(key)
     ) {
       const category = PALETTE_CATEGORIES.find((entry) => entry.key === key);
       if (category) {
@@ -654,6 +701,10 @@ const ClipboardPalette = (): React.JSX.Element => {
             void gateway.openChatWindow?.().catch(() => undefined)
           }
           homeTileIndex={homeTileIndex}
+          snapChords={snapChords}
+          snapSelectedKey={snapNavigation.selectedKey}
+          onSnapSelect={(id) => snapNavigation.setSelectedKey(id)}
+          onSnapActivate={handleSnapActivate}
           appsStatus={catalog.status}
           status={status}
           items={paletteItems}

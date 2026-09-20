@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 /// Every snap position and the chord it ships with, in menu order.
@@ -51,7 +51,8 @@ pub fn is_valid_map(map: &BTreeMap<String, String>, summoning: &str) -> bool {
     if map.len() != SNAP_DEFAULTS.len() {
         return false;
     }
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::with_capacity(map.len() + 1);
+    let mut seen: std::collections::HashSet<&str> =
+        std::collections::HashSet::with_capacity(map.len() + 1);
     seen.insert(summoning);
     map.iter().all(|(id, chord)| {
         crate::hotkey::parse_shortcut(chord).is_some()
@@ -75,7 +76,10 @@ impl ActiveSnapShortcuts {
     }
 
     pub fn get(&self) -> BTreeMap<String, String> {
-        self.current.lock().map(|map| map.clone()).unwrap_or_default()
+        self.current
+            .lock()
+            .map(|map| map.clone())
+            .unwrap_or_default()
     }
 
     pub fn set(&self, map: BTreeMap<String, String>) {
@@ -97,13 +101,15 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, map: &BTreeMap<String, String>) {
             continue;
         };
         let action = id.clone();
-        let registered = app.global_shortcut().on_shortcut(shortcut, move |app, _shortcut, event| {
-            // Press only, as with the summoning shortcut: acting on release
-            // too would snap twice per keystroke.
-            if event.state() == ShortcutState::Pressed {
-                run(app, &action);
-            }
-        });
+        let registered =
+            app.global_shortcut()
+                .on_shortcut(shortcut, move |app, _shortcut, event| {
+                    // Press only, as with the summoning shortcut: acting on release
+                    // too would snap twice per keystroke.
+                    if event.state() == ShortcutState::Pressed {
+                        run(app, &action);
+                    }
+                });
         if let Err(error) = registered {
             eprintln!("trove: snap shortcut {chord} unavailable: {error}");
         }
@@ -133,8 +139,8 @@ fn run<R: Runtime>(app: &AppHandle<R>, id: &str) {
             return;
         };
         let logged_id = id.to_owned();
-        let sent = app.run_on_main_thread(move || {
-            match platform_macos::window_snap::snap(action) {
+        let sent =
+            app.run_on_main_thread(move || match platform_macos::window_snap::snap(action) {
                 platform_macos::SnapOutcome::Moved => {}
                 platform_macos::SnapOutcome::PermissionRequired => {
                     eprintln!("trove: snap refused — Accessibility permission missing")
@@ -143,14 +149,58 @@ fn run<R: Runtime>(app: &AppHandle<R>, id: &str) {
                 platform_macos::SnapOutcome::Refused => {
                     eprintln!("trove: {logged_id} refused by the frontmost application")
                 }
-            }
-        });
+            });
         if let Err(error) = sent {
             eprintln!("trove: snap could not reach the main thread: {error}");
         }
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (app, id);
+}
+
+/// Snaps the window the palette's user was working in, by arrangement id.
+///
+/// The palette itself is frontmost while this runs, so the target is the
+/// pid a paste would land in — recorded when the palette was summoned.
+/// Resolves false when nothing is there to arrange or the window refused,
+/// which is the palette's sentence to say, not the command's.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn snap_window<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    action_id: String,
+) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(action) = platform_macos::SnapAction::from_id(&action_id) else {
+            return Err("unknown_snap_action".to_owned());
+        };
+        let Some(pid) = app
+            .try_state::<crate::hotkey::PasteTarget>()
+            .and_then(|target| target.current())
+            .filter(|pid| *pid > 0)
+        else {
+            return Ok(false);
+        };
+        // AppKit's window queries answer from the main thread; the channel
+        // hands the outcome back to this command's future.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let sent = app.run_on_main_thread(move || {
+            let outcome = platform_macos::window_snap::snap_pid(pid, action);
+            let _ = sender.send(outcome);
+        });
+        if sent.is_err() {
+            return Ok(false);
+        }
+        Ok(matches!(
+            receiver.recv(),
+            Ok(platform_macos::SnapOutcome::Moved)
+        ))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, action_id);
+        Ok(false)
+    }
 }
 
 #[cfg(test)]
@@ -176,7 +226,10 @@ mod tests {
     #[test]
     fn a_duplicate_chord_or_a_missing_position_is_invalid() {
         let mut duplicated = defaults();
-        duplicated.insert("center".to_owned(), "CommandOrControl+Alt+ArrowLeft".to_owned());
+        duplicated.insert(
+            "center".to_owned(),
+            "CommandOrControl+Alt+ArrowLeft".to_owned(),
+        );
         assert!(!is_valid_map(&duplicated, "CommandOrControl+Space"));
 
         let mut missing_one = defaults();

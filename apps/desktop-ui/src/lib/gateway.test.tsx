@@ -1,30 +1,30 @@
-import { renderHook } from '@testing-library/react';
-import type { ReactNode } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { renderHook } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { invoke } from '@tauri-apps/api/core';
-import { disable, enable, isEnabled } from '@tauri-apps/plugin-autostart';
-import { open } from '@tauri-apps/plugin-dialog';
+import { invoke } from "@tauri-apps/api/core";
+import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { open } from "@tauri-apps/plugin-dialog";
 
-import type { AppSettings, ImportProgress } from './contracts';
-import { defaultSnapShortcuts } from './snapShortcuts';
+import type { AppSettings, ImportProgress } from "./contracts";
+import { defaultSnapShortcuts } from "./snapShortcuts";
 import {
   GatewayProvider,
   mockGateway,
   tauriGateway,
   useGateway,
   type ClipboardGateway,
-} from './gateway';
+} from "./gateway";
 
-vi.mock('@tauri-apps/api/core', () => ({
+vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
-vi.mock('@tauri-apps/plugin-dialog', () => ({
+vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
 }));
 
-vi.mock('@tauri-apps/plugin-autostart', () => ({
+vi.mock("@tauri-apps/plugin-autostart", () => ({
   disable: vi.fn(),
   enable: vi.fn(),
   isEnabled: vi.fn(),
@@ -32,7 +32,7 @@ vi.mock('@tauri-apps/plugin-autostart', () => ({
 
 const settings: AppSettings = {
   schemaVersion: 1,
-  hotkey: 'CommandOrControl+Space',
+  hotkey: "CommandOrControl+Space",
   autostart: false,
   paletteModes: true,
   dockIcon: false,
@@ -44,8 +44,8 @@ const settings: AppSettings = {
 };
 
 const progress: ImportProgress = {
-  runId: '0198f000-0000-7000-8000-000000000010',
-  state: 'running',
+  runId: "0198f000-0000-7000-8000-000000000010",
+  state: "running",
   processed: 0,
   total: 1,
   imported: 0,
@@ -56,7 +56,7 @@ const progress: ImportProgress = {
   summary: null,
 };
 
-describe('tauriGateway', () => {
+describe("tauriGateway", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset().mockResolvedValue(undefined);
     vi.mocked(open).mockReset().mockResolvedValue(null);
@@ -65,9 +65,13 @@ describe('tauriGateway', () => {
     vi.mocked(disable).mockReset().mockResolvedValue(undefined);
   });
 
-  it('maps every gateway method to the exact Rust command and camelCase arguments', async () => {
-    vi.mocked(invoke).mockResolvedValueOnce({ items: [], nextCursor: null, rankedTruncated: false });
-    await tauriGateway.search({ query: 'synthetic', limit: 80, cursor: null });
+  it("maps every gateway method to the exact Rust command and camelCase arguments", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      items: [],
+      nextCursor: null,
+      rankedTruncated: false,
+    });
+    await tauriGateway.search({ query: "synthetic", limit: 80, cursor: null });
     await tauriGateway.preview(7);
     await tauriGateway.setPinned(7, true);
     await tauriGateway.deleteEvent(7);
@@ -75,15 +79,15 @@ describe('tauriGateway', () => {
     await tauriGateway.chooseImportFile();
     await tauriGateway.chooseImportDirectory();
     vi.mocked(invoke).mockResolvedValueOnce({
-      analysisId: 'analysis-id',
+      analysisId: "analysis-id",
       total: 1,
       candidateRecords: 1,
       skipped: 0,
       failed: 0,
     });
-    await tauriGateway.analyzeImport('/synthetic/import.json');
-    await tauriGateway.startImport('analysis-id');
-    await tauriGateway.discardImportAnalysis('analysis-id');
+    await tauriGateway.analyzeImport("/synthetic/import.json");
+    await tauriGateway.startImport("analysis-id");
+    await tauriGateway.discardImportAnalysis("analysis-id");
     vi.mocked(invoke).mockResolvedValueOnce(progress);
     await tauriGateway.getImportStatus(progress.runId);
     await tauriGateway.getThumbnail(7);
@@ -100,46 +104,57 @@ describe('tauriGateway', () => {
     });
     await tauriGateway.getStorageStats();
     vi.mocked(invoke).mockResolvedValueOnce([
-      { name: 'Synthetic Notes', bundleId: 'com.example.notes', path: '/synthetic/Applications/Synthetic Notes.app' },
+      {
+        name: "Synthetic Notes",
+        bundleId: "com.example.notes",
+        path: "/synthetic/Applications/Synthetic Notes.app",
+      },
     ]);
     await tauriGateway.listApps();
-    await tauriGateway.launchApp('/synthetic/Applications/Synthetic Notes.app');
+    await tauriGateway.launchApp("/synthetic/Applications/Synthetic Notes.app");
     vi.mocked(invoke).mockResolvedValueOnce(null);
-    await tauriGateway.getAppIcon('/synthetic/Applications/Synthetic Notes.app');
+    await tauriGateway.getAppIcon(
+      "/synthetic/Applications/Synthetic Notes.app",
+    );
 
     expect(vi.mocked(invoke).mock.calls).toEqual([
-      ['search_history', { request: { query: 'synthetic', limit: 80, cursor: null } }],
-      ['get_preview', { eventId: 7 }],
-      ['set_pinned', { eventId: 7, pinned: true }],
-      ['delete_event', { eventId: 7 }],
-      ['copy_event', { eventId: 7, plainText: true, paste: false }],
+      [
+        "search_history",
+        { request: { query: "synthetic", limit: 80, cursor: null } },
+      ],
+      ["get_preview", { eventId: 7 }],
+      ["set_pinned", { eventId: 7, pinned: true }],
+      ["delete_event", { eventId: 7 }],
+      ["copy_event", { eventId: 7, plainText: true, paste: false }],
       // A plain export sends an explicit null rather than omitting the field,
       // so the Rust side always sees the argument it declares.
-      ['analyze_import', { path: '/synthetic/import.json', password: null }],
-      ['start_import', { analysisId: 'analysis-id' }],
-      ['discard_import_analysis', { analysisId: 'analysis-id' }],
-      ['get_import_status', { runId: progress.runId }],
-      ['get_thumbnail', { eventId: 7 }],
-      ['get_settings'],
-      ['save_settings', { settings }],
-      ['get_storage_stats'],
-      ['list_apps'],
-      ['launch_app', { path: '/synthetic/Applications/Synthetic Notes.app' }],
-      ['get_app_icon', { path: '/synthetic/Applications/Synthetic Notes.app' }],
+      ["analyze_import", { path: "/synthetic/import.json", password: null }],
+      ["start_import", { analysisId: "analysis-id" }],
+      ["discard_import_analysis", { analysisId: "analysis-id" }],
+      ["get_import_status", { runId: progress.runId }],
+      ["get_thumbnail", { eventId: 7 }],
+      ["get_settings"],
+      ["save_settings", { settings }],
+      ["get_storage_stats"],
+      ["list_apps"],
+      ["launch_app", { path: "/synthetic/Applications/Synthetic Notes.app" }],
+      ["get_app_icon", { path: "/synthetic/Applications/Synthetic Notes.app" }],
     ]);
     expect(vi.mocked(open).mock.calls).toEqual([
       [
         {
-          title: 'Choose a clipboard history export',
+          title: "Choose a clipboard history export",
           multiple: false,
           // The file Raycast actually writes is offered alongside the plain
           // JSON somebody decrypted by hand.
-          filters: [{ name: 'Clipboard export', extensions: ['json', 'rayconfig'] }],
+          filters: [
+            { name: "Clipboard export", extensions: ["json", "rayconfig"] },
+          ],
         },
       ],
       [
         {
-          title: 'Choose the clipboard history export directory',
+          title: "Choose the clipboard history export directory",
           directory: true,
           recursive: true,
           multiple: false,
@@ -151,47 +166,56 @@ describe('tauriGateway', () => {
     expect(disable).toHaveBeenCalledOnce();
   });
 
-  it('keeps native and browser gateways at runtime surface parity', () => {
+  it("keeps native and browser gateways at runtime surface parity", () => {
     const gateways: ClipboardGateway[] = [tauriGateway, mockGateway];
 
     expect(gateways).toHaveLength(2);
-    expect(Object.keys(mockGateway).sort()).toEqual(Object.keys(tauriGateway).sort());
-  });
-
-  it('rejects a malformed application catalog at the IPC boundary', async () => {
-    vi.mocked(invoke).mockResolvedValue([
-      { name: 'Relative Path', bundleId: null, path: 'Applications/Relative.app' },
-    ]);
-
-    await expect(tauriGateway.listApps()).rejects.toThrow('invalid_app_catalog');
-  });
-
-  it('rejects an inconsistent import status at the IPC boundary', async () => {
-    vi.mocked(invoke).mockResolvedValue({ ...progress, processed: 1 });
-
-    await expect(tauriGateway.getImportStatus(progress.runId)).rejects.toThrow(
-      'invalid_import_progress',
+    expect(Object.keys(mockGateway).sort()).toEqual(
+      Object.keys(tauriGateway).sort(),
     );
   });
 
-  it('rejects a status response for a different run at the IPC boundary', async () => {
-    vi.mocked(invoke).mockResolvedValue(progress);
+  it("rejects a malformed application catalog at the IPC boundary", async () => {
+    vi.mocked(invoke).mockResolvedValue([
+      {
+        name: "Relative Path",
+        bundleId: null,
+        path: "Applications/Relative.app",
+      },
+    ]);
 
-    await expect(tauriGateway.getImportStatus('0198f000-0000-7000-8000-0000000000ff'))
-      .rejects.toThrow('invalid_import_progress');
+    await expect(tauriGateway.listApps()).rejects.toThrow(
+      "invalid_app_catalog",
+    );
   });
 
-  it('rejects malformed analysis and storage responses at the IPC boundary', async () => {
+  it("rejects an inconsistent import status at the IPC boundary", async () => {
+    vi.mocked(invoke).mockResolvedValue({ ...progress, processed: 1 });
+
+    await expect(tauriGateway.getImportStatus(progress.runId)).rejects.toThrow(
+      "invalid_import_progress",
+    );
+  });
+
+  it("rejects a status response for a different run at the IPC boundary", async () => {
+    vi.mocked(invoke).mockResolvedValue(progress);
+
+    await expect(
+      tauriGateway.getImportStatus("0198f000-0000-7000-8000-0000000000ff"),
+    ).rejects.toThrow("invalid_import_progress");
+  });
+
+  it("rejects malformed analysis and storage responses at the IPC boundary", async () => {
     vi.mocked(invoke).mockResolvedValueOnce({
-      analysisId: 'analysis',
+      analysisId: "analysis",
       total: 2,
       candidateRecords: 1,
       skipped: 0,
       failed: 0,
     });
-    await expect(tauriGateway.analyzeImport('/private/export.json')).rejects.toThrow(
-      'invalid_import_analysis',
-    );
+    await expect(
+      tauriGateway.analyzeImport("/private/export.json"),
+    ).rejects.toThrow("invalid_import_analysis");
 
     vi.mocked(invoke).mockResolvedValueOnce({
       contentCount: 1,
@@ -199,12 +223,14 @@ describe('tauriGateway', () => {
       databaseBytes: Number.MAX_SAFE_INTEGER,
       blobBytes: 1,
     });
-    await expect(tauriGateway.getStorageStats()).rejects.toThrow('invalid_storage_stats');
+    await expect(tauriGateway.getStorageStats()).rejects.toThrow(
+      "invalid_storage_stats",
+    );
   });
 });
 
-describe('GatewayProvider', () => {
-  it('uses the browser-safe mock when no gateway is injected', () => {
+describe("GatewayProvider", () => {
+  it("uses the browser-safe mock when no gateway is injected", () => {
     const wrapper = ({ children }: { children: ReactNode }) => (
       <GatewayProvider>{children}</GatewayProvider>
     );
@@ -214,7 +240,7 @@ describe('GatewayProvider', () => {
     expect(result.current).toBe(mockGateway);
   });
 
-  it('exposes an explicitly injected gateway', () => {
+  it("exposes an explicitly injected gateway", () => {
     const wrapper = ({ children }: { children: ReactNode }) => (
       <GatewayProvider gateway={tauriGateway}>{children}</GatewayProvider>
     );
@@ -225,12 +251,14 @@ describe('GatewayProvider', () => {
   });
 });
 
-describe('keyvault gateway calls', () => {
-  it('delivers a core rejection as the bare code string, not an Error', async () => {
+describe("keyvault gateway calls", () => {
+  it("delivers a core rejection as the bare code string, not an Error", async () => {
     // The core's Result<T, String> commands reject invoke with the string
     // itself; the settings pane's error mapper depends on that shape.
-    vi.mocked(invoke).mockRejectedValueOnce('keyvault_unauthorized');
+    vi.mocked(invoke).mockRejectedValueOnce("keyvault_unauthorized");
 
-    await expect(tauriGateway.keyvaultList()).rejects.toBe('keyvault_unauthorized');
+    await expect(tauriGateway.keyvaultList()).rejects.toBe(
+      "keyvault_unauthorized",
+    );
   });
 });

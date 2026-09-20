@@ -5,17 +5,17 @@ import { formatCount } from '../lib/format';
 import { TypeFilter } from './TypeFilter';
 
 /** One category the palette can be showing. */
-export type PaletteMode = 'history' | 'apps' | 'vault';
+export type PaletteMode = "history" | "apps" | "vault" | "windows";
 
 /**
- * What the palette is showing: one of the three categories, `'home'` — the
+ * What the palette is showing: one of the four categories, `'home'` — the
  * category chooser the palette opens on — or `'all'`, the combined list the
  * settings can restore, where the field drives everything at once and the
  * category control is not on screen at all.
  */
 export type PaletteView = PaletteMode | 'all' | 'home';
 
-/** The categories in picker order: Applications, Clipboard history, Key vault. */
+/** The categories in picker order. */
 export const PALETTE_CATEGORIES: readonly {
   mode: PaletteMode;
   key: string;
@@ -24,11 +24,12 @@ export const PALETTE_CATEGORIES: readonly {
   { mode: 'apps', key: '1', label: 'Applications' },
   { mode: 'history', key: '2', label: 'Clipboard history' },
   { mode: 'vault', key: '3', label: 'Key vault' },
+  { mode: 'windows', key: '4', label: 'Windows' },
 ];
 
 /** The chat tile: not a palette view but a window of its own, opened from
  * the chooser like the rest and living beside it. */
-export const PALETTE_CHAT_CATEGORY = { key: '4', label: 'Chat' } as const;
+export const PALETTE_CHAT_CATEGORY = { key: '5', label: 'Chat' } as const;
 
 interface PaletteHeaderProps {
   query: string;
@@ -77,16 +78,20 @@ export const PaletteHeader = ({
     ? 'Search applications'
     : mode === 'vault'
       ? 'Search the vault'
-      : 'Search history';
+      : mode === 'windows'
+        ? 'Arrange windows'
+        : 'Search history';
   const searchPlaceholder = onHome
     ? 'Search history, or pick a category…'
     : mode === 'apps'
       ? 'Search applications…'
       : mode === 'vault'
         ? 'Search the vault…'
-        : mode === 'history'
-          ? 'Search history…'
-          : 'Search applications and history…';
+        : mode === 'windows'
+          ? 'Pick an arrangement…'
+          : mode === 'history'
+            ? 'Search history…'
+            : 'Search applications and history…';
 
   return (
     <header className="palette-header">

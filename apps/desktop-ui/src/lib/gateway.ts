@@ -106,6 +106,12 @@ export interface ClipboardGateway {
   /** Opens the chat window, its own window beside the palette. */
   openChatWindow?(): Promise<void>;
   /**
+   * Snaps the window the user was working in — the one a paste would land
+   * in — to one arrangement, by its settings id (`leftHalf`, …). Resolves
+   * false when there is no window to arrange or it refused to move.
+   */
+  snapWindow?(actionId: string): Promise<boolean>;
+  /**
    * Calls back for every chat stream event: tokens as they arrive, the
    * settle when the turn ends — by answer, refusal or stop.
    */
@@ -275,6 +281,7 @@ export const tauriGateway: ClipboardGateway = {
   saveChatSettings: (settings) =>
     invoke<ChatSettings>('save_chat_settings', { settings }),
   openChatWindow: () => invoke<void>('open_chat_window'),
+  snapWindow: (actionId) => invoke<boolean>('snap_window', { actionId }),
   onChatEvent: (listener) => {
     const stopDelta = subscribe<{ id: string; part: string; text: string }>(
       'chat-delta',

@@ -40,7 +40,12 @@ const PASSWORD_INVALID = 'rayconfig_password_invalid';
 ///
 /// Only the code is ever compared; the text itself never reaches the DOM,
 /// because a gateway error may carry a path or a fragment of a payload.
-const errorCode = (cause: unknown): string => (typeof cause === 'string' ? cause : '');
+const errorCode = (cause: unknown): string =>
+  typeof cause === "string"
+    ? cause
+    : cause instanceof Error
+      ? cause.message
+      : "";
 
 export const ImportWizard = ({
   gateway,

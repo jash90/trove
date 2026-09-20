@@ -10,6 +10,7 @@ import type {
   StorageStats,
 } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
+import { defaultSnapShortcuts } from '../lib/snapShortcuts';
 import { ImportProgress } from './ImportProgress';
 import { ImportWizard } from './ImportWizard';
 
@@ -81,6 +82,7 @@ const settings: AppSettings = {
   retentionDays: 30,
   denylistedApps: [],
   linkPreviews: true,
+  snapShortcuts: defaultSnapShortcuts(),
   keyvault: { url: null, token: null, privateJwk: null },
 };
 

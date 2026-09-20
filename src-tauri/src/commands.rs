@@ -70,6 +70,7 @@ macro_rules! trove_command_registry {
             get_chat_settings => $crate::commands::get_chat_settings,
             save_chat_settings => $crate::commands::save_chat_settings,
             open_chat_window => $crate::commands::open_chat_window,
+            snap_window => $crate::snap::snap_window,
         }
     };
 }

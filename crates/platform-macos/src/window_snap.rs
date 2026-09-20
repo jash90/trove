@@ -127,14 +127,54 @@ pub fn target_rect(action: SnapAction, visible: Rect, window: Rect) -> Rect {
     let right = visible.x + half_width;
     let bottom = visible.y + half_height;
     match action {
-        SnapAction::LeftHalf => Rect { x: visible.x, y: visible.y, width: half_width, height: visible.height },
-        SnapAction::RightHalf => Rect { x: right, y: visible.y, width: half_width, height: visible.height },
-        SnapAction::TopHalf => Rect { x: visible.x, y: visible.y, width: visible.width, height: half_height },
-        SnapAction::BottomHalf => Rect { x: visible.x, y: bottom, width: visible.width, height: half_height },
-        SnapAction::TopLeft => Rect { x: visible.x, y: visible.y, width: half_width, height: half_height },
-        SnapAction::TopRight => Rect { x: right, y: visible.y, width: half_width, height: half_height },
-        SnapAction::BottomLeft => Rect { x: visible.x, y: bottom, width: half_width, height: half_height },
-        SnapAction::BottomRight => Rect { x: right, y: bottom, width: half_width, height: half_height },
+        SnapAction::LeftHalf => Rect {
+            x: visible.x,
+            y: visible.y,
+            width: half_width,
+            height: visible.height,
+        },
+        SnapAction::RightHalf => Rect {
+            x: right,
+            y: visible.y,
+            width: half_width,
+            height: visible.height,
+        },
+        SnapAction::TopHalf => Rect {
+            x: visible.x,
+            y: visible.y,
+            width: visible.width,
+            height: half_height,
+        },
+        SnapAction::BottomHalf => Rect {
+            x: visible.x,
+            y: bottom,
+            width: visible.width,
+            height: half_height,
+        },
+        SnapAction::TopLeft => Rect {
+            x: visible.x,
+            y: visible.y,
+            width: half_width,
+            height: half_height,
+        },
+        SnapAction::TopRight => Rect {
+            x: right,
+            y: visible.y,
+            width: half_width,
+            height: half_height,
+        },
+        SnapAction::BottomLeft => Rect {
+            x: visible.x,
+            y: bottom,
+            width: half_width,
+            height: half_height,
+        },
+        SnapAction::BottomRight => Rect {
+            x: right,
+            y: bottom,
+            width: half_width,
+            height: half_height,
+        },
         SnapAction::Maximize => visible,
         SnapAction::Center => Rect {
             x: visible.x + (visible.width - window.width) / 2.0,
@@ -149,12 +189,25 @@ pub fn target_rect(action: SnapAction, visible: Rect, window: Rect) -> Rect {
 mod tests {
     use super::*;
 
-    const VISIBLE: Rect = Rect { x: 0.0, y: 25.0, width: 1000.0, height: 775.0 };
+    const VISIBLE: Rect = Rect {
+        x: 0.0,
+        y: 25.0,
+        width: 1000.0,
+        height: 775.0,
+    };
 
     #[test]
     fn halves_split_each_axis_in_order() {
         let left = target_rect(SnapAction::LeftHalf, VISIBLE, VISIBLE);
-        assert_eq!(left, Rect { x: 0.0, y: 25.0, width: 500.0, height: 775.0 });
+        assert_eq!(
+            left,
+            Rect {
+                x: 0.0,
+                y: 25.0,
+                width: 500.0,
+                height: 775.0
+            }
+        );
         let right = target_rect(SnapAction::RightHalf, VISIBLE, VISIBLE);
         assert_eq!(right.x, 500.0);
         let top = target_rect(SnapAction::TopHalf, VISIBLE, VISIBLE);
@@ -176,7 +229,12 @@ mod tests {
     #[test]
     fn maximize_fills_the_visible_area_and_center_keeps_the_window() {
         assert_eq!(target_rect(SnapAction::Maximize, VISIBLE, VISIBLE), VISIBLE);
-        let odd = Rect { x: 900.0, y: 600.0, width: 200.0, height: 150.0 };
+        let odd = Rect {
+            x: 900.0,
+            y: 600.0,
+            width: 200.0,
+            height: 150.0,
+        };
         let centered = target_rect(SnapAction::Center, VISIBLE, odd);
         assert_eq!((centered.width, centered.height), (200.0, 150.0));
         assert_eq!(centered.x, (1000.0 - 200.0) / 2.0);
@@ -187,32 +245,68 @@ mod tests {
     fn the_appkit_flip_moves_the_origin_not_the_size() {
         // A menu bar sits at the top of a 1050-point display: visibleFrame
         // reports y=0 height=1025 in AppKit terms, which is y=25 downward.
-        let visible_ns = Rect { x: 0.0, y: 0.0, width: 1000.0, height: 1025.0 };
+        let visible_ns = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 1025.0,
+        };
         assert_eq!(
             ns_to_ax(visible_ns, 1050.0),
-            Rect { x: 0.0, y: 25.0, width: 1000.0, height: 1025.0 }
+            Rect {
+                x: 0.0,
+                y: 25.0,
+                width: 1000.0,
+                height: 1025.0
+            }
         );
     }
 
     #[test]
     fn a_window_belongs_to_the_screen_it_covers_most_of() {
         let screens = [
-            Rect { x: 0.0, y: 0.0, width: 1000.0, height: 800.0 },
-            Rect { x: 1000.0, y: 0.0, width: 1000.0, height: 800.0 },
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1000.0,
+                height: 800.0,
+            },
+            Rect {
+                x: 1000.0,
+                y: 0.0,
+                width: 1000.0,
+                height: 800.0,
+            },
         ];
-        let straddling = Rect { x: 700.0, y: 0.0, width: 800.0, height: 800.0 };
+        let straddling = Rect {
+            x: 700.0,
+            y: 0.0,
+            width: 800.0,
+            height: 800.0,
+        };
         // 300 points on the left screen, 500 on the right: the right wins.
         assert_eq!(screen_for(straddling, &screens), 1);
-        let lost = Rect { x: -4000.0, y: -4000.0, width: 100.0, height: 100.0 };
+        let lost = Rect {
+            x: -4000.0,
+            y: -4000.0,
+            width: 100.0,
+            height: 100.0,
+        };
         assert_eq!(screen_for(lost, &screens), 0);
     }
 
     #[test]
     fn every_action_round_trips_through_its_id() {
         for action in [
-            SnapAction::LeftHalf, SnapAction::RightHalf, SnapAction::TopHalf,
-            SnapAction::BottomHalf, SnapAction::TopLeft, SnapAction::TopRight,
-            SnapAction::BottomLeft, SnapAction::BottomRight, SnapAction::Maximize,
+            SnapAction::LeftHalf,
+            SnapAction::RightHalf,
+            SnapAction::TopHalf,
+            SnapAction::BottomHalf,
+            SnapAction::TopLeft,
+            SnapAction::TopRight,
+            SnapAction::BottomLeft,
+            SnapAction::BottomRight,
+            SnapAction::Maximize,
             SnapAction::Center,
         ] {
             assert_eq!(SnapAction::from_id(action.id()), Some(action));
@@ -223,64 +317,67 @@ mod tests {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    
+
     use objc2_app_kit::{NSScreen, NSWorkspace};
 
     use super::{Rect, SnapAction, SnapOutcome, ns_to_ax, screen_for, target_rect};
 
-// The C face of the Accessibility API, linked by framework the way the
-// trust check in `paste` is. Only the handful of calls a snap needs are
-// declared; there is no element tree to walk, only one focused window.
-#[link(name = "ApplicationServices", kind = "framework")]
-unsafe extern "C" {
-fn AXUIElementCreateApplication(pid: i32) -> *const std::ffi::c_void;
-fn AXUIElementCopyAttributeValue(
-element: *const std::ffi::c_void,
-attribute: *const std::ffi::c_void,
-value: *mut *const std::ffi::c_void,
-) -> i32;
-fn AXUIElementSetAttributeValue(
-element: *const std::ffi::c_void,
-attribute: *const std::ffi::c_void,
-value: *const std::ffi::c_void,
-) -> i32;
-fn AXValueCreate(the_type: u32, value_ptr: *const std::ffi::c_void) -> *const std::ffi::c_void;
-fn AXValueGetValue(
-value: *const std::ffi::c_void,
-the_type: u32,
-value_ptr: *mut std::ffi::c_void,
-) -> bool;
-fn CFRelease(cf: *const std::ffi::c_void);
-}
+    // The C face of the Accessibility API, linked by framework the way the
+    // trust check in `paste` is. Only the handful of calls a snap needs are
+    // declared; there is no element tree to walk, only one focused window.
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        fn AXUIElementCreateApplication(pid: i32) -> *const std::ffi::c_void;
+        fn AXUIElementCopyAttributeValue(
+            element: *const std::ffi::c_void,
+            attribute: *const std::ffi::c_void,
+            value: *mut *const std::ffi::c_void,
+        ) -> i32;
+        fn AXUIElementSetAttributeValue(
+            element: *const std::ffi::c_void,
+            attribute: *const std::ffi::c_void,
+            value: *const std::ffi::c_void,
+        ) -> i32;
+        fn AXValueCreate(
+            the_type: u32,
+            value_ptr: *const std::ffi::c_void,
+        ) -> *const std::ffi::c_void;
+        fn AXValueGetValue(
+            value: *const std::ffi::c_void,
+            the_type: u32,
+            value_ptr: *mut std::ffi::c_void,
+        ) -> bool;
+        fn CFRelease(cf: *const std::ffi::c_void);
+    }
 
-// The attribute-name constants (`kAXPositionAttribute` and friends) are
-// no longer exported as linkable symbols by the SDK, so the documented
-// string values are built at runtime instead — the same CFStrings the
-// constants hold, reached the way every post-deprecation caller does.
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-fn CFStringCreateWithCString(
-allocator: *const std::ffi::c_void,
-c_string: *const std::ffi::c_char,
-encoding: u32,
-) -> *const std::ffi::c_void;
-}
+    // The attribute-name constants (`kAXPositionAttribute` and friends) are
+    // no longer exported as linkable symbols by the SDK, so the documented
+    // string values are built at runtime instead — the same CFStrings the
+    // constants hold, reached the way every post-deprecation caller does.
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFStringCreateWithCString(
+            allocator: *const std::ffi::c_void,
+            c_string: *const std::ffi::c_char,
+            encoding: u32,
+        ) -> *const std::ffi::c_void;
+    }
 
-const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 
-/// The CFString form of one Accessibility attribute name. Owned by the
-/// caller, which releases it when the call it fed is done.
-fn cf_string(name: &[u8]) -> *const std::ffi::c_void {
-// SAFETY: `name` is NUL-terminated by every caller, and a NULL
-// allocator selects the default one.
-unsafe {
-CFStringCreateWithCString(
-std::ptr::null(),
-name.as_ptr() as *const std::ffi::c_char,
-K_CF_STRING_ENCODING_UTF8,
-)
-}
-}
+    /// The CFString form of one Accessibility attribute name. Owned by the
+    /// caller, which releases it when the call it fed is done.
+    fn cf_string(name: &[u8]) -> *const std::ffi::c_void {
+        // SAFETY: `name` is NUL-terminated by every caller, and a NULL
+        // allocator selects the default one.
+        unsafe {
+            CFStringCreateWithCString(
+                std::ptr::null(),
+                name.as_ptr() as *const std::ffi::c_char,
+                K_CF_STRING_ENCODING_UTF8,
+            )
+        }
+    }
 
     const K_AX_VALUE_CG_POINT_TYPE: u32 = 1;
     const K_AX_VALUE_CG_SIZE_TYPE: u32 = 2;
@@ -290,12 +387,18 @@ K_CF_STRING_ENCODING_UTF8,
     /// dragging a crate in for sixteen bytes of layout.
     #[repr(C)]
     #[derive(Default)]
-    struct AxPoint { x: f64, y: f64 }
+    struct AxPoint {
+        x: f64,
+        y: f64,
+    }
 
     /// The size counterpart, two `f64`s like `CGSize`.
     #[repr(C)]
     #[derive(Default)]
-    struct AxSize { width: f64, height: f64 }
+    struct AxSize {
+        width: f64,
+        height: f64,
+    }
 
     /// Moves the frontmost application's focused window to one snap position.
     ///
@@ -303,21 +406,40 @@ K_CF_STRING_ENCODING_UTF8,
     /// global-shortcut handler routes this through `run_on_main_thread`, and
     /// an off-main call refuses rather than guessing at screens.
     pub fn snap(action: SnapAction) -> SnapOutcome {
+        let Some(pid) = frontmost_pid() else {
+            return SnapOutcome::NoTarget;
+        };
+        snap_pid(pid, action)
+    }
+
+    /// The frontmost application's pid, skipping this process — its floating
+    /// palette is not a window anyone tiles.
+    ///
+    /// Main-thread only, like every AppKit query; returns nothing off it and
+    /// when nobody else is in front.
+    fn frontmost_pid() -> Option<i32> {
+        if objc2::MainThreadMarker::new().is_none() {
+            return None;
+        }
+        // SAFETY: reading the shared workspace singleton and the frontmost
+        // application record is a query with no preconditions.
+        let frontmost = unsafe { NSWorkspace::sharedWorkspace().frontmostApplication() };
+        let app = frontmost?;
+        // SAFETY: reading a property of an owned running-application record.
+        let pid = unsafe { app.processIdentifier() };
+        (pid != std::process::id() as i32).then_some(pid)
+    }
+
+    /// Snaps one named application's focused window — the palette's way in,
+    /// where "frontmost" is the palette itself and the target is the pid a
+    /// paste would land in.
+    pub fn snap_pid(pid: i32, action: SnapAction) -> SnapOutcome {
         if !super::super::paste::is_trusted() {
             return SnapOutcome::PermissionRequired;
         }
         let Some(mtm) = objc2::MainThreadMarker::new() else {
             return SnapOutcome::Refused;
         };
-        // SAFETY: reading the shared workspace singleton and the frontmost
-        // application record is a query with no preconditions.
-        let frontmost = unsafe { NSWorkspace::sharedWorkspace().frontmostApplication() };
-        let Some(app) = frontmost else { return SnapOutcome::NoTarget };
-        // SAFETY: reading a property of an owned running-application record.
-        let pid = unsafe { app.processIdentifier() };
-        if pid == std::process::id() as i32 {
-            return SnapOutcome::NoTarget;
-        }
         snap_window_of(mtm, pid, action)
     }
 
@@ -329,7 +451,9 @@ K_CF_STRING_ENCODING_UTF8,
         unsafe {
             let screens = NSScreen::screens(mtm);
             let list = screens.iter().collect::<Vec<_>>();
-            let Some(primary) = list.first() else { return Vec::new() };
+            let Some(primary) = list.first() else {
+                return Vec::new();
+            };
             let primary_height = primary.frame().size.height;
             let mut visibles = Vec::with_capacity(list.len());
             for screen in &list {
@@ -406,12 +530,22 @@ K_CF_STRING_ENCODING_UTF8,
             let position = cf_string(b"AXPosition\0");
             let size = cf_string(b"AXSize\0");
             if position.is_null() || size.is_null() {
-                if !position.is_null() { CFRelease(position); }
-                if !size.is_null() { CFRelease(size); }
+                if !position.is_null() {
+                    CFRelease(position);
+                }
+                if !size.is_null() {
+                    CFRelease(size);
+                }
                 return false;
             }
-            let point = AxPoint { x: target.x, y: target.y };
-            let ax_size = AxSize { width: target.width, height: target.height };
+            let point = AxPoint {
+                x: target.x,
+                y: target.y,
+            };
+            let ax_size = AxSize {
+                width: target.width,
+                height: target.height,
+            };
             let point_value = AXValueCreate(
                 K_AX_VALUE_CG_POINT_TYPE,
                 &point as *const _ as *const std::ffi::c_void,
@@ -421,8 +555,12 @@ K_CF_STRING_ENCODING_UTF8,
                 &ax_size as *const _ as *const std::ffi::c_void,
             );
             if point_value.is_null() || size_value.is_null() {
-                if !point_value.is_null() { CFRelease(point_value); }
-                if !size_value.is_null() { CFRelease(size_value); }
+                if !point_value.is_null() {
+                    CFRelease(point_value);
+                }
+                if !size_value.is_null() {
+                    CFRelease(size_value);
+                }
                 CFRelease(position);
                 CFRelease(size);
                 return false;
@@ -451,11 +589,8 @@ K_CF_STRING_ENCODING_UTF8,
                 CFRelease(application);
                 return SnapOutcome::Refused;
             }
-            let focused = AXUIElementCopyAttributeValue(
-                application,
-                focused_attribute,
-                &mut window,
-            );
+            let focused =
+                AXUIElementCopyAttributeValue(application, focused_attribute, &mut window);
             CFRelease(focused_attribute);
             if focused != 0 || window.is_null() {
                 CFRelease(application);
@@ -481,18 +616,25 @@ K_CF_STRING_ENCODING_UTF8,
                 CFRelease(application);
                 return SnapOutcome::Refused;
             };
-            let visible = visibles.get(screen_for(current, &visibles)).copied().unwrap_or(visible);
+            let visible = visibles
+                .get(screen_for(current, &visibles))
+                .copied()
+                .unwrap_or(visible);
             let target = target_rect(action, visible, current);
             let moved = write_frame(window, target);
             CFRelease(window);
             CFRelease(application);
-            if moved { SnapOutcome::Moved } else { SnapOutcome::Refused }
+            if moved {
+                SnapOutcome::Moved
+            } else {
+                SnapOutcome::Refused
+            }
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-pub use platform::snap;
+pub use platform::{snap, snap_pid};
 
 #[cfg(not(target_os = "macos"))]
 pub fn snap(_action: SnapAction) -> SnapOutcome {

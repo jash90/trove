@@ -13,6 +13,7 @@ import { CategoryTiles } from "./CategoryTiles";
 import { EmptyState } from "./EmptyState";
 import { PaletteList } from "./PaletteList";
 import { PreviewPane } from "./PreviewPane";
+import { SnapList } from "./SnapList";
 
 interface PaletteWorkspaceProps {
       /** What the palette is showing — the home picker and the empty states follow it. */
@@ -23,6 +24,12 @@ interface PaletteWorkspaceProps {
       onOpenChat: () => void;
       /** The home tile the arrows have landed on, or null while none is marked. */
       homeTileIndex: number | null;
+      /** The snap chords as configured, one per action id. */
+      snapChords: Record<string, string>;
+      /** The Windows category's own keyboard selection. */
+      snapSelectedKey: string | null;
+      onSnapSelect: (id: string) => void;
+      onSnapActivate: (id: string) => void;
       appsStatus: "loading" | "ready" | "error";
       status: "loading" | "ready" | "error";
       /** The single result list: applications and history, already ordered. */
@@ -58,6 +65,10 @@ export const PaletteWorkspace = ({
       onPickCategory,
       onOpenChat,
       homeTileIndex,
+      snapChords,
+      snapSelectedKey,
+      onSnapSelect,
+      onSnapActivate,
       appsStatus,
       status,
       items,
@@ -86,7 +97,7 @@ export const PaletteWorkspace = ({
                         type="button"
                         className="preview-toggle"
                         aria-label="Show the selected entry preview"
-                        disabled={items.length === 0}
+                        disabled={items.length === 0 || mode === "windows"}
                         onClick={onOpenPreview}
                   >
                         <PanelRightOpen size={15} aria-hidden="true" />
@@ -103,6 +114,16 @@ export const PaletteWorkspace = ({
                                     onPick={onPickCategory}
                                     onOpenChat={onOpenChat}
                                     selectedIndex={homeTileIndex}
+                              />
+                        ) : null}
+                        {/* The Windows category is a list of its own, wearing the
+              chords the settings currently hold. */}
+                        {mode === "windows" ? (
+                              <SnapList
+                                    chords={snapChords}
+                                    selectedKey={snapSelectedKey}
+                                    onSelect={onSnapSelect}
+                                    onActivate={onSnapActivate}
                               />
                         ) : null}
                         {/* The states speak only when there is nothing to show, and about
@@ -201,7 +222,7 @@ export const PaletteWorkspace = ({
                                     ) : null}
                               </>
                         ) : null}
-                        {items.length > 0 ? (
+                        {items.length > 0 && mode !== "windows" ? (
                               <PaletteList
                                     items={items}
                                     selectedKey={selectedKey}

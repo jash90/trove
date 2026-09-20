@@ -2,6 +2,7 @@ import {
   AppWindowMac,
   ClipboardList,
   MessageSquareText,
+  Move,
   Vault,
 } from "lucide-react";
 
@@ -31,6 +32,10 @@ const TILE_META: Record<PaletteMode, { icon: typeof Vault; detail: string }> = {
   vault: {
     icon: Vault,
     detail: "The keys your paired vault holds, by name.",
+  },
+  windows: {
+    icon: Move,
+    detail: "Move and arrange windows, the way Rectangle does.",
   },
 };
 
