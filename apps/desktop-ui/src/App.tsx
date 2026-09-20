@@ -1,4 +1,4 @@
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   useCallback,
   useEffect,
@@ -7,43 +7,47 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type KeyboardEventHandler,
-} from 'react';
+} from "react";
 
-import { ActionBar } from './components/ActionBar';
-import { ImportWizard } from './components/ImportWizard';
+import { ActionBar } from "./components/ActionBar";
+import { ImportWizard } from "./components/ImportWizard";
 import {
   PALETTE_CATEGORIES,
   PALETTE_CHAT_CATEGORY,
   PaletteHeader,
   type PaletteMode,
   type PaletteView,
-} from './components/PaletteHeader';
-import { acceleratorFromKeyEvent } from './components/SettingsPanel';
-import { PaletteWorkspace } from './components/PaletteWorkspace';
-import { useAppsCatalog } from './hooks/useAppsCatalog';
-import { useVaultCatalog } from './hooks/useVaultCatalog';
-import { useHistoryActions } from './hooks/useHistoryActions';
-import { useHistorySearch } from './hooks/useHistorySearch';
-import { useListNavigation } from './hooks/useListNavigation';
-import { useSelectedPreview } from './hooks/useSelectedPreview';
-import { useLinkPreview } from './hooks/useLinkPreview';
-import { useThumbnail } from './hooks/useThumbnail';
-import { HISTORY_PAGE_SIZE } from './lib/contracts';
-import { filterApps } from './lib/appSearch';
-import { buildPaletteItems, keyOfItem, type PaletteItem } from './lib/paletteItems';
-import { filterSecrets } from './lib/vaultSearch';
+} from "./components/PaletteHeader";
+import { acceleratorFromKeyEvent } from "./components/SettingsPanel";
+import { PaletteWorkspace } from "./components/PaletteWorkspace";
+import { useAppsCatalog } from "./hooks/useAppsCatalog";
+import { useVaultCatalog } from "./hooks/useVaultCatalog";
+import { useHistoryActions } from "./hooks/useHistoryActions";
+import { useHistorySearch } from "./hooks/useHistorySearch";
+import { useListNavigation } from "./hooks/useListNavigation";
+import { useSelectedPreview } from "./hooks/useSelectedPreview";
+import { useLinkPreview } from "./hooks/useLinkPreview";
+import { useThumbnail } from "./hooks/useThumbnail";
+import { HISTORY_PAGE_SIZE } from "./lib/contracts";
+import { filterApps } from "./lib/appSearch";
+import {
+  buildPaletteItems,
+  keyOfItem,
+  type PaletteItem,
+} from "./lib/paletteItems";
+import { filterSecrets } from "./lib/vaultSearch";
 import {
   GatewayProvider,
   useGateway,
   type ClipboardGateway,
-} from './lib/gateway';
+} from "./lib/gateway";
 
 interface AppProps {
   gateway?: ClipboardGateway;
 }
 
 /** Keys that belong to whatever text field has focus, never to the palette. */
-const TEXT_EDITING_KEYS = new Set(['Backspace', 'Delete']);
+const TEXT_EDITING_KEYS = new Set(["Backspace", "Delete"]);
 
 /**
  * The shortcut written the way a keyboard is drawn rather than the way it is stored.
@@ -53,25 +57,25 @@ const TEXT_EDITING_KEYS = new Set(['Backspace', 'Delete']);
  * correctly is worse than one nobody was told about at all.
  */
 export const shortcutHint = (hotkey: string | null): string => {
-  if (hotkey === null) return '';
+  if (hotkey === null) return "";
   return hotkey
-    .split('+')
+    .split("+")
     .map((part) => {
       switch (part) {
-        case 'CommandOrControl':
-        case 'Command':
-          return '⌘';
-        case 'Control':
-          return '⌃';
-        case 'Alt':
-          return '⌥';
-        case 'Shift':
-          return '⇧';
+        case "CommandOrControl":
+        case "Command":
+          return "⌘";
+        case "Control":
+          return "⌃";
+        case "Alt":
+          return "⌥";
+        case "Shift":
+          return "⇧";
         default:
           return part;
       }
     })
-    .join('');
+    .join("");
 };
 
 /**
@@ -88,7 +92,13 @@ export const shortcutHint = (hotkey: string | null): string => {
  * shortcut closes the palette exactly as the built-in one does.
  */
 export const isSummoningShortcut = (
-  event: { code: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean },
+  event: {
+    code: string;
+    metaKey: boolean;
+    ctrlKey: boolean;
+    altKey: boolean;
+    shiftKey: boolean;
+  },
   hotkey: string | null,
 ): boolean => {
   if (hotkey === null) return false;
@@ -103,7 +113,8 @@ const shortcutIsBlocked = (
   if (dialogOpen) return true;
   const target = event.target;
   if (!(target instanceof HTMLElement)) return false;
-  if (target.closest('[role="dialog"], [data-palette-shortcuts="disabled"]')) return true;
+  if (target.closest('[role="dialog"], [data-palette-shortcuts="disabled"]'))
+    return true;
   const ownsTextInput =
     target instanceof HTMLInputElement ||
     target instanceof HTMLTextAreaElement ||
@@ -114,30 +125,39 @@ const shortcutIsBlocked = (
   // drive the list without leaving it — but it never surrenders the keys that
   // edit its own text. Backspace there means "erase a character", and letting
   // it reach the palette proposes deleting a history entry instead.
-  return target.id !== 'history-search' || TEXT_EDITING_KEYS.has(event.key);
+  return target.id !== "history-search" || TEXT_EDITING_KEYS.has(event.key);
 };
 
 const ClipboardPalette = (): React.JSX.Element => {
   const gateway = useGateway();
-  const { query, setQuery, status, refreshing, items } = useHistorySearch(gateway);
+  const { query, setQuery, status, refreshing, items } =
+    useHistorySearch(gateway);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
-  const [workspace, setWorkspace] = useState<'none' | 'import'>('none');
+  const [workspace, setWorkspace] = useState<"none" | "import">("none");
   // The palette opens on its categories — Applications, Clipboard history,
   // Key vault — and one of them is then a deliberate pick away. Which list
   // someone came for is a fact about them; the home view asks instead of
   // guessing. The setting can turn the whole arrangement off: `view` is
   // then the combined list, exactly as the palette used to be.
-  const [mode, setMode] = useState<PaletteMode | 'home'>('home');
+  const [mode, setMode] = useState<PaletteMode | "home">("home");
   // Whether the palette has modes at all — a setting, read below and
   // refreshed each time the palette comes back to the front.
   const [paletteModes, setPaletteModes] = useState(true);
-  const view: PaletteView = paletteModes ? mode : 'all';
+  // The home tile the arrows have landed on — null until one is moved, so a
+  // fresh palette keeps Enter meaning the first row of the list the tiles
+  // sit above. Cleared on leaving home, so the walk always starts over.
+  const [homeTileIndex, setHomeTileIndex] = useState<number | null>(null);
+  useEffect(() => {
+    if (mode !== "home") setHomeTileIndex(null);
+  }, [mode]);
+  const view: PaletteView = paletteModes ? mode : "all";
   // The catalog is loaded whichever mode is showing it, so that Tab is a
   // filter change and never a wait.
   const catalog = useAppsCatalog(gateway, true);
   const visibleApps = useMemo(
-    () => (view === 'apps' || view === 'all' ? filterApps(catalog.apps, query) : []),
+    () =>
+      view === "apps" || view === "all" ? filterApps(catalog.apps, query) : [],
     [view, catalog.apps, query],
   );
   // Only asked for once someone types. The application catalog is a local scan and may load
@@ -146,14 +166,20 @@ const ClipboardPalette = (): React.JSX.Element => {
   // The vault is asked for the moment its category is entered — a
   // deliberate act, like typing was before it — or, combined, when someone
   // types. Never on an untouched palette: the ask crosses the network.
-  const vault = useVaultCatalog(gateway, view === 'vault' || (view === 'all' && query.trim() !== ''));
+  const vault = useVaultCatalog(
+    gateway,
+    view === "vault" || (view === "all" && query.trim() !== ""),
+  );
   const visibleSecrets = useMemo(() => {
-    if (view === 'vault') {
+    if (view === "vault") {
       // Browsed, not only searched: the whole key list is the point of the
       // category, so an empty query shows everything the vault returned.
-      return query.trim() === '' ? vault.secrets : filterSecrets(vault.secrets, query);
+      return query.trim() === ""
+        ? vault.secrets
+        : filterSecrets(vault.secrets, query);
     }
-    if (view === 'all' && query.trim() !== '') return filterSecrets(vault.secrets, query);
+    if (view === "all" && query.trim() !== "")
+      return filterSecrets(vault.secrets, query);
     return [];
   }, [view, vault.secrets, query]);
   const [launchError, setLaunchError] = useState<string | null>(null);
@@ -161,7 +187,9 @@ const ClipboardPalette = (): React.JSX.Element => {
   // window rather than outside it, and the setting that decides whether the
   // palette has modes at all. Re-read on focus: settings change in their own
   // window, and the palette notices the next time it is in front.
-  const [summoningShortcut, setSummoningShortcut] = useState<string | null>(null);
+  const [summoningShortcut, setSummoningShortcut] = useState<string | null>(
+    null,
+  );
   const refreshSettings = useCallback((): void => {
     // Defensive on the call as well as the promise: the palette has to open
     // whether or not the settings can be read, and a shortcut it does not know
@@ -229,13 +257,16 @@ const ClipboardPalette = (): React.JSX.Element => {
   // The history rows the palette shows: every one of them while the
   // history side is up — the view decides, the source is always the same
   // list.
-  const historyItems = view === 'history' || view === 'all' ? actions.visibleItems : [];
+  const historyItems =
+    view === "history" || view === "all" ? actions.visibleItems : [];
 
   const handleLaunch = (path: string): void => {
     setLaunchError(null);
     // A refusal leaves the palette where it is — the application the user
     // asked for did not start, so there is nothing to make way for.
-    void gateway.launchApp(path).catch(() => setLaunchError('The application could not be started.'));
+    void gateway
+      .launchApp(path)
+      .catch(() => setLaunchError("The application could not be started."));
   };
 
   const paletteItems = useMemo<PaletteItem[]>(
@@ -244,18 +275,20 @@ const ClipboardPalette = (): React.JSX.Element => {
   );
 
   const handleActivate = (entry: PaletteItem): void => {
-    if (entry.kind === 'app') {
+    if (entry.kind === "app") {
       handleLaunch(entry.app.path);
-    } else if (entry.kind === 'vault') {
+    } else if (entry.kind === "vault") {
       setLaunchError(null);
       // Through the core, which arms the capture suppression before the write, so the key does
       // not land in the history this application exists to keep. The value never comes back
       // here — the interface learns only whether it worked.
       void gateway
         .keyvaultCopySecret(entry.secret.slug)
-        .catch(() => setLaunchError('That secret could not be copied from the vault.'));
+        .catch(() =>
+          setLaunchError("That secret could not be copied from the vault."),
+        );
     } else {
-      actions.copy(entry.item.eventId, 'paste');
+      actions.copy(entry.item.eventId, "paste");
     }
     // A launch and a key copy both end with the palette going away — the
     // next summoning opens back on the categories, not on whichever side
@@ -264,7 +297,7 @@ const ClipboardPalette = (): React.JSX.Element => {
     // refusal and its fix), and that answer belongs to the row and the
     // selection still on screen. With categories off there is nothing to
     // reset.
-    if (paletteModes && entry.kind !== 'history') setMode('home');
+    if (paletteModes && entry.kind !== "history") setMode("home");
   };
 
   const navigation = useListNavigation({
@@ -275,24 +308,27 @@ const ClipboardPalette = (): React.JSX.Element => {
     // category — back to the chooser — and only hiding the palette remains
     // the global shortcut's job. Home has nothing above it to back out to.
     onEscape: () => {
-      if (query !== '') {
-        setQuery('');
-      } else if (paletteModes && mode !== 'home') {
-        setMode('home');
+      if (query !== "") {
+        setQuery("");
+      } else if (paletteModes && mode !== "home") {
+        setMode("home");
       }
     },
   });
 
-  const selected = paletteItems.find((entry) => keyOfItem(entry) === navigation.selectedKey) ?? null;
-  const selectedHistoryItem = selected?.kind === 'history' ? selected.item : null;
+  const selected =
+    paletteItems.find((entry) => keyOfItem(entry) === navigation.selectedKey) ??
+    null;
+  const selectedHistoryItem =
+    selected?.kind === "history" ? selected.item : null;
   const selectedHistoryId = selectedHistoryItem?.eventId ?? null;
   const selectedIndex = selected === null ? -1 : paletteItems.indexOf(selected);
   const activeDescendant =
     selected === null
       ? undefined
-      : selected.kind === 'app'
+      : selected.kind === "app"
         ? `app-option-${selectedIndex}`
-        : selected.kind === 'vault'
+        : selected.kind === "vault"
           ? `vault-option-${selectedIndex}`
           : `history-option-${selectedHistoryId}`;
 
@@ -303,20 +339,25 @@ const ClipboardPalette = (): React.JSX.Element => {
     // Not gated on `hasThumbnail`: that flag is false exactly while no
     // thumbnail exists, which is when one needs rendering. The command
     // answers cheaply when there is no image to render from.
-    selectedHistoryItem?.kind === 'image',
+    selectedHistoryItem?.kind === "image",
   );
-  const link = useLinkPreview(gateway, selectedHistoryId, selectedHistoryItem?.kind === 'link');
+  const link = useLinkPreview(
+    gateway,
+    selectedHistoryId,
+    selectedHistoryItem?.kind === "link",
+  );
 
   // Settings are their own window; the palette only asks for it.
-  const openSettings = (): void => void gateway.openSettingsWindow().catch(() => undefined);
+  const openSettings = (): void =>
+    void gateway.openSettingsWindow().catch(() => undefined);
 
-  const modalOpen = actions.deleteTargetId !== null || workspace !== 'none';
+  const modalOpen = actions.deleteTargetId !== null || workspace !== "none";
 
   // Only one workspace at a time. Focus returns to the search field rather
   // than to whatever opened the dialog: the palette has one place a keyboard
   // user works from, and a shortcut has no button to go back to.
   const closeWorkspace = (): void => {
-    setWorkspace('none');
+    setWorkspace("none");
     queueMicrotask(focusSearch);
   };
 
@@ -327,7 +368,7 @@ const ClipboardPalette = (): React.JSX.Element => {
     // is one list with the applications now, not a place the launcher's
     // error can follow the user into.
     setLaunchError(null);
-    if (entry.kind !== 'app') actions.clearFeedback();
+    if (entry.kind !== "app") actions.clearFeedback();
     focusSearch();
   };
   const handleQueryChange = (nextQuery: string): void => {
@@ -335,20 +376,70 @@ const ClipboardPalette = (): React.JSX.Element => {
     // manager before it is anything else, and a query is the one answer
     // that needs no category picked. Picking a tile first keeps any other
     // meaning.
-    if (paletteModes && mode === 'home' && nextQuery.trim() !== '') {
-      setMode('history');
+    if (paletteModes && mode === "home" && nextQuery.trim() !== "") {
+      setMode("history");
     }
     setQuery(nextQuery);
     focusSearch();
   };
-  const handleSearchKeyDown: KeyboardEventHandler<HTMLInputElement> = (event) => {
+  const handleSearchKeyDown: KeyboardEventHandler<HTMLInputElement> = (
+    event,
+  ) => {
+    // The arrows walk the tiles and Enter commits the one they landed on —
+    // the digits' answer for hands that move instead of reach. Wrapping,
+    // because four tiles turn around faster than they stop. Until an arrow
+    // has moved, Enter keeps its older meaning below: the list's first row.
+    if (
+      paletteModes &&
+      mode === "home" &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey
+    ) {
+      const tileCount = PALETTE_CATEGORIES.length + 1;
+      if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+        event.preventDefault();
+        setHomeTileIndex((previous) =>
+          previous === null ? 0 : (previous + 1) % tileCount,
+        );
+        return;
+      }
+      if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+        event.preventDefault();
+        setHomeTileIndex((previous) =>
+          previous === null
+            ? tileCount - 1
+            : (previous - 1 + tileCount) % tileCount,
+        );
+        return;
+      }
+      if (event.key === "Home") {
+        event.preventDefault();
+        setHomeTileIndex(0);
+        return;
+      }
+      if (event.key === "End") {
+        event.preventDefault();
+        setHomeTileIndex(tileCount - 1);
+        return;
+      }
+      if (event.key === "Enter" && homeTileIndex !== null) {
+        event.preventDefault();
+        if (homeTileIndex === PALETTE_CATEGORIES.length) {
+          void gateway.openChatWindow?.().catch(() => undefined);
+        } else {
+          setMode(PALETTE_CATEGORIES[homeTileIndex]!.mode);
+        }
+        return;
+      }
+    }
     // The digits pick a category straight from home, in tile order —
     // the keys the tiles themselves display. The fourth opens the chat
     // window, a destination beside the palette rather than a view of it.
     if (
       paletteModes &&
-      mode === 'home' &&
-      ['1', '2', '3', '4'].includes(event.key) &&
+      mode === "home" &&
+      ["1", "2", "3", "4"].includes(event.key) &&
       !event.metaKey &&
       !event.ctrlKey &&
       !event.altKey
@@ -358,7 +449,9 @@ const ClipboardPalette = (): React.JSX.Element => {
         void gateway.openChatWindow?.().catch(() => undefined);
         return;
       }
-      const category = PALETTE_CATEGORIES.find((entry) => entry.key === event.key);
+      const category = PALETTE_CATEGORIES.find(
+        (entry) => entry.key === event.key,
+      );
       if (category) {
         event.preventDefault();
         setMode(category.mode);
@@ -372,7 +465,7 @@ const ClipboardPalette = (): React.JSX.Element => {
     // browser's meaning too: there is nothing to cycle.
     if (
       paletteModes &&
-      event.key === 'Tab' &&
+      event.key === "Tab" &&
       !event.shiftKey &&
       !event.metaKey &&
       !event.ctrlKey &&
@@ -380,10 +473,13 @@ const ClipboardPalette = (): React.JSX.Element => {
     ) {
       event.preventDefault();
       setMode((previous) => {
-        const order: Array<PaletteMode | 'home'> = ['home', ...PALETTE_CATEGORIES.map((c) => c.mode)];
+        const order: Array<PaletteMode | "home"> = [
+          "home",
+          ...PALETTE_CATEGORIES.map((c) => c.mode),
+        ];
         const index = order.indexOf(previous);
         const next = order[(index + 1) % order.length];
-        return next === undefined ? 'home' : next;
+        return next === undefined ? "home" : next;
       });
       return;
     }
@@ -395,19 +491,22 @@ const ClipboardPalette = (): React.JSX.Element => {
   // in a browser without one.
   const hideWindow = (): void => {
     try {
-      void getCurrentWindow().hide().catch(() => undefined);
+      void getCurrentWindow()
+        .hide()
+        .catch(() => undefined);
     } catch {
       /* no window to hide */
     }
   };
   const handleCopy = (): void => {
-    if (selectedHistoryId !== null) actions.copy(selectedHistoryId, 'copy');
+    if (selectedHistoryId !== null) actions.copy(selectedHistoryId, "copy");
   };
   const handlePaste = (): void => {
-    if (selectedHistoryId !== null) actions.copy(selectedHistoryId, 'paste');
+    if (selectedHistoryId !== null) actions.copy(selectedHistoryId, "paste");
   };
   const handlePastePlainText = (): void => {
-    if (selectedHistoryId !== null) actions.copy(selectedHistoryId, 'pastePlain');
+    if (selectedHistoryId !== null)
+      actions.copy(selectedHistoryId, "pastePlain");
   };
   const handleTogglePin = (): void => {
     if (selectedHistoryItem) actions.togglePin(selectedHistoryItem);
@@ -430,23 +529,23 @@ const ClipboardPalette = (): React.JSX.Element => {
       return;
     }
     if (shortcutIsBlocked(event, modalOpen)) return;
-    const key = event.key.toLocaleLowerCase('en-US');
+    const key = event.key.toLocaleLowerCase("en-US");
     const primaryModifier = event.metaKey || event.ctrlKey;
     // These two open a dialog rather than act on a row, so they work with an
     // empty history — which is exactly when someone reaches for the importer.
-    if (primaryModifier && !event.shiftKey && key === 'i') {
+    if (primaryModifier && !event.shiftKey && key === "i") {
       event.preventDefault();
-      setWorkspace('import');
+      setWorkspace("import");
       return;
     }
-    if (primaryModifier && !event.shiftKey && key === ',') {
+    if (primaryModifier && !event.shiftKey && key === ",") {
       event.preventDefault();
       openSettings();
       return;
     }
     // The chat window is one chord away, like the importer and settings:
     // a conversation is its own window, not a mode of this one.
-    if (primaryModifier && !event.shiftKey && key === 'k') {
+    if (primaryModifier && !event.shiftKey && key === "k") {
       event.preventDefault();
       void gateway.openChatWindow?.().catch(() => undefined);
       return;
@@ -454,7 +553,11 @@ const ClipboardPalette = (): React.JSX.Element => {
     // ⌘4 opens the chat window whatever the palette is showing: chat is a
     // destination, not a category, and a palette with the categories turned
     // off must not lose it.
-    if (primaryModifier && !event.shiftKey && key === PALETTE_CHAT_CATEGORY.key) {
+    if (
+      primaryModifier &&
+      !event.shiftKey &&
+      key === PALETTE_CHAT_CATEGORY.key
+    ) {
       event.preventDefault();
       void gateway.openChatWindow?.().catch(() => undefined);
       return;
@@ -465,7 +568,7 @@ const ClipboardPalette = (): React.JSX.Element => {
       paletteModes &&
       primaryModifier &&
       !event.shiftKey &&
-      ['1', '2', '3'].includes(key)
+      ["1", "2", "3"].includes(key)
     ) {
       const category = PALETTE_CATEGORIES.find((entry) => entry.key === key);
       if (category) {
@@ -479,19 +582,19 @@ const ClipboardPalette = (): React.JSX.Element => {
     // the honest behavior. Tab is deliberately absent: focus movement is
     // the browser's to manage, and this palette has no mode to toggle.
     if (selectedHistoryItem === null) return;
-    if (primaryModifier && !event.shiftKey && key === 'c') {
+    if (primaryModifier && !event.shiftKey && key === "c") {
       event.preventDefault();
       handleCopy();
-    } else if (primaryModifier && event.shiftKey && key === 'v') {
+    } else if (primaryModifier && event.shiftKey && key === "v") {
       event.preventDefault();
       handlePastePlainText();
-    } else if (primaryModifier && !event.shiftKey && key === 'p') {
+    } else if (primaryModifier && !event.shiftKey && key === "p") {
       event.preventDefault();
       handleTogglePin();
     } else if (
       !primaryModifier &&
       !event.altKey &&
-      (event.key === 'Backspace' || event.key === 'Delete')
+      (event.key === "Backspace" || event.key === "Delete")
     ) {
       event.preventDefault();
       handleRequestDelete();
@@ -532,9 +635,12 @@ const ClipboardPalette = (): React.JSX.Element => {
           query={query}
           mode={view}
           activeDescendant={activeDescendant}
-          resultCount={visibleSecrets.length + visibleApps.length + historyItems.length}
+          resultCount={
+            visibleSecrets.length + visibleApps.length + historyItems.length
+          }
           resultsTruncated={
-            (view === 'history' || view === 'all') && historyItems.length >= HISTORY_PAGE_SIZE
+            (view === "history" || view === "all") &&
+            historyItems.length >= HISTORY_PAGE_SIZE
           }
           refreshing={refreshing}
           searchInputRef={searchInputRef}
@@ -544,7 +650,10 @@ const ClipboardPalette = (): React.JSX.Element => {
         <PaletteWorkspace
           mode={view}
           onPickCategory={setMode}
-          onOpenChat={() => void gateway.openChatWindow?.().catch(() => undefined)}
+          onOpenChat={() =>
+            void gateway.openChatWindow?.().catch(() => undefined)
+          }
+          homeTileIndex={homeTileIndex}
           appsStatus={catalog.status}
           status={status}
           items={paletteItems}
@@ -561,7 +670,8 @@ const ClipboardPalette = (): React.JSX.Element => {
           onSelect={handleSelectItem}
           onActivate={handleActivate}
           onRevealSource={() => {
-            if (selectedHistoryId !== null) void gateway.revealSource(selectedHistoryId);
+            if (selectedHistoryId !== null)
+              void gateway.revealSource(selectedHistoryId);
           }}
           onOpenPreview={() => setMobilePreviewOpen(true)}
           onClosePreview={() => {
@@ -578,8 +688,10 @@ const ClipboardPalette = (): React.JSX.Element => {
         ) : null}
         <footer className="palette-footer">
           <span>
-            ↵ open · ⌘C copy · ⌘⇧V plain{paletteModes ? ' · ⇥ mode' : ''}
-            {summoningShortcut === null ? '' : ` · ${shortcutHint(summoningShortcut)} summon`}
+            ↵ open · ⌘C copy · ⌘⇧V plain{paletteModes ? " · ⇥ mode" : ""}
+            {summoningShortcut === null
+              ? ""
+              : ` · ${shortcutHint(summoningShortcut)} summon`}
           </span>
           {/* Out of the way but still visible: a shortcut nobody was told about
               is the same as no way in. */}
@@ -588,7 +700,7 @@ const ClipboardPalette = (): React.JSX.Element => {
               type="button"
               className="footer-action"
               aria-label="Import an archive"
-              onClick={() => setWorkspace('import')}
+              onClick={() => setWorkspace("import")}
             >
               Import <kbd>⌘I</kbd>
             </button>
@@ -596,7 +708,9 @@ const ClipboardPalette = (): React.JSX.Element => {
               type="button"
               className="footer-action"
               aria-label="Open the chat window"
-              onClick={() => void gateway.openChatWindow?.().catch(() => undefined)}
+              onClick={() =>
+                void gateway.openChatWindow?.().catch(() => undefined)
+              }
             >
               Chat <kbd>⌘K</kbd>
             </button>
@@ -611,7 +725,7 @@ const ClipboardPalette = (): React.JSX.Element => {
           </span>
         </footer>
       </section>
-      {workspace === 'import' ? (
+      {workspace === "import" ? (
         <ImportWizard gateway={gateway} onClose={closeWorkspace} />
       ) : null}
     </main>

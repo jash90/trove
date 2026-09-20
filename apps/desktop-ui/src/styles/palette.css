@@ -38,9 +38,6 @@
   align-items: center;
 }
 
-
-
-
 .palette-eyebrow {
   margin: 0 0 1px;
   color: var(--accent);
@@ -51,9 +48,6 @@
   line-height: 1.2;
   text-transform: uppercase;
 }
-
-
-
 
 .search-field {
   flex: 1;
@@ -70,7 +64,9 @@
 
 .search-field:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft), 0 2px 0 #d9dfeb;
+  box-shadow:
+    0 0 0 2px var(--accent-soft),
+    0 2px 0 #d9dfeb;
 }
 
 .search-field__icon {
@@ -113,16 +109,6 @@
   line-height: 1.35;
   text-transform: uppercase;
 }
-
-
-
-
-
-
-
-
-
-
 
 .palette-content {
   position: relative;
@@ -181,11 +167,13 @@
 .history-row.is-selected {
   z-index: 1;
   background: var(--accent-soft);
-  box-shadow: inset 3px 0 0 var(--accent), inset 0 0 0 1px #d2dcf0;
+  box-shadow:
+    inset 3px 0 0 var(--accent),
+    inset 0 0 0 1px #d2dcf0;
 }
 
 .history-row.is-pinned::before {
-  content: '';
+  content: "";
   position: absolute;
   top: 5px;
   left: 16px;
@@ -248,7 +236,7 @@
 }
 
 .history-row__metadata span + span::before {
-  content: '·';
+  content: "·";
   margin-right: 10px;
   color: var(--line-strong);
 }
@@ -467,7 +455,11 @@
     linear-gradient(-45deg, #e1ded4 25%, transparent 25%),
     linear-gradient(45deg, transparent 75%, #e1ded4 75%),
     linear-gradient(-45deg, transparent 75%, #e1ded4 75%);
-  background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+  background-position:
+    0 0,
+    0 6px,
+    6px -6px,
+    -6px 0;
   background-size: 12px 12px;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
@@ -537,13 +529,13 @@
 }
 
 .action-bar button:hover,
-.action-bar button[aria-pressed='true'] {
+.action-bar button[aria-pressed="true"] {
   color: var(--accent);
   background: var(--accent-soft);
   border-color: #c8d5ed;
 }
 
-.action-bar button[aria-pressed='true'] {
+.action-bar button[aria-pressed="true"] {
   color: var(--pin);
   background: var(--pin-soft);
   border-color: #e5c89b;
@@ -660,7 +652,6 @@
   letter-spacing: 0.055em;
   text-transform: uppercase;
 }
-
 
 @keyframes palette-enter {
   from {
@@ -840,6 +831,10 @@
   transform: translateY(-1px);
 }
 
+.palette-category[data-selected="true"] {
+  border-color: var(--accent);
+}
+
 .palette-category:active {
   transform: translateY(0);
   box-shadow: none;
@@ -940,8 +935,6 @@
   align-items: center;
   gap: 4px;
 }
-
-
 
 .workflow-backdrop {
   position: fixed;
@@ -1490,7 +1483,6 @@
  * the mark, the listening badge and the row of filter chips are gone —
  * every one of them was chrome above the results, read once and never again.
  * ---------------------------------------------------------------- */
-
 
 .search-field__count {
   flex: 0 0 auto;
