@@ -2,6 +2,7 @@ import {
   Download,
   Globe,
   KeyRound,
+  LayoutGrid,
   Power,
   ScanSearch,
   ShieldBan,
@@ -315,6 +316,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [stats, setStats] = useState<StorageStatsContract | null>(null);
   const [linkPreviews, setLinkPreviews] = useState(true);
   const [paletteModes, setPaletteModes] = useState(true);
+  const [dockIcon, setDockIcon] = useState(false);
   const [vaultUrl, setVaultUrl] = useState('');
   const [privacyKey, setPrivacyKey] = useState('');
   const [privacySaved, setPrivacySaved] = useState(false);
@@ -387,6 +389,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setDenylist(settings.denylistedApps.join('\n'));
       setLinkPreviews(settings.linkPreviews);
       setPaletteModes(settings.paletteModes);
+      setDockIcon(settings.dockIcon);
       void gateway
         .getTypeSafeSettings?.()
         .then((typesafe) => setPrivacyKey(typesafe.apiKey))
@@ -463,6 +466,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       denylistedApps: nextDenylist,
       linkPreviews,
       paletteModes,
+      dockIcon,
       // Overrides over the device identity file, each independent of the
       // other. A blank field travels as an absent one, meaning "use the
       // device's value". The private key is never sent: it is not ours to hold.
@@ -818,6 +822,23 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                       <Power size={14} aria-hidden="true" /> Launch at login
                     </span>
                   </label>
+                  <label className="settings-toggle" htmlFor="settings-dock-icon">
+                    <input
+                      id="settings-dock-icon"
+                      type="checkbox"
+                      checked={dockIcon}
+                      onChange={(event) => setDockIcon(event.currentTarget.checked)}
+                    />
+                    <span>
+                      <LayoutGrid size={14} aria-hidden="true" /> Show in the Dock
+                    </span>
+                  </label>
+                  <p className="settings-help">
+                    Off, Trove lives on the menu bar alone — no Dock tile and no ⌘Tab entry,
+                    which suits a window that is summoned by a keystroke and put away again.
+                    On, the tile appears and clicking it summons the palette. Saving applies
+                    it immediately; macOS only.
+                  </p>
                 </section>
               ) : null}
 

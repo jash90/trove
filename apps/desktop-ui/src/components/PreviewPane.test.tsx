@@ -77,6 +77,7 @@ const settings: AppSettings = {
   hotkey: 'CommandOrControl+Space',
   autostart: false,
   paletteModes: true,
+  dockIcon: false,
   retentionDays: 30,
   denylistedApps: [],
   linkPreviews: true,

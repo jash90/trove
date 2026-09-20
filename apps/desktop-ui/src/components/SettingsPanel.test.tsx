@@ -34,6 +34,7 @@ const persistedSettings: AppSettings = {
   hotkey: 'CommandOrControl+Space',
   autostart: false,
   paletteModes: true,
+  dockIcon: false,
   retentionDays: 30,
   denylistedApps: ['com.acme.private'],
   linkPreviews: true,
@@ -411,6 +412,40 @@ describe('SettingsPanel validation and transactions', () => {
     );
     expect(screen.getByText(/saved: on/i)).toBeVisible();
     expect(screen.getByText(/system: off/i)).toBeVisible();
+  });
+
+  it('saves the Dock tile the user ticked', async () => {
+    // The tile is a property of the running process, so the only evidence
+    // this pane can give is that the value reached the core. What the core
+    // does with it is covered on the Rust side.
+    const saveSettings = vi.fn(async (nextSettings: AppSettings) => nextSettings);
+    const user = userEvent.setup();
+    render(<SettingsPanel gateway={makeGateway({ saveSettings })} />);
+    await loadSettings();
+
+    expect(screen.getByRole('checkbox', { name: 'Show in the Dock' })).not.toBeChecked();
+    await user.click(screen.getByRole('checkbox', { name: 'Show in the Dock' }));
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+
+    await waitFor(() => expect(saveSettings).toHaveBeenCalled());
+    expect(saveSettings.mock.calls[0]?.[0].dockIcon).toBe(true);
+  });
+
+  it('shows the Dock tile the settings row remembers', async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsPanel
+        gateway={makeGateway({
+          getSettings: vi.fn(async () => ({ ...persistedSettings, dockIcon: true })),
+        })}
+      />,
+    );
+    await loadSettings();
+
+    expect(screen.getByRole('checkbox', { name: 'Show in the Dock' })).toBeChecked();
+    // Untouched, it goes back exactly as it came.
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Settings saved'));
   });
 });
 

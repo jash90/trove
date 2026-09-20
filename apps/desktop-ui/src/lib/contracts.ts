@@ -93,6 +93,14 @@ export interface AppSettings {
    * answers both in one combined list (off).
    */
   paletteModes: boolean;
+  /**
+   * Whether the application shows a Dock tile (macOS).
+   *
+   * Off by default: the menu bar item is where Trove exists on screen, and
+   * its window spends most of its life hidden. On, the tile appears and
+   * clicking it summons the palette.
+   */
+  dockIcon: boolean;
   keyvault: KeyvaultSettings;
 }
 
