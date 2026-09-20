@@ -567,7 +567,7 @@ describe('settings tabs', () => {
     expect(tabs).toHaveLength(7);
     expect(screen.getByRole('tab', { name: 'Shortcut' })).toHaveAttribute('aria-selected', 'true');
 
-    // The point of tabs: the other five sections are not on screen competing for the eye.
+    // The point of tabs: the other six sections are not on screen competing for the eye.
     expect(screen.getByRole('textbox', { name: 'Global shortcut' })).toBeVisible();
     expect(screen.queryByRole('spinbutton', { name: 'Days kept' })).not.toBeInTheDocument();
 

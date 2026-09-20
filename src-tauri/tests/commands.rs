@@ -2401,13 +2401,17 @@ async fn an_unregistrable_shortcut_is_refused_on_save_and_never_locks_the_screen
     assert_eq!(read_back.hotkey, "Meta+");
 }
 
-/// Trove lives on the menu bar, so it has no Dock tile and no Cmd-Tab entry.
+/// Whether a Dock tile shows up *after* launch is the `dockIcon` setting's call,
+/// applied at runtime by `set_dock_visibility`. But nothing the app's own code
+/// does can undo the first frame: if the bundle doesn't declare `LSUIElement`,
+/// macOS puts a tile up the moment the process starts, before any Rust or JS
+/// of ours has run. That flash is what this test guards against.
 ///
 /// Asserted against the file rather than against the running application for
 /// the same reason the window levels below are: this is where the decision is
 /// made, and it is made before any of this application's own code runs.
 #[test]
-fn the_application_never_appears_in_the_dock() {
+fn the_bundle_never_flashes_a_dock_tile_during_launch() {
     let info: plist::Value =
         plist::from_bytes(include_bytes!("../Info.plist")).expect("Info.plist must parse");
     let ui_element = info
@@ -2418,7 +2422,7 @@ fn the_application_never_appears_in_the_dock() {
     assert_eq!(
         ui_element,
         Some(true),
-        "a Dock icon advertises a window that spends its life hidden"
+        "without LSUIElement, macOS shows a Dock tile for the instant between process start and the app's own runtime decision about dockIcon"
     );
 }
 

@@ -14,8 +14,8 @@ interface SettingsTabsProps {
 /// The settings tab strip.
 ///
 /// Follows the ARIA tabs pattern rather than a row of styled buttons: the strip is one stop in
-/// the tab order and the arrows move between tabs. Six buttons that each take a Tab press would
-/// put the whole settings dialog behind five presses of nothing.
+/// the tab order and the arrows move between tabs. Seven buttons that each take a Tab press would
+/// put the whole settings dialog behind six presses of nothing.
 ///
 /// Selection follows focus, which suits tabs whose panels are already rendered from local state —
 /// there is no cost to arriving somewhere, so making someone press Enter to confirm arrival is a
