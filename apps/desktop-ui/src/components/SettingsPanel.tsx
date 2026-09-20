@@ -3,6 +3,7 @@ import {
   Globe,
   KeyRound,
   LayoutGrid,
+  Move,
   Power,
   ShieldBan,
   Timer,
@@ -22,6 +23,7 @@ import type {
   StorageStats as StorageStatsContract,
 } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
+import { SNAP_SHORTCUTS, defaultSnapShortcuts } from '../lib/snapShortcuts';
 import { SettingsTabs, type SettingsTab } from './SettingsTabs';
 import { StorageStats } from './StorageStats';
 
@@ -31,9 +33,11 @@ const MIN_RETENTION_DAYS = 1;
 const MAX_RETENTION_DAYS = 3_650;
 
 /**
- * One canonical primary modifier at most: CommandOrControl, Command and Control
- * all resolve to the same physical key on a given platform, so accepting two of
- * them would register a shortcut the user cannot press.
+ * One canonical command-family primary at most: CommandOrControl and Command
+ * resolve to the same physical key on a given platform, so accepting both
+ * would register a shortcut the user cannot press. Control is a different
+ * key entirely and may ride along beside a command-family primary — ⌘⌃ is
+ * the chord Rectangle's corner snaps live on.
  */
 const PRIMARY_MODIFIERS = new Map([
   ['commandorcontrol', 'CommandOrControl'],
@@ -44,7 +48,15 @@ const SECONDARY_MODIFIERS = new Map([
   ['alt', 'Alt'],
   ['shift', 'Shift'],
 ]);
-const HOTKEY_KEY_PATTERN = /^(?:[A-Z0-9]|SPACE|F(?:[1-9]|1\d|2[0-4]))$/u;
+const HOTKEY_KEY_PATTERN = /^(?:[A-Z0-9]|SPACE|ARROW(?:LEFT|RIGHT|UP|DOWN)|F(?:[1-9]|1\d|2[0-4]))$/u;
+/** Keys the platform syntax spells out rather than showing as a character. */
+const NAMED_KEYS: Record<string, string> = {
+  SPACE: 'Space',
+  ARROWLEFT: 'ArrowLeft',
+  ARROWRIGHT: 'ArrowRight',
+  ARROWUP: 'ArrowUp',
+  ARROWDOWN: 'ArrowDown',
+};
 const DENYLIST_ENTRY_PATTERN = /^[a-z0-9._-]+$/u;
 
 export const normalizePlatformHotkey = (value: string): string => {
@@ -58,14 +70,23 @@ export const normalizePlatformHotkey = (value: string): string => {
   if (!HOTKEY_KEY_PATTERN.test(upper)) invalid();
   // Named keys are spelled in title case by the platform shortcut syntax;
   // single characters and function keys stay uppercase.
-  const key = upper === 'SPACE' ? 'Space' : upper;
+  const key = NAMED_KEYS[upper] ?? upper;
 
   let primary: string | null = null;
+  let controlHeld = false;
   const secondary = new Set<string>();
   for (const part of parts.slice(0, -1)) {
     const token = part.toLowerCase();
     const asPrimary = PRIMARY_MODIFIERS.get(token);
     if (asPrimary !== undefined) {
+      // Control beside a command-family token is an extra modifier (⌘⌃),
+      // not a second primary; Control twice, or two command-family tokens,
+      // are one key held twice and remain nonsense.
+      if (token === 'control') {
+        if (controlHeld) invalid();
+        controlHeld = true;
+        continue;
+      }
       if (primary !== null) invalid();
       primary = asPrimary;
       continue;
@@ -74,6 +95,12 @@ export const normalizePlatformHotkey = (value: string): string => {
     if (asSecondary === undefined) return invalid();
     if (secondary.has(asSecondary)) return invalid();
     secondary.add(asSecondary);
+  }
+  // Control standing alone is itself a primary; beside a command-family one
+  // it stays the extra modifier it was recorded as.
+  if (primary === null && controlHeld) {
+    primary = 'Control';
+    controlHeld = false;
   }
   // Alt on its own is enough — ⌥Space is an ordinary launcher shortcut, and the systems people
   // compare this against bind exactly that. Shift on its own is not: Shift+A is how a capital A
@@ -84,6 +111,7 @@ export const normalizePlatformHotkey = (value: string): string => {
     ...(primary === null ? [] : [primary]),
     ...(secondary.has('Alt') ? ['Alt'] : []),
     ...(secondary.has('Shift') ? ['Shift'] : []),
+    ...(controlHeld ? ['Control'] : []),
     key,
   ].join('+');
 };
@@ -97,7 +125,8 @@ export const normalizePlatformHotkey = (value: string): string => {
  * Returns null while only modifiers are down — a combination is not finished until a real key
  * joins it — and when the only modifier held is Shift, because Shift+A is how a capital A is
  * typed and a global binding on it would swallow ordinary typing everywhere else. ⌘, ⌃ and ⌥
- * each stand on their own; ⌥Space is an ordinary launcher shortcut.
+ * each stand on their own; ⌥Space is an ordinary launcher shortcut; ⌘⌃ together are two keys
+ * and record as one chord.
  *
  * The candidate goes through {@link normalizePlatformHotkey} rather than being assembled into
  * final form here, so there is one place that decides what a valid shortcut is.
@@ -114,18 +143,21 @@ export const acceleratorFromKeyEvent = (event: {
     if (/^Digit[0-9]$/u.test(event.code)) return event.code.slice(5);
     if (event.code === 'Space') return 'SPACE';
     if (/^F(?:[1-9]|1\d|2[0-4])$/u.test(event.code)) return event.code;
+    if (/^Arrow(?:Left|Right|Up|Down)$/u.test(event.code)) return event.code.toUpperCase();
     return null;
   })();
   if (key === null) return null;
 
-  // Both would be two primaries, which cannot be one physical key.
-  if (event.metaKey && event.ctrlKey) return null;
+  // ⌘⌃ are two different keys and a chord worth recording — Rectangle's
+  // corner snaps live on it — so Control rides along beside a command
+  // primary rather than being rejected as a second one.
   const primary = event.metaKey ? 'CommandOrControl' : event.ctrlKey ? 'Control' : null;
   if (primary === null && !event.altKey) return null;
 
   const parts = primary === null ? [] : [primary];
   if (event.altKey) parts.push('Alt');
   if (event.shiftKey) parts.push('Shift');
+  if (event.ctrlKey && event.metaKey) parts.push('Control');
   parts.push(key);
   try {
     return normalizePlatformHotkey(parts.join('+'));
@@ -176,6 +208,9 @@ const EXPORT_ERROR =
   'The export could not be written. Check that the directory is empty and writable.';
 const RETENTION_ERROR = 'Give a whole number of days from 1 to 3650.';
 const HOTKEY_ERROR = 'A shortcut needs a modifier and one letter, digit or function key.';
+const SNAP_ERROR = 'Every window shortcut needs a modifier and one key.';
+const SNAP_DUPLICATE_ERROR =
+  'Each window shortcut, and the global one, must be a different combination.';
 const DENYLIST_ERROR = 'The exclusion list holds an invalid entry, or is too long.';
 const KEYVAULT_SAVE_FIRST =
   'Save the vault address, token and private key first — the pane reads what is saved.';
@@ -198,6 +233,7 @@ export const vaultErrorCode = (error: unknown): string =>
 /// full names are in the section headings where there is room for them.
 const SETTINGS_TABS: readonly SettingsTab[] = [
   { id: 'shortcut', label: 'Shortcut' },
+  { id: 'windows', label: 'Windows' },
   { id: 'retention', label: 'Retention' },
   { id: 'apps', label: 'Apps' },
   { id: 'links', label: 'Links' },
@@ -313,6 +349,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
   const [linkPreviews, setLinkPreviews] = useState(true);
   const [paletteModes, setPaletteModes] = useState(true);
   const [dockIcon, setDockIcon] = useState(false);
+  const [snapShortcuts, setSnapShortcuts] = useState<Record<string, string>>(defaultSnapShortcuts);
   const [vaultUrl, setVaultUrl] = useState('');
   const [vaultSecrets, setVaultSecrets] = useState<KeyvaultSecret[] | null>(null);
   const [pairing, setPairing] = useState<PairingStarted | null>(null);
@@ -383,6 +420,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       setLinkPreviews(settings.linkPreviews);
       setPaletteModes(settings.paletteModes);
       setDockIcon(settings.dockIcon);
+      setSnapShortcuts({ ...defaultSnapShortcuts(), ...settings.snapShortcuts });
       setVaultUrl(settings.keyvault.url ?? '');
     })();
     return () => {
@@ -424,6 +462,26 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       return;
     }
 
+    let nextSnapShortcuts: Record<string, string>;
+    try {
+      // Every chord distinct, and none of them the summoning shortcut: a
+      // collision would be a race the keyboard settles by accident.
+      const taken = new Set<string>([nextHotkey]);
+      nextSnapShortcuts = {};
+      for (const { id } of SNAP_SHORTCUTS) {
+        const chord = normalizePlatformHotkey(snapShortcuts[id] ?? '');
+        if (taken.has(chord)) {
+          setError(SNAP_DUPLICATE_ERROR);
+          return;
+        }
+        taken.add(chord);
+        nextSnapShortcuts[id] = chord;
+      }
+    } catch {
+      setError(SNAP_ERROR);
+      return;
+    }
+
     let nextRetention: number | null = null;
     if (!unlimitedRetention) {
       const parsed = Number(retentionDays);
@@ -456,6 +514,7 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
       linkPreviews,
       paletteModes,
       dockIcon,
+      snapShortcuts: nextSnapShortcuts,
       // Overrides over the device identity file, each independent of the
       // other. A blank field travels as an absent one, meaning "use the
       // device's value". The private key is never sent: it is not ours to hold.
@@ -828,6 +887,45 @@ export const SettingsPanel = ({ gateway, onClose }: SettingsPanelProps): React.J
                     On, the tile appears and clicking it summons the palette. Saving applies
                     it immediately; macOS only.
                   </p>
+                </section>
+              ) : null}
+
+              {activeTab === 'windows' ? (
+                <section className="settings-section" aria-labelledby="settings-windows-title">
+                  <div className="settings-section-heading">
+                    <span className="settings-section-icon" aria-hidden="true">
+                      <Move size={16} />
+                    </span>
+                    <h2 id="settings-windows-title">Window snapping</h2>
+                  </div>
+                  <p className="settings-help">
+                    Moves the frontmost window, the way Rectangle does. It needs the same
+                    Accessibility permission as pasting, and recording works like the global
+                    shortcut above: press the combination you want.
+                  </p>
+                  {SNAP_SHORTCUTS.map(({ id, label }) => (
+                    <label className="settings-field" htmlFor={`settings-snap-${id}`} key={id}>
+                      <span>{label}</span>
+                      <input
+                        id={`settings-snap-${id}`}
+                        type="text"
+                        autoComplete="off"
+                        spellCheck={false}
+                        // Recorded, not typed — the same contract as the global
+                        // shortcut field.
+                        readOnly
+                        value={snapShortcuts[id] ?? ''}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Escape') return;
+                          event.preventDefault();
+                          const recorded = acceleratorFromKeyEvent(event);
+                          if (recorded !== null) {
+                            setSnapShortcuts((previous) => ({ ...previous, [id]: recorded }));
+                          }
+                        }}
+                      />
+                    </label>
+                  ))}
                 </section>
               ) : null}
 

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { AppSettings, ShortcutStatus, StorageStats } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
+import { SNAP_SHORTCUTS, defaultSnapShortcuts } from '../lib/snapShortcuts';
 import {
   acceleratorFromKeyEvent,
   expiryLabel,
@@ -38,6 +39,7 @@ const persistedSettings: AppSettings = {
   retentionDays: 30,
   denylistedApps: ['com.acme.private'],
   linkPreviews: true,
+  snapShortcuts: defaultSnapShortcuts(),
   keyvault: { url: null, token: null, privateJwk: null },
 };
 
@@ -532,8 +534,11 @@ describe('recording a shortcut', () => {
     expect(press('ShiftLeft', { shiftKey: true })).toBeNull();
     expect(press('Enter', { metaKey: true })).toBeNull();
 
-    // Command and Control together would be two primaries, which is not one physical key.
-    expect(press('KeyV', { metaKey: true, ctrlKey: true })).toBeNull();
+    // Command and Control together are two different keys — a real chord, and
+    // the one Rectangle's corner snaps live on.
+    expect(press('KeyV', { metaKey: true, ctrlKey: true })).toBe(
+      'CommandOrControl+Control+V',
+    );
   });
 
   it('shows the recorded shortcut and refuses typed text', async () => {
@@ -564,10 +569,10 @@ describe('settings tabs', () => {
     await loadSettings();
 
     const tabs = screen.getAllByRole('tab');
-    expect(tabs).toHaveLength(7);
+    expect(tabs).toHaveLength(8);
     expect(screen.getByRole('tab', { name: 'Shortcut' })).toHaveAttribute('aria-selected', 'true');
 
-    // The point of tabs: the other six sections are not on screen competing for the eye.
+    // The point of tabs: the other seven sections are not on screen competing for the eye.
     expect(screen.getByRole('textbox', { name: 'Global shortcut' })).toBeVisible();
     expect(screen.queryByRole('spinbutton', { name: 'Days kept' })).not.toBeInTheDocument();
 
@@ -602,13 +607,68 @@ describe('settings tabs', () => {
     shortcut.focus();
     await user.keyboard('{ArrowRight}');
 
-    const retention = screen.getByRole('tab', { name: 'Retention' });
-    expect(retention).toHaveAttribute('aria-selected', 'true');
+    const windows = screen.getByRole('tab', { name: 'Windows' });
+    expect(windows).toHaveAttribute('aria-selected', 'true');
     // Focus follows the selection, or the next arrow press would start from somewhere else.
-    expect(retention).toHaveFocus();
+    expect(windows).toHaveFocus();
 
     await user.keyboard('{End}');
     expect(screen.getByRole('tab', { name: 'Export' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('lists every snap position with its recorded chord', async () => {
+    render(<SettingsPanel gateway={makeGateway()} />);
+    await loadSettings();
+    await openTab('Windows');
+    for (const { label, chord } of SNAP_SHORTCUTS) {
+      expect(screen.getByRole('textbox', { name: label })).toHaveValue(chord);
+    }
+  });
+
+  it('records a new chord on one row and saves the whole map', async () => {
+    const saveSettings = vi.fn<ClipboardGateway['saveSettings']>(async (settings) => settings);
+    const user = userEvent.setup();
+    render(<SettingsPanel gateway={makeGateway({ saveSettings })} />);
+    await loadSettings();
+    await openTab('Windows');
+
+    const maximize = screen.getByRole('textbox', { name: 'Maximize' });
+    maximize.focus();
+    await user.keyboard('{Meta>}M{/Meta}');
+    expect(maximize).toHaveValue('CommandOrControl+M');
+
+    // Escape neither records nor clears — the same contract as the global
+    // shortcut field.
+    await user.keyboard('{Escape}');
+    expect(maximize).toHaveValue('CommandOrControl+M');
+
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledOnce());
+    const sent = saveSettings.mock.calls[0]![0];
+    expect(sent.snapShortcuts.maximize).toBe('CommandOrControl+M');
+    expect(sent.snapShortcuts.leftHalf).toBe('CommandOrControl+Alt+ArrowLeft');
+  });
+
+  it('refuses a chord another row already holds', async () => {
+    const saveSettings = vi.fn<ClipboardGateway['saveSettings']>(async (settings) => settings);
+    const user = userEvent.setup();
+    render(<SettingsPanel gateway={makeGateway({ saveSettings })} />);
+    await loadSettings();
+    await openTab('Windows');
+
+    // The left half's default chord, recorded onto Center.
+    const center = screen.getByRole('textbox', { name: 'Center' });
+    center.focus();
+    await user.keyboard('{Meta>}{Alt>}{ArrowLeft}{/Alt}{/Meta}');
+    expect(center).toHaveValue('CommandOrControl+Alt+ArrowLeft');
+
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+    expect(
+      await screen.findByRole('alert'),
+    ).toHaveTextContent(
+      'Each window shortcut, and the global one, must be a different combination.',
+    );
+    expect(saveSettings).not.toHaveBeenCalled();
   });
 
   it('keeps an edit made on one tab when another is opened and saved', async () => {

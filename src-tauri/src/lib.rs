@@ -6,6 +6,7 @@ pub mod keyvault;
 pub mod links;
 pub mod maintenance;
 pub mod monitor;
+pub mod snap;
 pub mod state;
 pub mod tray;
 
@@ -58,6 +59,11 @@ pub fn run() {
             // reverted without saying so.
             let shortcut =
                 hotkey::shortcut_for_launch(commands::stored_hotkey(&app_state.store).as_deref());
+            // The snap shortcuts ride along with the summoning one: read from
+            // the same settings row, registered the same way, remembered so a
+            // save knows what to take down. Read before the state is managed,
+            // which is where the store moves.
+            let snap_map = commands::snap_shortcuts(&app_state.store);
             app.manage(app_state);
             let active = hotkey::ActiveShortcut::new(shortcut);
             // A shortcut another application already holds is a degraded state,
@@ -69,6 +75,9 @@ pub fn run() {
                 Err(_) => eprintln!("trove: global shortcut unavailable"),
             }
             app.manage(active);
+            let active_snap = snap::ActiveSnapShortcuts::new(snap_map.clone());
+            snap::install(app.handle(), &snap_map);
+            app.manage(active_snap);
             app.manage(hotkey::ReleasedSystemHotkeys::new());
             app.manage(hotkey::PasteTarget::new());
             app.manage(hotkey::PastePrompt::new());

@@ -391,6 +391,7 @@ async fn settings_use_valid_defaults_and_persist_one_versioned_json_object() {
         palette_modes: false,
         dock_icon: true,
         keyvault: Default::default(),
+        snap_shortcuts: trove_app::snap::defaults(),
     };
     let saved = commands::save_settings_service(&state, requested.clone())
         .await

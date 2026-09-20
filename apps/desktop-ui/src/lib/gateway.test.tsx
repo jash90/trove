@@ -7,6 +7,7 @@ import { disable, enable, isEnabled } from '@tauri-apps/plugin-autostart';
 import { open } from '@tauri-apps/plugin-dialog';
 
 import type { AppSettings, ImportProgress } from './contracts';
+import { defaultSnapShortcuts } from './snapShortcuts';
 import {
   GatewayProvider,
   mockGateway,
@@ -38,6 +39,7 @@ const settings: AppSettings = {
   retentionDays: null,
   denylistedApps: [],
   linkPreviews: true,
+  snapShortcuts: defaultSnapShortcuts(),
   keyvault: { url: null, token: null, privateJwk: null },
 };
 

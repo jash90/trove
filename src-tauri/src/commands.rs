@@ -173,6 +173,14 @@ pub struct AppSettingsDto {
     /// settings error, not a surprise at copy time.
     #[serde(default)]
     pub keyvault: KeyvaultSettingsDto,
+    /// One chord per snap position, keyed the way the settings screen and
+    /// `snap::SNAP_DEFAULTS` agree on (`leftHalf`, `maximize`, …).
+    ///
+    /// Defaulted through serde so a settings row written before snapping
+    /// existed still reads, with every position bound to its Rectangle-style
+    /// default.
+    #[serde(default = "default_snap_shortcuts")]
+    pub snap_shortcuts: std::collections::BTreeMap<String, String>,
 }
 
 /// What stands between the user and the shortcut they configured.
@@ -293,6 +301,11 @@ fn default_dock_icon() -> bool {
     false
 }
 
+/// The snap map every install starts with: the Rectangle-style defaults.
+fn default_snap_shortcuts() -> std::collections::BTreeMap<String, String> {
+    crate::snap::defaults()
+}
+
 impl Default for AppSettingsDto {
     fn default() -> Self {
         Self {
@@ -305,6 +318,7 @@ impl Default for AppSettingsDto {
             palette_modes: default_palette_modes(),
             dock_icon: default_dock_icon(),
             keyvault: KeyvaultSettingsDto::default(),
+            snap_shortcuts: crate::snap::defaults(),
         }
     }
 }
@@ -1574,6 +1588,17 @@ pub fn stored_hotkey(store: &StoreHandle) -> Option<String> {
         .map(|settings| settings.hotkey)
 }
 
+/// The snap map to register, given what was saved.
+///
+/// An unreadable settings row falls back to the defaults rather than leaving
+/// the shortcuts dead: a snap a save cannot see must not be a snap the
+/// keyboard ignores.
+pub fn snap_shortcuts(store: &StoreHandle) -> std::collections::BTreeMap<String, String> {
+    get_settings_blocking(store)
+        .map(|settings| settings.snap_shortcuts)
+        .unwrap_or_else(|_| crate::snap::defaults())
+}
+
 /// Whether link pages may be contacted.
 ///
 /// An unreadable settings row means no fetching: silence is the safe direction
@@ -1659,6 +1684,13 @@ pub async fn save_settings_with_app<R: tauri::Runtime>(
     // lands on the main thread without a `run_on_main_thread` wrapper.
     #[cfg(target_os = "macos")]
     let _ = app.set_dock_visibility(stored.dock_icon);
+    // The snap shortcuts are registered with the system exactly like the
+    // summoning one, so saving swaps them live rather than at next launch.
+    if let Some(active_snap) = app.try_state::<crate::snap::ActiveSnapShortcuts>() {
+        let previous = active_snap.get();
+        crate::snap::rebind(app, &previous, &stored.snap_shortcuts);
+        active_snap.set(stored.snap_shortcuts.clone());
+    }
     Ok(stored)
 }
 
@@ -2054,11 +2086,15 @@ fn validate_settings(settings: &AppSettingsDto) -> Result<(), String> {
         .address()
         .as_deref()
         .is_none_or(|url| trove_keyvault::validate_base_url(url).is_ok());
+    // The snap map has its own grammar — ten positions, ten parseable,
+    // pairwise-unique chords that stay clear of the summoning shortcut.
+    let snap_is_valid = crate::snap::is_valid_map(&settings.snap_shortcuts, &settings.hotkey);
     if settings.schema_version != 1
         || !retention_is_valid
         || !hotkey_is_valid
         || !denylist_is_valid
         || !keyvault_is_valid
+        || !snap_is_valid
     {
         return Err("invalid_settings".to_owned());
     }

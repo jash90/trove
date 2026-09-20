@@ -6,6 +6,7 @@ import type {
   StorageStats,
   Thumbnail,
 } from './contracts';
+import { defaultSnapShortcuts } from './snapShortcuts';
 
 export const SYNTHETIC_HISTORY_ITEMS: HistoryItem[] = [
   {
@@ -74,6 +75,7 @@ export const SYNTHETIC_SETTINGS: AppSettings = {
   linkPreviews: true,
   paletteModes: true,
   dockIcon: false,
+  snapShortcuts: defaultSnapShortcuts(),
   keyvault: { url: null, token: null, privateJwk: null },
 };
 

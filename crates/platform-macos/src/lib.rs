@@ -10,6 +10,7 @@ pub mod markers;
 pub mod paste;
 pub mod pasteboard;
 pub mod symbolic_hotkeys;
+pub mod window_snap;
 
 pub use icons::application_icon_png;
 pub use markers::{MarkerPolicy, classify_types};
@@ -19,6 +20,7 @@ pub use paste::{
 };
 pub use pasteboard::{MAX_CAPTURED_PAYLOAD_BYTES, PollOutcome, snapshot_from_types};
 pub use symbolic_hotkeys::{COMMAND_SPACE, Chord, SetOutcome, holders_of};
+pub use window_snap::{SnapAction, SnapOutcome};
 
 use std::time::Duration;
 

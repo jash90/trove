@@ -101,6 +101,11 @@ export interface AppSettings {
    * clicking it summons the palette.
    */
   dockIcon: boolean;
+  /**
+   * One chord per window-snap position (`leftHalf`, `maximize`, …), the
+   * Rectangle-style shortcuts the palette registers globally.
+   */
+  snapShortcuts: Record<string, string>;
   keyvault: KeyvaultSettings;
 }
 

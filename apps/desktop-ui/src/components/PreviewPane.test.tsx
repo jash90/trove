@@ -18,6 +18,7 @@ import {
 } from '../lib/contracts';
 import { formatCapturedAt, thumbnailDataUrl } from '../lib/format';
 import type { ClipboardGateway } from '../lib/gateway';
+import { defaultSnapShortcuts } from '../lib/snapShortcuts';
 import { PreviewPane } from './PreviewPane';
 
 /// The history rows, and only those.
@@ -81,6 +82,7 @@ const settings: AppSettings = {
   retentionDays: 30,
   denylistedApps: [],
   linkPreviews: true,
+  snapShortcuts: defaultSnapShortcuts(),
   keyvault: { url: null, token: null, privateJwk: null },
 };
 

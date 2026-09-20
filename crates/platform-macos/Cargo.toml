@@ -18,6 +18,7 @@ objc2-app-kit = { version = "0.3.2", features = [
     "NSPasteboard",
     "NSWorkspace",
     "NSRunningApplication",
+    "NSScreen",
     "NSImage",
     "NSBitmapImageRep",
     "NSImageRep",
@@ -33,7 +34,9 @@ objc2-app-kit = { version = "0.3.2", features = [
 # `NSValue` is where `NSNumber` lives, and `NSObject` is what `NSDictionary::from_slices`
 # is gated on — both are needed to hand the Accessibility check its options dictionary.
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSArray", "NSData", "NSDictionary", "NSGeometry", "NSValue", "NSObject"] }
-objc2-core-graphics = { version = "0.3.2", features = ["CGEvent", "CGEventSource", "CGEventTypes"] }
+objc2-core-graphics = { version = "0.3.2", features = ["CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry"] }
+# `CGGeometry` is what re-exports `CGPoint`/`CGSize` from Core Foundation —
+# the value types the Accessibility API's position and size attributes use.
 
 [dev-dependencies]
 image.workspace = true
