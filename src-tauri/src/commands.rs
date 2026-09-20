@@ -161,6 +161,16 @@ pub struct AppSettingsDto {
     /// serde so a settings row written before it existed still reads.
     #[serde(default = "default_palette_modes")]
     pub palette_modes: bool,
+    /// Whether the application shows a Dock tile.
+    ///
+    /// Off by default, which is what `LSUIElement` in `Info.plist` already
+    /// says: this is a menu bar application whose window spends its life
+    /// hidden. The setting exists because that is a preference and not a
+    /// law — a Dock tile also buys a Cmd-Tab entry, and some people would
+    /// rather have both. Defaulted through serde so a settings row written
+    /// before it existed still reads.
+    #[serde(default = "default_dock_icon")]
+    pub dock_icon: bool,
     /// Where the keyvault pane looks, when it is configured at all.
     ///
     /// Defaulted through serde so a settings row written before it existed
@@ -282,6 +292,12 @@ fn default_palette_modes() -> bool {
     true
 }
 
+/// The Dock tile is off by default. Every version before this one had none,
+/// so anything else would hand a tile to every existing install on upgrade.
+fn default_dock_icon() -> bool {
+    false
+}
+
 impl Default for AppSettingsDto {
     fn default() -> Self {
         Self {
@@ -292,6 +308,7 @@ impl Default for AppSettingsDto {
             denylisted_apps: Vec::new(),
             link_previews: default_link_previews(),
             palette_modes: default_palette_modes(),
+            dock_icon: default_dock_icon(),
             keyvault: KeyvaultSettingsDto::default(),
         }
     }
@@ -1603,6 +1620,16 @@ pub fn stored_hotkey(store: &StoreHandle) -> Option<String> {
 pub fn link_previews_enabled(store: &StoreHandle) -> bool {
     get_settings_blocking(store)
         .map(|settings| settings.link_previews)
+        .unwrap_or(false)
+}
+
+/// Whether the user asked for a Dock tile.
+///
+/// An unreadable settings row means no tile: that is the state every version
+/// before this one shipped, so it is the one that cannot surprise anyone.
+pub fn dock_icon_enabled(store: &StoreHandle) -> bool {
+    get_settings_blocking(store)
+        .map(|settings| settings.dock_icon)
         .unwrap_or(false)
 }
 

@@ -389,6 +389,7 @@ async fn settings_use_valid_defaults_and_persist_one_versioned_json_object() {
         denylisted_apps: vec!["com.example.synthetic".to_owned()],
         link_previews: false,
         palette_modes: false,
+        dock_icon: true,
         keyvault: Default::default(),
     };
     let saved = commands::save_settings_service(&state, requested.clone())
@@ -441,6 +442,55 @@ async fn a_settings_row_written_before_palette_modes_still_reads_with_the_defaul
 
     assert!(settings.palette_modes, "modes are on until turned off");
     assert!(!settings.link_previews, "the fields the row did carry hold");
+}
+
+#[tokio::test]
+async fn a_settings_row_written_before_the_dock_icon_still_reads_with_the_default() {
+    // A row from the version before the setting existed carries no
+    // `dockIcon` at all. Reading it must answer with the default — no tile,
+    // which is what every version so far did — and not with a parse error
+    // that would bury every other setting beside it.
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let legacy = serde_json::json!({
+        "schemaVersion": 1,
+        "hotkey": "CommandOrControl+Space",
+        "autostart": false,
+        "retentionDays": null,
+        "denylistedApps": [],
+        "linkPreviews": false,
+        "paletteModes": true
+    })
+    .to_string();
+    state.store.save_setting("app", &legacy).await.unwrap();
+
+    let settings = commands::get_settings_service(&state).await.unwrap();
+
+    assert!(
+        !settings.dock_icon,
+        "the menu bar is where it lives until someone asks for the tile"
+    );
+    assert!(!settings.link_previews, "the fields the row did carry hold");
+}
+
+#[tokio::test]
+async fn the_dock_icon_the_user_asked_for_survives_a_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    // Struct-update syntax, not a field reassignment after `default()`:
+    // integration tests are linted too, and clippy rejects the latter.
+    let requested = AppSettingsDto {
+        dock_icon: true,
+        ..AppSettingsDto::default()
+    };
+
+    commands::save_settings_service(&state, requested.clone())
+        .await
+        .unwrap();
+    drop(state);
+
+    let reopened = AppState::open_data_dir(directory.path()).unwrap();
+    assert!(commands::dock_icon_enabled(&reopened.store));
 }
 
 #[tokio::test]
