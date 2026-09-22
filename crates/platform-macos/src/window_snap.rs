@@ -501,7 +501,10 @@ mod platform {
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
         fn CFArrayGetCount(array: *const std::ffi::c_void) -> i64;
-        fn CFArrayGetValueAtIndex(array: *const std::ffi::c_void, index: i64) -> *const std::ffi::c_void;
+        fn CFArrayGetValueAtIndex(
+            array: *const std::ffi::c_void,
+            index: i64,
+        ) -> *const std::ffi::c_void;
         fn CFDictionaryGetValue(
             dictionary: *const std::ffi::c_void,
             key: *const std::ffi::c_void,

@@ -105,10 +105,11 @@ pub fn run() {
             // The palette entered by a click — not by its shortcut — still
             // owes its snaps the window the user was last working in, so
             // coming forward is when the target is remembered.
-            if let tauri::WindowEvent::Focused(focused) = event {
-                if *focused && window.label() == "main" {
-                    hotkey::remember_target_on_focus(window.app_handle());
-                }
+            if let tauri::WindowEvent::Focused(focused) = event
+                && *focused
+                && window.label() == "main"
+            {
+                hotkey::remember_target_on_focus(window.app_handle());
             }
         })
         .invoke_handler(commands::invoke_handler())
