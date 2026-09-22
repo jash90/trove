@@ -75,14 +75,15 @@ fn query_limits_fail_before_secondary_search_allocations_with_stable_codes() {
 
     let term_at_limit = "ą".repeat(MAX_SEARCH_TERM_BYTES / 2);
     assert!(
-        trove_search::build_fts_match_expression(&term_at_limit)
+        trove_search::build_search_terms(&term_at_limit)
             .unwrap()
+            .fts_expression
             .len()
             <= MAX_FTS_MATCH_BYTES
     );
     let term_over_limit = "ą".repeat(MAX_SEARCH_TERM_BYTES / 2 + 1);
     assert_eq!(
-        trove_search::build_fts_match_expression(&term_over_limit)
+        trove_search::build_search_terms(&term_over_limit)
             .unwrap_err()
             .code(),
         "search_term_too_long"
@@ -91,10 +92,10 @@ fn query_limits_fail_before_secondary_search_allocations_with_stable_codes() {
     let maximum_terms = std::iter::repeat_n("a", MAX_SEARCH_TERMS)
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(trove_search::build_fts_match_expression(&maximum_terms).is_ok());
+    assert!(trove_search::build_search_terms(&maximum_terms).is_ok());
     let too_many_terms = format!("{maximum_terms} a");
     assert_eq!(
-        trove_search::build_fts_match_expression(&too_many_terms)
+        trove_search::build_search_terms(&too_many_terms)
             .unwrap_err()
             .code(),
         "too_many_search_terms"
@@ -144,7 +145,7 @@ async fn a_partial_word_finds_what_the_user_is_still_typing() {
     // A palette is typed into one character at a time. Whole-word matching
     // showed nothing until the word was finished, which meant an empty list
     // for most of the typing.
-    for prefix in ["s", "super", "supercm", "supercmd"] {
+    for prefix in ["su", "super", "supercm", "supercmd"] {
         let page = store
             .search(request(prefix, 10, None))
             .expect("search must succeed");
@@ -162,6 +163,68 @@ async fn a_partial_word_finds_what_the_user_is_still_typing() {
         page.items.is_empty(),
         "a prefix nothing starts with matches nothing"
     );
+}
+
+#[tokio::test]
+async fn a_fragment_finds_its_entry_wherever_it_sits_and_whatever_its_case() {
+    let (_directory, store) = open_store();
+    let texts = ["Supercmd i RayCast", "zupelnie inny wpis"];
+    for (index, text) in texts.into_iter().enumerate() {
+        store
+            .ingest(text_capture(
+                text,
+                1_000 + index as i64,
+                "com.example.editor",
+                "Example Editor",
+                false,
+                1,
+            ))
+            .await
+            .unwrap();
+    }
+    let previews = |query: &str| {
+        store
+            .search(request(query, 10, None))
+            .expect("search must succeed")
+            .items
+            .into_iter()
+            .map(|item| item.preview)
+            .collect::<Vec<_>>()
+    };
+
+    // What is remembered of a clip is rarely its first letters: the middle of
+    // a word, its end, or two pieces of it in whatever order they come to mind.
+    for query in [
+        "ercm",
+        "PERCMD",
+        "cmd",
+        "aycas",
+        "rAYCAST",
+        "cast super",
+        "cm",
+        "YC",
+        "c",
+        "ray c",
+    ] {
+        assert_eq!(
+            previews(query),
+            vec!["Supercmd i RayCast"],
+            "{query:?} should find the entry it is a fragment of"
+        );
+    }
+    for query in ["IS", "nny", "elnie s"] {
+        assert_eq!(
+            previews(query),
+            vec!["zupelnie inny wpis"],
+            "{query:?} should find the entry it is a fragment of"
+        );
+    }
+    for query in ["cmd is", "xyz", "q"] {
+        assert!(
+            previews(query).is_empty(),
+            "{query:?} is a fragment of no entry"
+        );
+    }
 }
 
 #[tokio::test]
@@ -528,10 +591,12 @@ async fn ranked_search_caps_candidates_and_uses_stable_tie_breaks() {
     let mut newest_event_id = 0;
     for index in 0..(MAX_RANKED_CANDIDATES + 5) {
         // Distinct payloads: repeated captures of one content are one group
-        // now, and capping candidates is about distinct content.
+        // now, and capping candidates is about distinct content. Padded to
+        // one length, so every payload is an equal lexical match and the tie
+        // breaks are what is left to order them.
         newest_event_id = store
             .ingest(text_capture(
-                &format!("shared needle {index}"),
+                &format!("shared needle {index:03}"),
                 1_000,
                 "com.example.editor",
                 "Example Editor",

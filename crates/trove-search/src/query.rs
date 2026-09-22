@@ -6,6 +6,8 @@ pub const MAX_APP_FILTER_BYTES: usize = 512;
 pub const MAX_SEARCH_TERMS: usize = 32;
 pub const MAX_SEARCH_TERM_BYTES: usize = 240;
 pub const MAX_FTS_MATCH_BYTES: usize = 8 * 1024;
+/// The fewest characters the trigram index can match on its own.
+pub const MIN_INDEXED_TERM_CHARS: usize = 3;
 
 pub struct SearchFilters {
     pub kind: Option<ContentKind>,
@@ -116,20 +118,38 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery, QueryError> {
     })
 }
 
-/// Builds the FTS5 `MATCH` expression for a query.
+/// A query's terms, split by how the database can find them.
 ///
-/// The final term is matched as a prefix. A palette is typed into one character
-/// at a time, and a whole-word match shows nothing until the word is finished —
-/// so a search for `supercm` found nothing while `supercmd` found eight
-/// entries. Earlier terms stay exact: the user finished typing those.
-pub fn build_fts_match_expression(normalized_text: &str) -> Result<String, QueryError> {
-    let mut expression = String::with_capacity(normalized_text.len().min(MAX_FTS_MATCH_BYTES));
+/// Every term is matched as a fragment, wherever it sits in the text: "cmd"
+/// finds "supercmd", and "cast ray" finds "raycast". The trigram index finds
+/// terms of three characters and more; shorter ones cannot be looked up in it
+/// and are checked against the text of whatever the index — or, with no long
+/// term at all, the history newest first — hands over.
+#[derive(Debug, Eq, PartialEq)]
+pub struct SearchTerms {
+    /// The FTS5 `MATCH` expression over the indexed terms; empty without one.
+    pub fts_expression: String,
+    /// Terms too short for the index, matched against the text directly.
+    pub short_terms: Vec<String>,
+}
+
+impl SearchTerms {
+    pub fn is_empty(&self) -> bool {
+        self.fts_expression.is_empty() && self.short_terms.is_empty()
+    }
+}
+
+/// Splits normalized query text into the terms a search matches.
+pub fn build_search_terms(normalized_text: &str) -> Result<SearchTerms, QueryError> {
+    let mut terms = SearchTerms {
+        fts_expression: String::with_capacity(normalized_text.len().min(MAX_FTS_MATCH_BYTES)),
+        short_terms: Vec::new(),
+    };
     let mut term_count = 0_usize;
-    let mut terms = normalized_text
+    for term in normalized_text
         .split(|character: char| !character.is_alphanumeric())
         .filter(|term| !term.is_empty())
-        .peekable();
-    while let Some(term) = terms.next() {
+    {
         if term.len() > MAX_SEARCH_TERM_BYTES {
             return Err(QueryError::SearchTermTooLong);
         }
@@ -137,18 +157,21 @@ pub fn build_fts_match_expression(normalized_text: &str) -> Result<String, Query
         if term_count > MAX_SEARCH_TERMS {
             return Err(QueryError::TooManySearchTerms);
         }
-        let is_last = terms.peek().is_none();
+        if term.chars().count() < MIN_INDEXED_TERM_CHARS {
+            terms.short_terms.push(term.to_owned());
+            continue;
+        }
+        let expression = &mut terms.fts_expression;
         let separator_bytes = if expression.is_empty() {
             0
         } else {
             " AND ".len()
         };
-        let quoting_bytes = if is_last { 3 } else { 2 };
         let required = expression
             .len()
             .checked_add(separator_bytes)
             .and_then(|length| length.checked_add(term.len()))
-            .and_then(|length| length.checked_add(quoting_bytes))
+            .and_then(|length| length.checked_add(2))
             .ok_or(QueryError::MatchExpressionTooLong)?;
         if required > MAX_FTS_MATCH_BYTES {
             return Err(QueryError::MatchExpressionTooLong);
@@ -159,11 +182,8 @@ pub fn build_fts_match_expression(normalized_text: &str) -> Result<String, Query
         expression.push('"');
         expression.push_str(term);
         expression.push('"');
-        if is_last {
-            expression.push('*');
-        }
     }
-    Ok(expression)
+    Ok(terms)
 }
 
 fn skip_whitespace(value: &str, mut offset: usize) -> usize {

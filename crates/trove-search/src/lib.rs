@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 pub use query::{
     MAX_APP_FILTER_BYTES, MAX_FTS_MATCH_BYTES, MAX_RAW_QUERY_BYTES, MAX_SEARCH_TERM_BYTES,
-    MAX_SEARCH_TERMS, ParsedQuery, QueryError, SearchFilters, build_fts_match_expression,
-    parse_query,
+    MAX_SEARCH_TERMS, MIN_INDEXED_TERM_CHARS, ParsedQuery, QueryError, SearchFilters, SearchTerms,
+    build_search_terms, parse_query,
 };
 pub use ranking::{RankingSignals, RankingWeights, rank_score};
 pub use trove_store::MAX_PREVIEW_BYTES;
@@ -25,32 +25,18 @@ pub const MAX_RANKED_CANDIDATES: usize = 200;
 pub const MAX_SEARCH_RESULTS: u32 = 100;
 pub const DEFAULT_SEARCH_RESULTS: u32 = 50;
 
-const RANKED_SEARCH_SQL: &str = "WITH matched_candidates AS MATERIALIZED (
-       SELECT he.event_id, he.global_id, c.kind, he.captured_at_ms, he.source_app_name,
-              he.pinned, c.preview_text, c.byte_size, c.flags, c.content_id,
-              bm25(search_fts) AS lexical_score
-       FROM search_fts
-       JOIN content c ON c.content_id = search_fts.rowid
-       JOIN history_event he ON he.content_id = c.content_id
-         AND NOT EXISTS (
-              SELECT 1 FROM history_event newer
-              WHERE newer.content_id = he.content_id
-                AND (newer.captured_at_ms, newer.event_id)
-                  > (he.captured_at_ms, he.event_id))
-       WHERE search_fts MATCH ?1
-         AND (c.flags & ?6) = 0
-         AND (?2 IS NULL OR c.kind = ?2)
-         AND (?3 IS NULL
-              OR he.source_app_id COLLATE NOCASE = ?3 COLLATE NOCASE
-              OR he.source_app_name COLLATE NOCASE = ?3 COLLATE NOCASE)
-         AND (?4 IS NULL
-              OR EXISTS(
-                   SELECT 1 FROM history_event pinned_member
-                   WHERE pinned_member.content_id = c.content_id
-                     AND pinned_member.pinned = ?4))
-       ORDER BY lexical_score, he.captured_at_ms DESC, he.event_id DESC
-       LIMIT (?5 + 1)
-     ),
+/// The ranked search around one way of finding its candidates.
+///
+/// Both ways bind the same parameters: `?1` the FTS5 expression over the
+/// indexed terms, `?2` to `?4` the kind, app and pin filters, `?5` the
+/// candidate limit, `?6` the do-not-index mask, and `?7` the terms too short
+/// for the index as a JSON array, each of which must appear in the text.
+macro_rules! ranked_search_sql {
+    ($matched_candidates:literal) => {
+        concat!(
+            "WITH matched_candidates AS MATERIALIZED (",
+            $matched_candidates,
+            "),
      bounded_candidates AS MATERIALIZED (
        SELECT *
        FROM matched_candidates
@@ -89,7 +75,76 @@ const RANKED_SEARCH_SQL: &str = "WITH matched_candidates AS MATERIALIZED (
      FROM bounded_candidates candidate
      JOIN candidate_usage usage ON usage.content_id = candidate.content_id
      CROSS JOIN truncation
-     ORDER BY candidate.lexical_score, candidate.captured_at_ms DESC, candidate.event_id DESC";
+     ORDER BY candidate.lexical_score, candidate.captured_at_ms DESC, candidate.event_id DESC"
+        )
+    };
+}
+
+/// Candidates the trigram index finds, best lexical match first.
+const INDEXED_SEARCH_SQL: &str = ranked_search_sql!(
+    "SELECT he.event_id, he.global_id, c.kind, he.captured_at_ms, he.source_app_name,
+            he.pinned, c.preview_text, c.byte_size, c.flags, c.content_id,
+            bm25(search_fts) AS lexical_score
+     FROM search_fts
+     JOIN content c ON c.content_id = search_fts.rowid
+     JOIN history_event he ON he.content_id = c.content_id
+       AND NOT EXISTS (
+            SELECT 1 FROM history_event newer
+            WHERE newer.content_id = he.content_id
+              AND (newer.captured_at_ms, newer.event_id)
+                > (he.captured_at_ms, he.event_id))
+     WHERE search_fts MATCH ?1
+       AND NOT EXISTS (
+            SELECT 1 FROM json_each(?7) term
+            WHERE instr(search_fts.normalized_text, term.value) = 0)
+       AND (c.flags & ?6) = 0
+       AND (?2 IS NULL OR c.kind = ?2)
+       AND (?3 IS NULL
+            OR he.source_app_id COLLATE NOCASE = ?3 COLLATE NOCASE
+            OR he.source_app_name COLLATE NOCASE = ?3 COLLATE NOCASE)
+       AND (?4 IS NULL
+            OR EXISTS(
+                 SELECT 1 FROM history_event pinned_member
+                 WHERE pinned_member.content_id = c.content_id
+                   AND pinned_member.pinned = ?4))
+     ORDER BY lexical_score, he.captured_at_ms DESC, he.event_id DESC
+     LIMIT (?5 + 1)"
+);
+
+/// Candidates for a query of only one- and two-character terms, which the
+/// trigram index cannot look up. The history is walked newest first and each
+/// text checked directly; a fragment that short is in most texts, so the
+/// walk fills the candidate limit and stops long before the end of a large
+/// history. Every candidate scores the same lexically — recency, use and pins
+/// rank them.
+const SHORT_TERM_SEARCH_SQL: &str = ranked_search_sql!(
+    "SELECT he.event_id, he.global_id, c.kind, he.captured_at_ms, he.source_app_name,
+            he.pinned, c.preview_text, c.byte_size, c.flags, c.content_id,
+            0.0 AS lexical_score
+     FROM history_event he
+     JOIN content c ON c.content_id = he.content_id
+     JOIN search_doc doc ON doc.content_id = c.content_id
+     WHERE NOT EXISTS (
+            SELECT 1 FROM history_event newer
+            WHERE newer.content_id = he.content_id
+              AND (newer.captured_at_ms, newer.event_id)
+                > (he.captured_at_ms, he.event_id))
+       AND NOT EXISTS (
+            SELECT 1 FROM json_each(?7) term
+            WHERE instr(doc.normalized_text, term.value) = 0)
+       AND (c.flags & ?6) = 0
+       AND (?2 IS NULL OR c.kind = ?2)
+       AND (?3 IS NULL
+            OR he.source_app_id COLLATE NOCASE = ?3 COLLATE NOCASE
+            OR he.source_app_name COLLATE NOCASE = ?3 COLLATE NOCASE)
+       AND (?4 IS NULL
+            OR EXISTS(
+                 SELECT 1 FROM history_event pinned_member
+                 WHERE pinned_member.content_id = c.content_id
+                   AND pinned_member.pinned = ?4))
+     ORDER BY he.captured_at_ms DESC, he.event_id DESC
+     LIMIT (?5 + 1)"
+);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -200,8 +255,8 @@ impl SearchStoreExt for StoreHandle {
             return Err(SearchError::InvalidLimit);
         }
         let parsed = parse_query(&request.query)?;
-        let match_expression = build_fts_match_expression(&parsed.text)?;
-        if match_expression.is_empty() {
+        let terms = build_search_terms(&parsed.text)?;
+        if terms.is_empty() {
             return recent_search(
                 self,
                 request.limit,
@@ -216,7 +271,7 @@ impl SearchStoreExt for StoreHandle {
         ranked_search(
             self,
             request.limit,
-            &match_expression,
+            &terms,
             &parsed.filters,
             current_time_ms(),
             RankingWeights::default(),
@@ -325,7 +380,7 @@ fn recent_search(
 fn ranked_search(
     store: &StoreHandle,
     limit: u32,
-    match_expression: &str,
+    terms: &SearchTerms,
     filters: &SearchFilters,
     now_ms: i64,
     weights: RankingWeights,
@@ -336,17 +391,25 @@ fn ranked_search(
     let candidate_limit =
         i64::try_from(MAX_RANKED_CANDIDATES).map_err(|_| SearchError::InvalidStoreData)?;
     let do_not_index_mask = i64::from(ContentFlags::DO_NOT_INDEX.bits());
+    let sql = if terms.fts_expression.is_empty() {
+        SHORT_TERM_SEARCH_SQL
+    } else {
+        INDEXED_SEARCH_SQL
+    };
+    let short_terms =
+        serde_json::to_string(&terms.short_terms).expect("a list of strings always serializes");
     let ((raw_candidates, ranked_truncated), fills) = store.with_reader(|connection| {
-        let mut statement = connection.prepare(RANKED_SEARCH_SQL)?;
+        let mut statement = connection.prepare(sql)?;
         let rows = statement
             .query_map(
                 params![
-                    match_expression,
+                    terms.fts_expression,
                     kind,
                     app,
                     pinned,
                     candidate_limit,
-                    do_not_index_mask
+                    do_not_index_mask,
+                    short_terms
                 ],
                 |row| {
                     Ok((
@@ -603,7 +666,7 @@ mod sql_plan_tests {
     use rusqlite::params;
     use trove_store::{StoreConfig, StoreHandle};
 
-    use super::{MAX_RANKED_CANDIDATES, RANKED_SEARCH_SQL};
+    use super::{INDEXED_SEARCH_SQL, MAX_RANKED_CANDIDATES, SHORT_TERM_SEARCH_SQL};
 
     #[test]
     fn a_group_deleted_between_the_two_reads_is_dropped_not_fatal() {
@@ -641,15 +704,13 @@ mod sql_plan_tests {
         assert!(page.is_empty());
     }
 
-    #[test]
-    fn ranked_sql_materializes_one_bounded_snapshot_and_one_usage_aggregation() {
+    fn query_plan(sql: &str) -> Vec<String> {
         let directory = tempfile::tempdir().expect("temporary store");
         let store = StoreHandle::open(StoreConfig::new(directory.path().join("search.sqlite")))
             .expect("synthetic store");
-        let details = store
+        store
             .with_reader(|connection| {
-                let mut statement =
-                    connection.prepare(&format!("EXPLAIN QUERY PLAN {RANKED_SEARCH_SQL}"))?;
+                let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
                 statement
                     .query_map(
                         params![
@@ -658,35 +719,54 @@ mod sql_plan_tests {
                             Option::<&str>::None,
                             Option::<i64>::None,
                             i64::try_from(MAX_RANKED_CANDIDATES).unwrap(),
-                            i64::from(trove_core::ContentFlags::DO_NOT_INDEX.bits())
+                            i64::from(trove_core::ContentFlags::DO_NOT_INDEX.bits()),
+                            "[\"ab\"]"
                         ],
                         |row| row.get::<_, String>(3),
                     )?
                     .collect::<Result<Vec<_>, _>>()
             })
-            .expect("ranked query plan");
+            .expect("ranked query plan")
+    }
 
-        assert_eq!(
-            details
-                .iter()
-                .filter(|detail| detail.contains("CORRELATED SCALAR SUBQUERY"))
-                .count(),
-            3,
-            "exactly three probes may remain correlated: the thumbnail \
-             existence probe, the representative-event probe, and the \
-             pinned-member probe"
-        );
+    #[test]
+    fn ranked_sql_materializes_one_bounded_snapshot_and_one_usage_aggregation() {
+        for sql in [INDEXED_SEARCH_SQL, SHORT_TERM_SEARCH_SQL] {
+            let details = query_plan(sql);
+            assert_eq!(
+                details
+                    .iter()
+                    .filter(|detail| detail.contains("CORRELATED SCALAR SUBQUERY"))
+                    .count(),
+                4,
+                "exactly four probes may remain correlated: the thumbnail \
+                 existence probe, the representative-event probe, the \
+                 pinned-member probe, and the short-term probe"
+            );
+            assert!(
+                details
+                    .iter()
+                    .any(|detail| detail.contains("MATERIALIZE bounded_candidates")),
+                "bounded candidates must be materialized"
+            );
+            assert!(
+                details
+                    .iter()
+                    .any(|detail| detail.contains("MATERIALIZE candidate_usage")),
+                "usage must be grouped once for the bounded content set"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_term_search_walks_the_timeline_instead_of_sorting_the_history() {
+        let details = query_plan(SHORT_TERM_SEARCH_SQL);
         assert!(
             details
                 .iter()
-                .any(|detail| detail.contains("MATERIALIZE bounded_candidates")),
-            "bounded candidates must be materialized"
-        );
-        assert!(
-            details
-                .iter()
-                .any(|detail| detail.contains("MATERIALIZE candidate_usage")),
-            "usage must be grouped once for the bounded content set"
+                .any(|detail| detail == "SCAN he USING INDEX idx_history_event_timeline"),
+            "the walk must follow the timeline index, so it can stop at the \
+             candidate limit rather than read the whole history: {details:?}"
         );
     }
 }
