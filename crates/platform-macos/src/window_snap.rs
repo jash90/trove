@@ -419,12 +419,8 @@ mod platform {
     /// when nobody else is in front.
     fn frontmost_pid() -> Option<i32> {
         objc2::MainThreadMarker::new()?;
-        // SAFETY: reading the shared workspace singleton and the frontmost
-        // application record is a query with no preconditions.
-        let frontmost = unsafe { NSWorkspace::sharedWorkspace().frontmostApplication() };
-        let app = frontmost?;
-        // SAFETY: reading a property of an owned running-application record.
-        let pid = unsafe { app.processIdentifier() };
+        let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+        let pid = app.processIdentifier();
         (pid != std::process::id() as i32).then_some(pid)
     }
 
@@ -492,7 +488,7 @@ mod platform {
         }
     }
 
-    /// The z-order listing the window server keeps, front to back.
+    // The z-order listing the window server keeps, front to back.
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         fn CGWindowListCopyWindowInfo(options: u32, relative_to: u32) -> *const std::ffi::c_void;
@@ -544,29 +540,26 @@ mod platform {
 
     /// The visible area of each screen, in Accessibility coordinates.
     fn screens_ax(mtm: objc2::MainThreadMarker) -> Vec<Rect> {
-        // SAFETY: `screens` is a copy out of the screen list and
-        // `visibleFrame` is a plain query, made on the main thread the marker
-        // proves we are on.
-        unsafe {
-            let screens = NSScreen::screens(mtm);
-            let list = screens.iter().collect::<Vec<_>>();
-            let Some(primary) = list.first() else {
-                return Vec::new();
+        // The main thread the marker proves we are on is all AppKit asks of
+        // these screen queries.
+        let screens = NSScreen::screens(mtm);
+        let list = screens.iter().collect::<Vec<_>>();
+        let Some(primary) = list.first() else {
+            return Vec::new();
+        };
+        let primary_height = primary.frame().size.height;
+        let mut visibles = Vec::with_capacity(list.len());
+        for screen in &list {
+            let v = screen.visibleFrame();
+            let to_rect = |r: objc2_foundation::NSRect| Rect {
+                x: r.origin.x,
+                y: r.origin.y,
+                width: r.size.width,
+                height: r.size.height,
             };
-            let primary_height = primary.frame().size.height;
-            let mut visibles = Vec::with_capacity(list.len());
-            for screen in &list {
-                let v = screen.visibleFrame();
-                let to_rect = |r: objc2_foundation::NSRect| Rect {
-                    x: r.origin.x,
-                    y: r.origin.y,
-                    width: r.size.width,
-                    height: r.size.height,
-                };
-                visibles.push(ns_to_ax(to_rect(v), primary_height));
-            }
-            visibles
+            visibles.push(ns_to_ax(to_rect(v), primary_height));
         }
+        visibles
     }
 
     fn read_point(window: *const std::ffi::c_void) -> Option<(f64, f64)> {
