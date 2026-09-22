@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trove — historia schowka dla macOS, która zostaje na Twoim Macu</title>
+  <meta name="description" content="Trove zapamiętuje wszystko, co kopiujesz na Macu: teksty, linki, obrazy, pliki i kod. Jeden skrót, błyskawiczne wyszukiwanie, zero chmury. Do tego launcher aplikacji, układanie okien i czat z modelem AI.">
+  <link rel="canonical" href="https://jash90.github.io/trove/">
+  <link rel="alternate" hreflang="pl" href="https://jash90.github.io/trove/">
+  <link rel="alternate" hreflang="en" href="https://jash90.github.io/trove/en/">
+  <link rel="alternate" hreflang="x-default" href="https://jash90.github.io/trove/">
+  <meta name="theme-color" content="#f4f2ec" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#11151c" media="(prefers-color-scheme: dark)">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Trove">
+  <meta property="og:locale" content="pl_PL">
+  <meta property="og:locale:alternate" content="en_GB">
+  <meta property="og:url" content="https://jash90.github.io/trove/">
+  <meta property="og:title" content="Trove — historia schowka dla macOS">
+  <meta property="og:description" content="Wszystko, co skopiujesz, pod jednym skrótem. Lokalnie, bez chmury, z wyszukiwaniem, które rozumie polskie znaki.">
+  <meta property="og:image" content="https://jash90.github.io/trove/assets/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Ikona Trove obok okna z historią schowka">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Trove — historia schowka dla macOS">
+  <meta name="twitter:description" content="Wszystko, co skopiujesz, pod jednym skrótem. Lokalnie, bez chmury.">
+  <meta name="twitter:image" content="https://jash90.github.io/trove/assets/og-image.png">
+
+  <link rel="icon" type="image/png" sizes="64x64" href="assets/favicon-64.png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <link rel="preload" href="assets/fonts/space-grotesk-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="assets/site.css">
+  <script>
+    (() => {
+      let theme = null;
+      try { theme = localStorage.getItem("trove-theme"); } catch {}
+      if (theme !== "light" && theme !== "dark") {
+        theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
+  <script src="assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Przejdź do treści</a>
+
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="./">
+        <img src="assets/trove-icon-256.png" alt="" width="34" height="34">
+        Trove
+      </a>
+      <nav class="site-nav" aria-label="Sekcje strony">
+        <a href="#funkcje">Funkcje</a>
+        <a href="#prywatnosc">Prywatność</a>
+        <a href="#jak-to-dziala">Jak to działa</a>
+        <a href="#galeria">Galeria</a>
+        <a href="#dla-developerow">Dla developerów</a>
+      </nav>
+      <div class="header-tools">
+        <a class="lang-switch" href="en/" hreflang="en" lang="en" aria-label="English version">EN</a>
+        <button class="theme-toggle" type="button" aria-pressed="false" aria-label="Tryb ciemny">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- Hero -->
+    <div class="hero">
+      <div class="wrap hero-grid">
+        <div>
+          <span class="eyebrow">Menedżer schowka dla macOS</span>
+          <h1>Wszystko, co skopiujesz — pod&nbsp;jednym skrótem.</h1>
+          <p class="lead">Trove zapamiętuje teksty, linki, obrazy, pliki i fragmenty kodu, które przechodzą przez schowek Twojego Maca. Naciskasz <kbd>⌘Space</kbd>, wpisujesz dwie litery i wklejasz — a historia nigdy nie opuszcza Twojego komputera.</p>
+          <div class="cta-row">
+            <a class="button button-primary" href="https://github.com/jash90/trove/releases/latest">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+              Pobierz dla macOS
+            </a>
+            <a class="button button-secondary" href="https://github.com/jash90/trove">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.7 5.39-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z"/></svg>
+              Kod źródłowy
+            </a>
+          </div>
+          <p class="fine-print">Wersja 1.8 · Apple Silicon · podpisana i notaryzowana · licencja MIT</p>
+        </div>
+        <figure class="window">
+          <div class="window-bar" aria-hidden="true"><span></span><span></span><span></span>Trove</div>
+          <img src="assets/screenshots/palette-link-preview.webp" width="1040" height="680" alt="Okno Trove: lista skopiowanych elementów — notatka ze Slacka, polecenie git, link do dokumentacji MDN, obraz, kolor, faktura PDF — a obok podgląd zaznaczonego linku z tytułem strony i miniaturą." fetchpriority="high">
+        </figure>
+      </div>
+    </div>
+
+    <!-- Problem -->
+    <section id="problem" class="section-alt" aria-labelledby="problem-title">
+      <div class="wrap">
+        <div class="section-head">
+          <h2 id="problem-title">Schowek pamięta jedną rzecz. Ty potrzebujesz więcej.</h2>
+          <p>macOS trzyma w schowku tylko ostatnią skopiowaną rzecz. Wystarczy jedno <kbd>⌘C</kbd> za dużo i adres, fragment umowy czy polecenie z terminala przepada.</p>
+        </div>
+        <div class="cards">
+          <article class="card">
+            <div class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+            <h3>Rzeczy giną po drodze</h3>
+            <p>Link z rana, numer faktury z wczoraj, kolor z makiety — wszystko, co skopiowałeś, jest w Trove, pogrupowane i z datą.</p>
+          </article>
+          <article class="card">
+            <div class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.8A6 6 0 0 0 4.5 12 3.5 3.5 0 0 0 6 19z"/><path d="M4 4l16 16"/></svg></div>
+            <h3>Twoje dane nie są towarem</h3>
+            <p>Historia, indeks i pliki leżą w lokalnej bazie SQLite na Twoim dysku. Żadnego konta, synchronizacji ani telemetrii.</p>
+          </article>
+          <article class="card">
+            <div class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg></div>
+            <h3>Szybko, nawet po latach</h3>
+            <p>Historia nie ma limitu, a typowe wyszukiwanie w milionie wpisów trwa kilka milisekund. Nie musisz niczego sprzątać.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features -->
+    <section id="funkcje" aria-labelledby="funkcje-title">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Funkcje</span>
+          <h2 id="funkcje-title">Jedno okno do wszystkiego, co kopiujesz</h2>
+          <p>Paleta Trove otwiera się nad aplikacją, w której właśnie pracujesz. Z klawiatury wybierasz kategorię, szukasz i wklejasz — bez sięgania po mysz.</p>
+        </div>
+
+        <article class="feature">
+          <div class="feature-text">
+            <span class="tag">Historia schowka</span>
+            <h3>Każdy typ treści, z podglądem</h3>
+            <ul>
+              <li>Tekst, linki, obrazy, pliki, kolory, kod i HTML — każdy z odpowiednim podglądem.</li>
+              <li>Ten sam wpis skopiowany kilka razy to jeden wiersz z licznikiem <strong>×N</strong> i listą dat.</li>
+              <li><kbd>Enter</kbd> wkleja wpis prosto do okna, z którego przyszedłeś; <kbd>⌘⇧V</kbd> wkleja go jako czysty tekst.</li>
+              <li>Przypięte wpisy zostają na zawsze, nawet przy włączonym czyszczeniu historii.</li>
+            </ul>
+          </div>
+          <figure class="window feature-shot">
+            <div class="window-bar" aria-hidden="true"><span></span><span></span><span></span>Trove</div>
+            <img src="assets/screenshots/palette-image.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Historia schowka z zaznaczonym obrazem z Figmy — po prawej podgląd wykresu, źródło, rozmiar i czas skopiowania.">
+          </figure>
+        </article>
+
+        <article class="feature">
+          <div class="feature-text">
+            <span class="tag">Wyszukiwanie</span>
+            <h3>Znajduje „wrzesień”, gdy wpiszesz „wrzesien”</h3>
+            <p>Wyszukiwarka pełnotekstowa ignoruje polskie znaki diakrytyczne, także „ł”. Wpisujesz tak, jak Ci wygodnie, a wynik pojawia się, zanim skończysz słowo.</p>
+            <p>Filtr typu zawęża listę do samych linków, obrazów czy plików.</p>
+          </div>
+          <figure class="window feature-shot">
+            <div class="window-bar" aria-hidden="true"><span></span><span></span><span></span>Trove</div>
+            <img src="assets/screenshots/palette-search.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Wyszukiwanie frazy „wrzesien” bez polskich znaków znajduje wpis „Faktura za wrzesień — termin płatności mija 30 września”.">
+          </figure>
+        </article>
+
+        <article class="feature">
+          <div class="feature-text">
+            <span class="tag">Aplikacje</span>
+            <h3>Launcher, który rozumie skróty myślowe</h3>
+            <p>Kategoria <kbd>1</kbd> to wszystkie zainstalowane aplikacje z ikonami. „vsc” znajdzie Visual Studio Code, „chrm” — Chrome. Świeżo zainstalowany program pojawia się na liście bez restartu.</p>
+          </div>
+          <figure class="window feature-shot">
+            <div class="window-bar" aria-hidden="true"><span></span><span></span><span></span>Trove</div>
+            <img src="assets/screenshots/palette-apps.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Lista aplikacji w Trove: Calendar, Figma, Finder, Mail, Notes, Safari, Slack i inne, każda z identyfikatorem pakietu i folderem.">
+          </figure>
+        </article>
+
+        <article class="feature">
+          <div class="feature-text">
+            <span class="tag">Okna</span>
+            <h3>Układanie okien jak w Rectangle</h3>
+            <p>Połówki, ćwiartki, maksymalizacja i wyśrodkowanie — z palety albo globalnymi skrótami, np. <kbd>⌘⌥←</kbd>. Trove przesuwa okno, w którym ostatnio pracowałeś, nawet jeśli paletę wywołałeś kliknięciem w pasku menu.</p>
+          </div>
+          <figure class="window feature-shot">
+            <div class="window-bar" aria-hidden="true"><span></span><span></span><span></span>Trove</div>
+            <img src="assets/screenshots/palette-windows.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Kategoria Windows: lista układów — lewa, prawa, górna i dolna połowa oraz ćwiartki — każdy z przypisanym skrótem klawiszowym.">
+          </figure>
+        </article>
+
+        <article class="feature feature-narrow">
+          <div class="feature-text">
+            <span class="tag">Czat</span>
+            <h3>Model AI w osobnym oknie</h3>
+            <p>Rozmowa z modelem od Anthropic, OpenAI, OpenRouter albo Z.ai — z Twoim własnym kluczem API. Odpowiedź spływa na bieżąco, z formatowaniem Markdown, tabelami i blokami kodu. Rozmowa żyje tylko w pamięci okna.</p>
+            <p>Otwierasz go klawiszem <kbd>5</kbd> albo <kbd>⌘K</kbd> z palety.</p>
+          </div>
+          <figure class="window feature-shot">
+            <div class="window-bar" aria-hidden="true"><span></span><span></span><span></span>Chat — Trove</div>
+            <img src="assets/screenshots/chat.webp" width="560" height="720" loading="lazy" decoding="async" alt="Okno czatu Trove z modelem claude-sonnet-4-5: prośba o notatkę do wydania i odpowiedź z nagłówkiem, listą zmian i tabelą skrótów.">
+          </figure>
+        </article>
+
+        <article class="feature">
+          <div class="feature-text">
+            <span class="tag">Import</span>
+            <h3>Przenieś historię z Raycasta lub SuperCmd</h3>
+            <p>Trove importuje zaszyfrowany eksport <code>.rayconfig</code> z Raycasta oraz pliki JSON i CSV z Raycasta i SuperCmd. Import działa w całości lokalnie, a powtórzony nie tworzy duplikatów.</p>
+          </div>
+          <figure class="window feature-shot">
+            <div class="window-bar" aria-hidden="true"><span></span><span></span><span></span>Trove</div>
+            <img src="assets/screenshots/palette-import.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Kreator importu historii z ostrzeżeniem, że archiwum może zawierać wrażliwe dane, i przyciskami wyboru pliku lub folderu eksportu.">
+          </figure>
+        </article>
+
+        <div class="mini-features">
+          <article class="card">
+            <h3>Sejf kluczy</h3>
+            <p>Kategoria <kbd>3</kbd> pokazuje nazwy kluczy z Twojego prywatnego sejfu. Wartość trafia prosto do schowka i nie zapisuje się w historii.</p>
+          </article>
+          <article class="card">
+            <h3>Retencja na Twoich zasadach</h3>
+            <p>Domyślnie historia jest nieograniczona. Możesz kazać Trove usuwać wpisy starsze niż N dni — przypięte zostają.</p>
+          </article>
+          <article class="card">
+            <h3>Żyje w pasku menu</h3>
+            <p>Bez ikony w Docku i w <kbd>⌘Tab</kbd>, chyba że ją włączysz. Z paska menu wstrzymasz też zapisywanie schowka.</p>
+          </article>
+          <article class="card">
+            <h3>Eksport i statystyki</h3>
+            <p>Całą historię wyeksportujesz do folderu, a w ustawieniach zobaczysz, ile miejsca zajmuje baza i pliki.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Privacy -->
+    <section id="prywatnosc" class="section-alt" aria-labelledby="prywatnosc-title">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Prywatność</span>
+          <h2 id="prywatnosc-title">Domyślnie: zero ruchu sieciowego</h2>
+          <p>Treść schowka, zapytania i ścieżki nigdy nie trafiają do logów. Menedżery haseł oznaczają swoje wpisy jako poufne — Trove je pomija, zanim cokolwiek odczyta. Możesz też wykluczyć dowolne aplikacje.</p>
+        </div>
+        <p>Łączność z siecią pojawia się tylko w trzech funkcjach, które sam włączasz:</p>
+        <div class="table-wrap" role="region" tabindex="0" aria-label="Funkcje korzystające z sieci">
+          <table>
+            <caption class="visually-hidden">Funkcje Trove, które korzystają z sieci</caption>
+            <thead>
+              <tr><th scope="col">Funkcja</th><th scope="col">Co wysyła i dokąd</th><th scope="col">Jak wyłączyć</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Podgląd linków</td><td>Pobiera tytuł, ikonę i obrazek strony z linku, który skopiowałeś. Tylko porty 80 i 443, nigdy adresy lokalne ani z sieci prywatnej.</td><td>Ustawienia → Links</td></tr>
+              <tr><td>Czat</td><td>Wiadomości z rozmowy — wyłącznie do dostawcy, którego wybrałeś, z Twoim kluczem.</td><td>Po prostu nie otwieraj czatu</td></tr>
+              <tr><td>Sejf kluczy</td><td>Zapytanie do Twojego własnego sejfu, dopiero gdy wejdziesz w tę kategorię.</td><td>Bez konfiguracji nic nie wysyła</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- How it works -->
+    <section id="jak-to-dziala" aria-labelledby="jak-title">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Jak to działa</span>
+          <h2 id="jak-title">Cztery kroki, zero konfiguracji</h2>
+        </div>
+        <ol class="steps">
+          <li>
+            <h3>Zainstaluj</h3>
+            <p>Pobierz plik DMG z GitHub Releases i przeciągnij Trove do Aplikacji. Ikona pojawi się w pasku menu.</p>
+          </li>
+          <li>
+            <h3>Kopiuj jak zwykle</h3>
+            <p>Trove zapisuje w tle wszystko, co trafia do schowka — poza wykluczonymi aplikacjami i wpisami z menedżerów haseł.</p>
+          </li>
+          <li>
+            <h3>Przywołaj paletę</h3>
+            <p><kbd>⌘Space</kbd> otwiera paletę nad bieżącym oknem. Klawisze <kbd>1</kbd>–<kbd>5</kbd> wybierają kategorię, a samo pisanie przeszukuje historię.</p>
+          </li>
+          <li>
+            <h3>Wklej</h3>
+            <p><kbd>Enter</kbd> wkleja wpis do okna, w którym byłeś. Za pierwszym razem macOS poprosi o uprawnienie Dostępności.</p>
+          </li>
+        </ol>
+        <p class="note"><kbd>⌘Space</kbd> domyślnie należy do Spotlight. Trove wykrywa ten konflikt i w ustawieniach oferuje przycisk, który zwalnia skrót — albo przywraca go Spotlightowi. Możesz też ustawić dowolną inną kombinację.</p>
+      </div>
+    </section>
+
+    <!-- Numbers -->
+    <section class="section-alt" aria-labelledby="liczby-title">
+      <div class="wrap">
+        <div class="section-head">
+          <h2 id="liczby-title">Milion wpisów to wciąż milisekundy</h2>
+          <p>Pomiar z 23 sierpnia 2026 r. na syntetycznej historii z miliona rekordów (Apple Silicon, narzędzie <code>trove-bench</code> z repozytorium).</p>
+        </div>
+        <dl class="stats">
+          <div><dt>Wyszukiwanie (p95)</dt><dd>3,2 ms</dd></div>
+          <div><dt>Pierwsza strona wyników</dt><dd>2,8 ms</dd></div>
+          <div><dt>Strona 400. listy</dt><dd>3,4 ms</dd></div>
+          <div><dt>Pamięć aplikacji</dt><dd>131 MB</dd></div>
+        </dl>
+        <p class="note">Uczciwie: zapytanie o słowo, które występuje w dużej części historii, trwa setki milisekund (811 ms p95 dla 600 tys. trafień), bo trzeba ocenić każde dopasowanie. Pamięć zmierzono na buildzie debug.</p>
+      </div>
+    </section>
+
+    <!-- Gallery -->
+    <section id="galeria" aria-labelledby="galeria-title">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Galeria</span>
+          <h2 id="galeria-title">Zrzuty ekranu</h2>
+          <p>Prawdziwy interfejs Trove na fikcyjnych danych. Kliknij, aby powiększyć; strzałki przełączają zdjęcia. Aplikacja ma interfejs w języku angielskim.</p>
+        </div>
+        <ul class="gallery">
+          <li><button type="button" data-lightbox="assets/screenshots/palette-home.webp" data-caption="Ekran startowy palety z kategoriami"><img src="assets/screenshots/palette-home.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Ekran startowy palety: kafelki Applications, Clipboard history, Key vault, Windows i Chat z klawiszami 1–5."><span>Ekran startowy</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/palette-history.webp" data-caption="Historia schowka i podgląd polecenia z terminala"><img src="assets/screenshots/palette-history.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Historia schowka z zaznaczonym poleceniem git skopiowanym cztery razy i listą dat w podglądzie."><span>Historia</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/palette-link-preview.webp" data-caption="Podgląd linku z tytułem i miniaturą strony"><img src="assets/screenshots/palette-link-preview.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Podgląd skopiowanego linku do dokumentacji Clipboard API z tytułem, ikoną i miniaturą strony."><span>Podgląd linku</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/palette-image.webp" data-caption="Podgląd skopiowanego obrazu"><img src="assets/screenshots/palette-image.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Podgląd obrazu skopiowanego z Figmy — wykres słupkowy."><span>Obraz</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/palette-search.webp" data-caption="Wyszukiwanie bez polskich znaków"><img src="assets/screenshots/palette-search.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Zapytanie „wrzesien” znajduje wpis ze słowem „wrzesień”."><span>Wyszukiwanie</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/palette-apps.webp" data-caption="Launcher aplikacji"><img src="assets/screenshots/palette-apps.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Lista zainstalowanych aplikacji z ikonami."><span>Aplikacje</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/palette-vault.webp" data-caption="Sejf kluczy — tylko nazwy, nigdy wartości"><img src="assets/screenshots/palette-vault.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Kategoria Key vault z nazwami kluczy: Anthropic API key, OpenAI API key, GitHub deploy token i inne."><span>Sejf kluczy</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/palette-windows.webp" data-caption="Układanie okien"><img src="assets/screenshots/palette-windows.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Lista układów okien ze skrótami klawiszowymi."><span>Okna</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/palette-import.webp" data-caption="Kreator importu z Raycasta i SuperCmd"><img src="assets/screenshots/palette-import.webp" width="1040" height="680" loading="lazy" decoding="async" alt="Okno importu historii z wyborem pliku lub folderu eksportu."><span>Import</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/chat.webp" data-caption="Okno czatu"><img src="assets/screenshots/chat.webp" width="560" height="720" loading="lazy" decoding="async" alt="Okno czatu z odpowiedzią modelu w formacie Markdown."><span>Czat</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/settings-shortcut.webp" data-caption="Ustawienia: skrót i uruchamianie"><img src="assets/screenshots/settings-shortcut.webp" width="840" height="820" loading="lazy" decoding="async" alt="Ustawienia: globalny skrót CommandOrControl+Space, uruchamianie przy logowaniu i ikona w Docku."><span>Ustawienia — skrót</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/settings-apps.webp" data-caption="Ustawienia: aplikacje wykluczone z historii"><img src="assets/screenshots/settings-apps.webp" width="840" height="820" loading="lazy" decoding="async" alt="Ustawienia: lista identyfikatorów aplikacji, z których schowek nie jest zapisywany, np. menedżerów haseł."><span>Ustawienia — wykluczenia</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/settings-retention.webp" data-caption="Ustawienia: retencja historii"><img src="assets/screenshots/settings-retention.webp" width="840" height="820" loading="lazy" decoding="async" alt="Ustawienia retencji: przechowywanie wpisów przez 180 dni."><span>Ustawienia — retencja</span></button></li>
+          <li><button type="button" data-lightbox="assets/screenshots/settings-storage.webp" data-caption="Ustawienia: miejsce na dysku"><img src="assets/screenshots/settings-storage.webp" width="840" height="820" loading="lazy" decoding="async" alt="Ustawienia pamięci: rozmiar bazy danych i plików oraz liczba wpisów."><span>Ustawienia — dane</span></button></li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Developers -->
+    <section id="dla-developerow" class="section-alt" aria-labelledby="dev-title">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="eyebrow">Dla developerów</span>
+          <h2 id="dev-title">Rust, Tauri 2 i React</h2>
+          <p>Rdzeń w Ruście (workspace z kilkunastu crate’ów), powłoka Tauri 2 i interfejs w React 19 z TypeScriptem. Dane w SQLite w trybie WAL z indeksem FTS5 i magazynem plików adresowanym treścią.</p>
+        </div>
+        <div class="dev-grid">
+          <div>
+            <h3>Stack</h3>
+            <ul class="stack-list">
+              <li>Rust 1.96</li><li>Tauri 2</li><li>SQLite · FTS5</li><li>React 19</li><li>TypeScript</li><li>Vite</li><li>Vitest</li><li>pnpm 10</li><li>Node 22</li>
+            </ul>
+            <h3>Uruchomienie lokalne</h3>
+            <p>Potrzebujesz macOS z Xcode Command Line Tools, Rusta 1.96 (przypiętego w <code>rust-toolchain.toml</code>), Node 22 i pnpm 10.33. Żadne zmienne środowiskowe nie są wymagane.</p>
+<pre tabindex="0"><code>pnpm install
+
+<span class="c"># podgląd interfejsu w przeglądarce, na syntetycznych danych</span>
+pnpm dev
+
+<span class="c"># natywna aplikacja z osobną bazą deweloperską</span>
+TROVE_DATA_DIR="data/dev" pnpm tauri dev</code></pre>
+            <h3>Bramki jakości</h3>
+<pre tabindex="0"><code>cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+pnpm typecheck &amp;&amp; pnpm test -- --run &amp;&amp; pnpm build</code></pre>
+          </div>
+          <div>
+            <h3>Struktura repozytorium</h3>
+            <ul class="layout-list">
+              <li><code>apps/desktop-ui</code><span>interfejs: React + TypeScript + Vite</span></li>
+              <li><code>crates/trove-core</code><span>encje, kanonikalizacja, hashowanie</span></li>
+              <li><code>crates/trove-store</code><span>SQLite, migracje, CAS, writer</span></li>
+              <li><code>crates/trove-search</code><span>normalizacja polska, FTS5, ranking</span></li>
+              <li><code>crates/trove-import</code><span>parsery Raycast i SuperCmd</span></li>
+              <li><code>crates/trove-launcher</code><span>katalog i uruchamianie aplikacji</span></li>
+              <li><code>crates/trove-link-preview</code><span>bezpieczne pobieranie podglądów</span></li>
+              <li><code>src-tauri</code><span>cykl życia, IPC, uprawnienia</span></li>
+              <li><code>tools/trove-import-cli</code><span>import i weryfikacja z terminala</span></li>
+              <li><code>tools/trove-bench</code><span>syntetyczna historia i pomiary</span></li>
+            </ul>
+            <h3>Import z terminala</h3>
+<pre tabindex="0"><code>cargo run -p trove-import-cli -- analyze --source &lt;katalog-lub-plik&gt;
+cargo run -p trove-import-cli -- import  --source &lt;…&gt; --data-dir data/dev</code></pre>
+            <p class="note">Porty dla Windows i Linuksa istnieją w kodzie, ale nie zostały jeszcze skompilowane ani uruchomione na tych systemach — dziś Trove to aplikacja dla macOS.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <p>© 2026 Bartlomiej Zimny · Licencja <a href="https://github.com/jash90/trove/blob/main/LICENSE">MIT</a></p>
+      <nav aria-label="Linki w stopce">
+        <a href="https://github.com/jash90/trove">Repozytorium</a>
+        <a href="https://github.com/jash90/trove/releases">Wydania</a>
+        <a href="https://github.com/jash90/trove/issues">Zgłoś problem</a>
+        <a href="en/" hreflang="en" lang="en">English</a>
+      </nav>
+    </div>
+  </footer>
+
+  <dialog class="lightbox" aria-label="Powiększony zrzut ekranu">
+    <figure>
+      <img src="data:," alt="" width="1040" height="680">
+      <div class="lightbox-bar">
+        <figcaption></figcaption>
+        <button class="icon-button" type="button" data-prev aria-label="Poprzedni zrzut"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+        <button class="icon-button" type="button" data-next aria-label="Następny zrzut"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg></button>
+        <button class="icon-button" type="button" data-close aria-label="Zamknij"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+      </div>
+    </figure>
+  </dialog>
+</body>
+</html>
