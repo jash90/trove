@@ -23,6 +23,7 @@ trove-keyvault = { path = "../crates/trove-keyvault" }
 trove-launcher = { path = "../crates/trove-launcher" }
 trove-link-preview = { path = "../crates/trove-link-preview" }
 reqwest.workspace = true
+tauri-plugin-updater = { version = "2.12.0", default-features = false, features = ["native-tls", "zip", "system-proxy"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos = { path = "../crates/platform-macos" }

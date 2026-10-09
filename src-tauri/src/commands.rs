@@ -71,6 +71,8 @@ macro_rules! trove_command_registry {
             save_chat_settings => $crate::commands::save_chat_settings,
             open_chat_window => $crate::commands::open_chat_window,
             snap_window => $crate::snap::snap_window,
+            check_for_update => $crate::updater::check_for_update,
+            install_update => $crate::updater::install_update,
         }
     };
 }

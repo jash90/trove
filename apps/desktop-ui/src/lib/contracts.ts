@@ -133,6 +133,23 @@ export interface ShortcutStatus {
   releasedIds: number[];
 }
 
+/** What the releases repository said about this build. */
+export interface UpdateInfo {
+  currentVersion: string;
+  available: boolean;
+  /** The newer version, when there is one. */
+  version: string | null;
+  /** Its release notes, as written on the release; null when it has none. */
+  notes: string | null;
+}
+
+/** How far the download of an accepted update has got. */
+export interface UpdateProgress {
+  downloaded: number;
+  /** Absent when the server sent no length. */
+  total: number | null;
+}
+
 /** How a request to change the system's shortcut table actually went. */
 export type ShortcutRelease =
   | "alreadyFree"
@@ -467,6 +484,24 @@ export const validateStorageStats = (stats: StorageStats): StorageStats => {
     throw new Error("invalid_storage_stats");
   }
   return stats;
+};
+
+export const validateUpdateInfo = (info: UpdateInfo): UpdateInfo => {
+  const optionalText = (value: unknown) =>
+    value === null || typeof value === "string";
+  if (
+    typeof info?.currentVersion !== "string" ||
+    info.currentVersion.length === 0 ||
+    typeof info.available !== "boolean" ||
+    !optionalText(info.version) ||
+    !optionalText(info.notes) ||
+    // An update with no version would leave the button promising to
+    // install nothing in particular.
+    (info.available && !info.version)
+  ) {
+    throw new Error("invalid_update_info");
+  }
+  return info;
 };
 
 const isAppEntry = (entry: unknown): entry is AppEntry =>

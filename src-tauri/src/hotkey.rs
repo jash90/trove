@@ -11,7 +11,7 @@ use std::sync::{
     atomic::{AtomicI32, Ordering},
 };
 
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 /// The label of the window the shortcut toggles.
@@ -46,6 +46,18 @@ pub fn show_settings<R: Runtime>(app: &AppHandle<R>) {
     // opened is focused and renders above it.
     put_palette_below(app);
 }
+
+/// Brings the settings window up on one particular tab.
+///
+/// The window is created at launch and only hidden, so its interface is
+/// already listening by the time anything in the menu bar can be clicked.
+pub fn show_settings_tab<R: Runtime>(app: &AppHandle<R>, tab: &str) {
+    show_settings(app);
+    let _ = app.emit_to(SETTINGS_WINDOW, OPEN_SETTINGS_TAB_EVENT, tab);
+}
+
+/// Carries the name of the tab the settings window should switch to.
+pub const OPEN_SETTINGS_TAB_EVENT: &str = "open-settings-tab";
 
 /// Brings the chat window up, wherever it was last left.
 pub fn show_chat<R: Runtime>(app: &AppHandle<R>) {

@@ -18,6 +18,9 @@ import {
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
+  Channel: class {
+    onmessage: (message: unknown) => void = () => undefined;
+  },
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -55,6 +58,49 @@ const progress: ImportProgress = {
   errorCode: null,
   summary: null,
 };
+
+describe("tauriGateway updates", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("checks without arguments and refuses an answer it cannot act on", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      currentVersion: "1.8.1",
+      available: true,
+      version: "1.9.0",
+      notes: null,
+    });
+    await expect(tauriGateway.checkForUpdate!()).resolves.toMatchObject({
+      version: "1.9.0",
+    });
+    expect(vi.mocked(invoke).mock.calls).toEqual([["check_for_update"]]);
+
+    vi.mocked(invoke).mockResolvedValueOnce({
+      currentVersion: "1.8.1",
+      available: true,
+      version: null,
+      notes: null,
+    });
+    await expect(tauriGateway.checkForUpdate!()).rejects.toThrow(
+      "invalid_update_info",
+    );
+  });
+
+  it("hands progress from the install channel to the listener", async () => {
+    vi.mocked(invoke).mockImplementationOnce(async (_command, args) => {
+      const channel = (args as { onProgress: { onmessage: (m: unknown) => void } })
+        .onProgress;
+      channel.onmessage({ downloaded: 5, total: 10 });
+      return undefined;
+    });
+    const seen: unknown[] = [];
+    await tauriGateway.installUpdate!((progress) => seen.push(progress));
+
+    expect(vi.mocked(invoke).mock.calls[0]?.[0]).toBe("install_update");
+    expect(seen).toEqual([{ downloaded: 5, total: 10 }]);
+  });
+});
 
 describe("tauriGateway", () => {
   beforeEach(() => {
