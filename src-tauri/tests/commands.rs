@@ -37,6 +37,29 @@ fn command_test_app(state: AppState) -> tauri::App<tauri::test::MockRuntime> {
         .unwrap()
 }
 
+/// The settings window can ask for the shortcut's standing before setup has
+/// managed it — while an alert explaining a refused start holds the main
+/// thread, for one. That has to come back as an answer the window can show,
+/// not as a panic on a runtime worker.
+#[tokio::test]
+async fn shortcut_commands_answer_rather_than_panic_before_setup_manages_their_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = command_test_app(AppState::open_data_dir(directory.path()).unwrap());
+
+    assert_eq!(
+        commands::get_shortcut_status(app.handle().clone()).await,
+        Err(commands::APP_STARTING.to_owned())
+    );
+    assert_eq!(
+        commands::free_summoning_shortcut(app.handle().clone()).await,
+        Err(commands::APP_STARTING.to_owned())
+    );
+    assert_eq!(
+        commands::restore_system_shortcut(app.handle().clone()).await,
+        Err(commands::APP_STARTING.to_owned())
+    );
+}
+
 #[tokio::test]
 async fn search_command_returns_camel_case_page_without_payload_bytes() {
     let directory = tempfile::tempdir().unwrap();

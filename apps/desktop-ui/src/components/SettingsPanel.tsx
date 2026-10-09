@@ -303,6 +303,10 @@ export const SettingsPanel = ({
       setShortcutStatus(
         (await gateway.getShortcutStatus?.().catch(() => null)) ?? null,
       );
+    } catch {
+      // The change was refused before it began — the application had not
+      // finished starting — so nothing in the system moved.
+      setShortcutNotice("Trove is still starting. Try again in a moment.");
     } finally {
       setShortcutBusy(false);
     }

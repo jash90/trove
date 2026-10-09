@@ -974,27 +974,43 @@ pub fn open_accessibility_settings_window() -> Result<(), String> {
 // as soon as it mounts — at launch, hidden — so that wait was spent with the
 // palette unable to draw. They run on the blocking pool instead, reaching the
 // managed state through the handle so no borrow has to outlive the await.
+//
+// Through `try_state`, not `state`: the settings window can ask before setup
+// has managed the shortcut state — while a refusal-to-start alert holds the
+// main thread, for one — and `state` panics then. A borrowed `State` argument
+// used to turn that into an error for free; reaching through the handle has
+// to do it explicitly.
+
+/// Answered while setup has not yet managed what a command reads.
+pub const APP_STARTING: &str = "app_starting";
+
+fn managed<R: tauri::Runtime, T: Clone + Send + Sync + 'static>(
+    app: &tauri::AppHandle<R>,
+) -> Result<T, String> {
+    app.try_state::<T>()
+        .map(|state| state.inner().clone())
+        .ok_or_else(|| APP_STARTING.to_owned())
+}
 
 /// What the summoning shortcut is doing, as opposed to what it was asked to do.
 #[tauri::command(rename_all = "camelCase")]
-pub async fn get_shortcut_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> ShortcutStatusDto {
-    let active = app.state::<crate::hotkey::ActiveShortcut>().inner().clone();
-    let released = app
-        .state::<crate::hotkey::ReleasedSystemHotkeys>()
-        .inner()
-        .clone();
+pub async fn get_shortcut_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<ShortcutStatusDto, String> {
+    let active: crate::hotkey::ActiveShortcut = managed(&app)?;
+    let released: crate::hotkey::ReleasedSystemHotkeys = managed(&app)?;
     let shortcut = active.get();
     let held = tauri::async_runtime::spawn_blocking(move || !system_holders(&shortcut).is_empty())
         .await
         // A table that could not be read holds nothing anyone can name; the
         // row then offers no release, which is the harmless direction.
         .unwrap_or(false);
-    ShortcutStatusDto {
+    Ok(ShortcutStatusDto {
         hotkey: shortcut.into_string(),
         registered: active.is_registered(),
         held_by_system: held,
         released_ids: released.get(),
-    }
+    })
 }
 
 /// Turns off the system shortcuts standing on the configured chord.
@@ -1004,13 +1020,10 @@ pub async fn get_shortcut_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) ->
 #[tauri::command(rename_all = "camelCase")]
 pub async fn free_summoning_shortcut<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
-) -> ShortcutReleaseDto {
-    let active = app.state::<crate::hotkey::ActiveShortcut>().inner().clone();
-    let released = app
-        .state::<crate::hotkey::ReleasedSystemHotkeys>()
-        .inner()
-        .clone();
-    tauri::async_runtime::spawn_blocking(move || {
+) -> Result<ShortcutReleaseDto, String> {
+    let active: crate::hotkey::ActiveShortcut = managed(&app)?;
+    let released: crate::hotkey::ReleasedSystemHotkeys = managed(&app)?;
+    Ok(tauri::async_runtime::spawn_blocking(move || {
         let holders = system_holders(&active.get());
         if holders.is_empty() {
             return ShortcutReleaseDto::AlreadyFree;
@@ -1025,19 +1038,16 @@ pub async fn free_summoning_shortcut<R: tauri::Runtime>(
         outcome
     })
     .await
-    .unwrap_or(ShortcutReleaseDto::Refused)
+    .unwrap_or(ShortcutReleaseDto::Refused))
 }
 
 /// Hands the system back what `free_summoning_shortcut` took.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn restore_system_shortcut<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
-) -> ShortcutReleaseDto {
-    let released = app
-        .state::<crate::hotkey::ReleasedSystemHotkeys>()
-        .inner()
-        .clone();
-    tauri::async_runtime::spawn_blocking(move || {
+) -> Result<ShortcutReleaseDto, String> {
+    let released: crate::hotkey::ReleasedSystemHotkeys = managed(&app)?;
+    Ok(tauri::async_runtime::spawn_blocking(move || {
         let ids = released.get();
         if ids.is_empty() {
             return ShortcutReleaseDto::AlreadyFree;
@@ -1052,7 +1062,7 @@ pub async fn restore_system_shortcut<R: tauri::Runtime>(
         outcome
     })
     .await
-    .unwrap_or(ShortcutReleaseDto::Refused)
+    .unwrap_or(ShortcutReleaseDto::Refused))
 }
 
 /// Opens the Keyboard shortcut list in System Settings, on request.
