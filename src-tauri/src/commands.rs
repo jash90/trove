@@ -968,19 +968,49 @@ pub fn open_accessibility_settings_window() -> Result<(), String> {
     }
 }
 
+// The three commands below read or rewrite the system's shortcut table, which
+// means running `/usr/bin/defaults` and waiting for it. A command that is not
+// `async` runs on the main thread, and the settings window asks for the status
+// as soon as it mounts — at launch, hidden — so that wait was spent with the
+// palette unable to draw. They run on the blocking pool instead, reaching the
+// managed state through the handle so no borrow has to outlive the await.
+//
+// Through `try_state`, not `state`: the settings window can ask before setup
+// has managed the shortcut state — while a refusal-to-start alert holds the
+// main thread, for one — and `state` panics then. A borrowed `State` argument
+// used to turn that into an error for free; reaching through the handle has
+// to do it explicitly.
+
+/// Answered while setup has not yet managed what a command reads.
+pub const APP_STARTING: &str = "app_starting";
+
+fn managed<R: tauri::Runtime, T: Clone + Send + Sync + 'static>(
+    app: &tauri::AppHandle<R>,
+) -> Result<T, String> {
+    app.try_state::<T>()
+        .map(|state| state.inner().clone())
+        .ok_or_else(|| APP_STARTING.to_owned())
+}
+
 /// What the summoning shortcut is doing, as opposed to what it was asked to do.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_shortcut_status(
-    active: tauri::State<'_, crate::hotkey::ActiveShortcut>,
-    released: tauri::State<'_, crate::hotkey::ReleasedSystemHotkeys>,
-) -> ShortcutStatusDto {
+pub async fn get_shortcut_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<ShortcutStatusDto, String> {
+    let active: crate::hotkey::ActiveShortcut = managed(&app)?;
+    let released: crate::hotkey::ReleasedSystemHotkeys = managed(&app)?;
     let shortcut = active.get();
-    ShortcutStatusDto {
+    let held = tauri::async_runtime::spawn_blocking(move || !system_holders(&shortcut).is_empty())
+        .await
+        // A table that could not be read holds nothing anyone can name; the
+        // row then offers no release, which is the harmless direction.
+        .unwrap_or(false);
+    Ok(ShortcutStatusDto {
         hotkey: shortcut.into_string(),
         registered: active.is_registered(),
-        held_by_system: !system_holders(&shortcut).is_empty(),
+        held_by_system: held,
         released_ids: released.get(),
-    }
+    })
 }
 
 /// Turns off the system shortcuts standing on the configured chord.
@@ -988,41 +1018,51 @@ pub fn get_shortcut_status(
 /// Deliberate and user-initiated, never automatic: this changes a setting that
 /// belongs to the whole machine, not to this application.
 #[tauri::command(rename_all = "camelCase")]
-pub fn free_summoning_shortcut(
-    active: tauri::State<'_, crate::hotkey::ActiveShortcut>,
-    released: tauri::State<'_, crate::hotkey::ReleasedSystemHotkeys>,
-) -> ShortcutReleaseDto {
-    let holders = system_holders(&active.get());
-    if holders.is_empty() {
-        return ShortcutReleaseDto::AlreadyFree;
-    }
-    let outcome = release_outcome(release_system_holders(&holders));
-    if matches!(
-        outcome,
-        ShortcutReleaseDto::Applied | ShortcutReleaseDto::NeedsLogout
-    ) {
-        released.remember(&holders);
-    }
-    outcome
+pub async fn free_summoning_shortcut<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<ShortcutReleaseDto, String> {
+    let active: crate::hotkey::ActiveShortcut = managed(&app)?;
+    let released: crate::hotkey::ReleasedSystemHotkeys = managed(&app)?;
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        let holders = system_holders(&active.get());
+        if holders.is_empty() {
+            return ShortcutReleaseDto::AlreadyFree;
+        }
+        let outcome = release_outcome(release_system_holders(&holders));
+        if matches!(
+            outcome,
+            ShortcutReleaseDto::Applied | ShortcutReleaseDto::NeedsLogout
+        ) {
+            released.remember(&holders);
+        }
+        outcome
+    })
+    .await
+    .unwrap_or(ShortcutReleaseDto::Refused))
 }
 
 /// Hands the system back what `free_summoning_shortcut` took.
 #[tauri::command(rename_all = "camelCase")]
-pub fn restore_system_shortcut(
-    released: tauri::State<'_, crate::hotkey::ReleasedSystemHotkeys>,
-) -> ShortcutReleaseDto {
-    let ids = released.get();
-    if ids.is_empty() {
-        return ShortcutReleaseDto::AlreadyFree;
-    }
-    let outcome = release_outcome(restore_system_holders(&ids));
-    if matches!(
-        outcome,
-        ShortcutReleaseDto::Applied | ShortcutReleaseDto::NeedsLogout
-    ) {
-        released.forget();
-    }
-    outcome
+pub async fn restore_system_shortcut<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<ShortcutReleaseDto, String> {
+    let released: crate::hotkey::ReleasedSystemHotkeys = managed(&app)?;
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        let ids = released.get();
+        if ids.is_empty() {
+            return ShortcutReleaseDto::AlreadyFree;
+        }
+        let outcome = release_outcome(restore_system_holders(&ids));
+        if matches!(
+            outcome,
+            ShortcutReleaseDto::Applied | ShortcutReleaseDto::NeedsLogout
+        ) {
+            released.forget();
+        }
+        outcome
+    })
+    .await
+    .unwrap_or(ShortcutReleaseDto::Refused))
 }
 
 /// Opens the Keyboard shortcut list in System Settings, on request.
@@ -1577,6 +1617,18 @@ pub fn retention_days(store: &StoreHandle) -> Option<u16> {
     get_settings_blocking(store)
         .ok()
         .and_then(|settings| settings.retention_days)
+}
+
+/// The settings row as a launch applies it, read once.
+///
+/// Startup used to read the row three times over — for the Dock tile, the
+/// summoning shortcut and the snap map — each through its own connection,
+/// on the main thread, while the palette waited to be drawn. An unreadable
+/// row falls back to the defaults, which are exactly the fallbacks each of
+/// those reads chose on its own: no tile, the built-in shortcut, the default
+/// snaps.
+pub fn launch_settings(store: &StoreHandle) -> AppSettingsDto {
+    get_settings_blocking(store).unwrap_or_default()
 }
 
 /// The shortcut the user chose, for a launch that has to register one.

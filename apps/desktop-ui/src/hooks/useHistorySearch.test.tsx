@@ -154,22 +154,17 @@ describe('useHistorySearch', () => {
     expect(result.current).not.toHaveProperty('error');
   });
 
-  it('debounces an empty default-history request for exactly 150 ms and bounds it', async () => {
+  it('sends the first, empty request at once and bounds it', async () => {
+    // Nothing is on screen yet and nothing has been typed: a debounce here
+    // would only be 150 ms of empty palette at every launch.
     const request = deferred<HistoryPage>();
     const search = vi.fn<ClipboardGateway['search']>(() => request.promise);
     const gateway = gatewayWithSearch(search);
     const { result } = renderHook(() => useHistorySearch(gateway));
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(149);
-    });
-    expect(search).not.toHaveBeenCalled();
-    expect(result.current.status).toBe('loading');
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1);
-    });
+    expect(search).toHaveBeenCalledTimes(1);
     expect(search).toHaveBeenCalledWith({ query: '', limit: 80, cursor: null });
+    expect(result.current.status).toBe('loading');
 
     await act(async () => {
       request.resolve({ items: [], nextCursor: null, rankedTruncated: false });
@@ -177,6 +172,36 @@ describe('useHistorySearch', () => {
     });
     expect(result.current.status).toBe('ready');
     expect(result.current.items).toEqual([]);
+  });
+
+  it('debounces every request after the first answer for exactly 150 ms', async () => {
+    const search = vi.fn<ClipboardGateway['search']>(async () => makePage('rows'));
+    const gateway = gatewayWithSearch(search);
+    const { result } = renderHook(() => useHistorySearch(gateway));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.status).toBe('ready');
+    search.mockClear();
+
+    // Clearing the field back to empty is typing like any other keystroke,
+    // so it waits too.
+    act(() => {
+      result.current.setQuery('a');
+    });
+    act(() => {
+      result.current.setQuery('');
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(149);
+    });
+    expect(search).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(search).toHaveBeenCalledWith({ query: '', limit: 80, cursor: null });
   });
 
   it('keeps the results on screen while a newer query is on its way', async () => {
@@ -319,9 +344,16 @@ describe('useHistorySearch', () => {
   });
 
   it('clears a pending debounce when unmounted', async () => {
-    const search = vi.fn<ClipboardGateway['search']>();
+    const search = vi.fn<ClipboardGateway['search']>(async () => makePage('rows'));
     const gateway = gatewayWithSearch(search);
-    const { unmount } = renderHook(() => useHistorySearch(gateway));
+    const { result, unmount } = renderHook(() => useHistorySearch(gateway));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => {
+      result.current.setQuery('pending');
+    });
+    search.mockClear();
 
     unmount();
     await vi.advanceTimersByTimeAsync(150);

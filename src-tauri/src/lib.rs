@@ -4,9 +4,11 @@ pub mod export;
 pub mod hotkey;
 pub mod keyvault;
 pub mod links;
+pub mod log;
 pub mod maintenance;
 pub mod monitor;
 pub mod snap;
+pub mod startup;
 pub mod state;
 pub mod tray;
 pub mod updater;
@@ -50,7 +52,12 @@ pub fn run() {
     // restart. The running instance is told instead, and answers the way a
     // click on its Dock tile is answered: with the palette.
     if single_instance_enabled() {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // A second launch by the login item — the user already had Trove
+            // open when they logged in — is as quiet as a first one.
+            if startup::launched_at_login(&argv) {
+                return;
+            }
             // The plugin calls this from a task on the async runtime, and
             // summoning the palette reads the frontmost application and moves
             // a window, both of which belong on the main thread.
@@ -60,9 +67,11 @@ pub fn run() {
     }
     builder
         .plugin(tauri_plugin_dialog::init())
+        // The login item passes an argument so the launch it causes can stay
+        // quiet: at login the menu bar item is all anyone expects to appear.
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![startup::AUTOSTART_ARG]),
         ))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -70,23 +79,48 @@ pub fn run() {
         .setup(|app| {
             // Before the data directory is resolved, because resolving it can
             // move the legacy directory, and that is already writing to the
-            // history.
-            let lock_path = state::instance_lock_path(app.handle())?;
-            match state::InstanceLock::acquire(&lock_path, state::INSTANCE_LOCK_WAIT) {
-                Ok(lock) => {
-                    app.manage(lock);
+            // history. No step here may use `?`: an error returned from setup
+            // becomes a panic nobody sees.
+            match state::instance_lock_path(app.handle()) {
+                Ok(lock_path) => {
+                    match state::InstanceLock::acquire(&lock_path, state::INSTANCE_LOCK_WAIT) {
+                        Ok(lock) => {
+                            app.manage(lock);
+                        }
+                        // Another instance is not a failure worth an alert:
+                        // the one already running is the answer.
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            log::log_line("another instance is already running");
+                            std::process::exit(0);
+                        }
+                        // A lock file that cannot be opened is not another
+                        // instance, and refusing to start over it would take
+                        // the history away over a guard. The single-instance
+                        // plugin still stands.
+                        Err(error) => {
+                            log::log_line(&format!("instance lock unavailable ({error})"))
+                        }
+                    }
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    eprintln!("trove: another instance is already running");
-                    std::process::exit(0);
-                }
-                // A lock file that cannot be opened is not another instance,
-                // and refusing to start over it would take the history away
-                // over a guard. The single-instance plugin still stands.
-                Err(error) => eprintln!("trove: instance lock unavailable ({error})"),
+                // Likewise for a lock path that cannot be worked out: if the
+                // data directory itself is the problem, opening it below
+                // fails too, and that failure is the one explained.
+                Err(error) => log::log_line(&format!("instance lock unavailable ({error:#})")),
             }
-            let data_dir = state::resolve_data_dir(app.handle())?;
-            let app_state = state::AppState::open_data_dir(data_dir)?;
+            // A data folder that cannot be opened ends the launch, but not as
+            // an error returned from here: Tauri turns that into a panic, and
+            // with no Dock tile and no window yet the person would see nothing
+            // happen at all. `refuse_to_start` logs, explains and exits.
+            let data_dir = match state::resolve_data_dir(app.handle()) {
+                Ok(dir) => dir,
+                Err(error) => startup::refuse_to_start(&error, None),
+            };
+            let app_state = match state::AppState::open_data_dir(&data_dir) {
+                Ok(app_state) => app_state,
+                Err(error) => startup::refuse_to_start(&error, Some(&data_dir)),
+            };
+            // Read once, for everything below that depends on it.
+            let settings = commands::launch_settings(&app_state.store);
             // The menu bar is where this application exists on screen, so it
             // starts with no Dock tile unless the settings row asks for one.
             // `LSUIElement` in Info.plist is what stops the tile appearing
@@ -95,9 +129,7 @@ pub fn run() {
             // that applies the preference at all under `pnpm tauri dev`,
             // where there is no bundle to read the plist from.
             #[cfg(target_os = "macos")]
-            let _ = app
-                .handle()
-                .set_dock_visibility(commands::dock_icon_enabled(&app_state.store));
+            let _ = app.handle().set_dock_visibility(settings.dock_icon);
             let purge_store = app_state.store.clone();
             tauri::async_runtime::spawn(async move {
                 purge_retired_settings(&purge_store).await;
@@ -106,13 +138,11 @@ pub fn run() {
             // to register the default unconditionally, so a shortcut changed in
             // settings answered until the application was closed and then
             // reverted without saying so.
-            let shortcut =
-                hotkey::shortcut_for_launch(commands::stored_hotkey(&app_state.store).as_deref());
+            let shortcut = hotkey::shortcut_for_launch(Some(settings.hotkey.as_str()));
             // The snap shortcuts ride along with the summoning one: read from
             // the same settings row, registered the same way, remembered so a
-            // save knows what to take down. Read before the state is managed,
-            // which is where the store moves.
-            let snap_map = commands::snap_shortcuts(&app_state.store);
+            // save knows what to take down.
+            let snap_map = settings.snap_shortcuts;
             app.manage(app_state);
             let active = hotkey::ActiveShortcut::new(shortcut);
             // A shortcut another application already holds is a degraded state,
@@ -121,7 +151,7 @@ pub fn run() {
             // answer is recorded where the settings screen can read it.
             match hotkey::install(app.handle(), shortcut) {
                 Ok(()) => active.set_registered(true),
-                Err(_) => eprintln!("trove: global shortcut unavailable"),
+                Err(error) => log::log_line(&format!("global shortcut unavailable ({error})")),
             }
             app.manage(active);
             let active_snap = snap::ActiveSnapShortcuts::new(snap_map.clone());
@@ -137,15 +167,23 @@ pub fn run() {
             // where the application exists on screen. Failing to place it there
             // is not a reason to refuse to start.
             if let Err(error) = tray::install(app.handle(), control.clone()) {
-                eprintln!("trove: menu bar item unavailable ({error})");
+                log::log_line(&format!("menu bar item unavailable ({error})"));
             }
             monitor::start(app.handle(), control);
             maintenance::start(app.handle());
-            // A window that never becomes key is never composited: launched
-            // without being activated, the palette stayed a blank rectangle
-            // until something brought it forward. Asking for focus once at
-            // startup is what a manually launched application does anyway.
-            hotkey::show_palette(app.handle());
+            // Login items written before the quiet-launch argument existed
+            // would go on showing the palette at every login; this brings
+            // them up to date in the background.
+            startup::refresh_login_item(app.handle());
+            // The palette starts hidden (`visible: false`), so nothing sits
+            // on screen as a blank rectangle while the store opens. A manual
+            // launch then shows it: a window that never becomes key is never
+            // composited, and asking for focus once is what a manually
+            // launched application does anyway. A launch at login does not —
+            // the menu bar item is the whole of its arrival.
+            if !startup::launched_at_login(std::env::args()) {
+                hotkey::show_palette(app.handle());
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
