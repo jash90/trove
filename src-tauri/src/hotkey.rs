@@ -7,9 +7,10 @@
 //! mouse or Escape.
 
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicI32, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -36,12 +37,10 @@ const CHAT_WINDOW: &str = "chat";
 /// and doing that on top of the list meant the list could not be consulted
 /// while doing it.
 pub fn show_settings<R: Runtime>(app: &AppHandle<R>) {
-    let Some(window) = app.get_webview_window(SETTINGS_WINDOW) else {
-        return;
-    };
-    let _ = window.show();
-    let _ = window.unminimize();
-    let _ = window.set_focus();
+    // Floating again: it is dropped to the ordinary level whenever the user
+    // leaves for another application (`settle_settings_level`), and asking
+    // for it is asking for it in front.
+    present(app, SETTINGS_WINDOW, Some(Float::Above));
     // The palette stays open — it only stops floating: the window just
     // opened is focused and renders above it.
     put_palette_below(app);
@@ -61,13 +60,155 @@ pub const OPEN_SETTINGS_TAB_EVENT: &str = "open-settings-tab";
 
 /// Brings the chat window up, wherever it was last left.
 pub fn show_chat<R: Runtime>(app: &AppHandle<R>) {
-    let Some(window) = app.get_webview_window(CHAT_WINDOW) else {
+    // Its level is left alone: the chat window is configured not to float,
+    // and nothing here changes that.
+    present(app, CHAT_WINDOW, None);
+    put_palette_below(app);
+}
+
+/// What a summoned window's level should be once it is in front.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Float {
+    /// Above other applications' windows.
+    Above,
+    /// The ordinary level, among everyone else's windows.
+    Among,
+}
+
+/// Brings one of this application's windows forward, on the user's Space and
+/// screen, at the level asked for — in that order and in one go.
+///
+/// One main-thread closure on purpose. The runtime's level setter is queued
+/// rather than applied, while showing and focusing are applied at once, so a
+/// window raised that way was ordered in at the normal level and floated a
+/// beat later: the palette flashed underneath the settings window it had been
+/// sunk below. Everything here runs on the main thread in sequence, so the
+/// window is already at its level by the time it is ordered in.
+fn present<R: Runtime>(app: &AppHandle<R>, label: &'static str, float: Option<Float>) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window(label) else {
+            return;
+        };
+        prepare_for_summon(&window, float);
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    });
+}
+
+/// The window-server half of a summon: Space, screen and level.
+///
+/// Called on the main thread only, from `present`.
+#[cfg(target_os = "macos")]
+fn prepare_for_summon<R: Runtime>(window: &tauri::WebviewWindow<R>, float: Option<Float>) {
+    use platform_macos::summon;
+    let Ok(ns_window) = window.ns_window() else {
         return;
     };
-    let _ = window.show();
-    let _ = window.unminimize();
-    let _ = window.set_focus();
-    put_palette_below(app);
+    // SAFETY: the pointer is this window's own NSWindow, alive for as long
+    // as the window is, and `present` only calls this on the main thread.
+    unsafe {
+        summon::follow_active_space(ns_window);
+        summon::move_to_pointer_screen(ns_window);
+        if let Some(float) = float {
+            summon::set_level(ns_window, level_for(float));
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prepare_for_summon<R: Runtime>(window: &tauri::WebviewWindow<R>, float: Option<Float>) {
+    if let Some(float) = float {
+        let _ = window.set_always_on_top(float == Float::Above);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn level_for(float: Float) -> platform_macos::summon::Level {
+    match float {
+        Float::Above => platform_macos::summon::Level::Floating,
+        Float::Among => platform_macos::summon::Level::Normal,
+    }
+}
+
+/// Sets a window's level from any thread, applied on the main thread.
+fn set_float<R: Runtime>(app: &AppHandle<R>, label: &'static str, float: Float) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window(label) else {
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        if let Ok(ns_window) = window.ns_window() {
+            // SAFETY: this window's own NSWindow, on the main thread.
+            unsafe {
+                platform_macos::summon::set_level(ns_window, level_for(float));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = window.set_always_on_top(float == Float::Above);
+    });
+}
+
+/// Answers a click on the Dock tile.
+///
+/// The tile has to summon something, or it is a button that does nothing —
+/// but not always the palette. With the chat or the settings window open, the
+/// click is a way back to that window; floating the palette over it instead
+/// covered the thing the user was trying to return to.
+pub fn reopen<R: Runtime>(app: &AppHandle<R>) {
+    let visible = |label| {
+        app.get_webview_window(label)
+            .is_some_and(|window| window.is_visible().unwrap_or(false))
+    };
+    if visible(CHAT_WINDOW) {
+        show_chat(app);
+    } else if visible(SETTINGS_WINDOW) {
+        show_settings(app);
+    } else {
+        show_palette(app);
+    }
+}
+
+/// How long the window server is given to settle focus before the settings
+/// window's level is decided. Focus moving between two of this application's
+/// windows passes through a moment where neither is key.
+const FOCUS_SETTLE: Duration = Duration::from_millis(200);
+
+/// Reacts to one of this application's windows gaining or losing focus.
+pub fn window_focus_changed<R: Runtime>(window: &tauri::Window<R>, focused: bool) {
+    let app = window.app_handle();
+    match (window.label(), focused) {
+        // The palette entered by a click — not by its shortcut — still owes
+        // its snaps the window the user was last working in, so coming
+        // forward is when the target is remembered.
+        (PALETTE_WINDOW, true) => remember_target_on_focus(app),
+        (SETTINGS_WINDOW, false) => settle_settings_level(app),
+        _ => {}
+    }
+}
+
+/// Stops the settings window floating once the user has gone elsewhere.
+///
+/// It floats so that, opened over the palette, it is not hidden behind it.
+/// Left floating, it stayed above every other application too — a settings
+/// window hovering over the browser the user had switched to. So it sinks to
+/// the ordinary level when focus has left this application altogether, and
+/// `show_settings` floats it again the next time it is asked for. Focus moving
+/// to the palette or the chat window is not leaving, and changes nothing.
+fn settle_settings_level<R: Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(FOCUS_SETTLE).await;
+        let ours_focused = [PALETTE_WINDOW, SETTINGS_WINDOW, CHAT_WINDOW]
+            .into_iter()
+            .filter_map(|label| app.get_webview_window(label))
+            .any(|window| window.is_focused().unwrap_or(false));
+        if !ours_focused {
+            set_float(&app, SETTINGS_WINDOW, Float::Among);
+        }
+    });
 }
 
 /// Puts the palette at the bottom of this application's windows.
@@ -79,9 +220,7 @@ pub fn show_chat<R: Runtime>(app: &AppHandle<R>) {
 /// and visible, and the focused destination renders above it. Summoning
 /// the palette re-floats it — an overlay asked for is an overlay again.
 fn put_palette_below<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(palette) = app.get_webview_window(PALETTE_WINDOW) {
-        let _ = palette.set_always_on_top(false);
-    }
+    set_float(app, PALETTE_WINDOW, Float::Among);
 }
 
 /// The window the user was working in before the palette appeared.
@@ -128,6 +267,95 @@ impl PasteTarget {
     pub fn forget(&self) {
         self.pid.store(0, Ordering::Relaxed);
     }
+
+    /// Records the window-server guess made when the palette gains focus, if
+    /// that guess should stand — see `focus_target_update`.
+    pub fn remember_on_focus(&self, guess: Option<i32>, since_summon: Option<Duration>) {
+        if let Some(pid) = focus_target_update(self.current(), guess, since_summon) {
+            self.remember(Some(pid));
+        }
+    }
+}
+
+/// How long after a summon the palette gaining focus is the summon's own doing.
+///
+/// Generous on purpose: activation is a request the window server answers
+/// when it gets to it, and a focus event that lands after this is a click.
+const SUMMON_FOCUS_WINDOW: Duration = Duration::from_millis(1000);
+
+/// What, if anything, the palette gaining focus should record as the target.
+///
+/// The summon records the frontmost application exactly, before the palette
+/// takes the front; the focus event that follows can only guess from the
+/// window server's z-order, and used to overwrite the exact answer with the
+/// guess — or with nothing at all, stored as an empty target. So the guess
+/// only stands where there is nothing better: when no target is recorded, or
+/// when the summon is long past and this focus is a click into a palette left
+/// standing while the user worked somewhere else. And an empty guess never
+/// erases a target.
+pub fn focus_target_update(
+    recorded: Option<i32>,
+    guess: Option<i32>,
+    since_summon: Option<Duration>,
+) -> Option<i32> {
+    let guess = guess.filter(|pid| *pid > 0)?;
+    let summon_is_fresh = since_summon.is_some_and(|elapsed| elapsed < SUMMON_FOCUS_WINDOW);
+    match recorded {
+        Some(_) if summon_is_fresh => None,
+        _ => Some(guess),
+    }
+}
+
+/// How soon after a summon the shortcut pressed again means "put it away".
+///
+/// Activation is not instant: pressed twice quickly, the second press arrived
+/// while the palette was on screen but not yet key, read as "buried behind
+/// something" and summoned it again instead of hiding it.
+const DOUBLE_PRESS: Duration = Duration::from_millis(300);
+
+/// What the shortcut does, given the state of the palette.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Toggle {
+    Show,
+    Hide,
+}
+
+/// Decides what a press of the summoning shortcut does.
+///
+/// A window can be visible but buried behind other applications. Treating
+/// that as "already open" would hide it just as the user asked to see it, so
+/// the shortcut only puts it away when it is genuinely in front — or when it
+/// was summoned so recently that it has not had the chance to be.
+pub fn toggle_decision(
+    visible: bool,
+    focused: bool,
+    since_last_summon: Option<Duration>,
+) -> Toggle {
+    if !visible {
+        return Toggle::Show;
+    }
+    if focused || since_last_summon.is_some_and(|elapsed| elapsed < DOUBLE_PRESS) {
+        Toggle::Hide
+    } else {
+        Toggle::Show
+    }
+}
+
+/// When the palette was last summoned. Process-wide because there is one
+/// palette, and every way of summoning it goes through `show_palette`.
+static LAST_SUMMON: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn mark_summoned() {
+    if let Ok(mut last) = LAST_SUMMON.lock() {
+        *last = Some(Instant::now());
+    }
+}
+
+fn since_last_summon() -> Option<Duration> {
+    LAST_SUMMON
+        .lock()
+        .ok()
+        .and_then(|last| last.map(|at| at.elapsed()))
 }
 
 /// Whether the system has already been asked for Accessibility permission.
@@ -327,17 +555,21 @@ pub fn toggle_palette<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = app.get_webview_window(PALETTE_WINDOW) else {
         return;
     };
-    // A window can be visible but buried behind other applications. Treating
-    // that as "already open" would hide it just as the user asked to see it,
-    // so the shortcut only puts it away when it is genuinely in front.
-    let is_frontmost = window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false);
-    if is_frontmost {
-        let _ = window.hide();
-        forget_paste_target(app);
-        return;
+    let decision = toggle_decision(
+        window.is_visible().unwrap_or(false),
+        window.is_focused().unwrap_or(false),
+        since_last_summon(),
+    );
+    match decision {
+        Toggle::Hide => hide_palette(app),
+        Toggle::Show => show_palette(app),
     }
-    show_palette(app);
 }
+
+/// Tells the palette's interface it has just been summoned, as opposed to
+/// merely refocused: the query is selected so typing replaces it, and the view
+/// goes back to its categories.
+pub const PALETTE_SUMMONED_EVENT: &str = "palette-summoned";
 
 /// Brings the palette up, recording where the user was on the way in.
 ///
@@ -345,18 +577,55 @@ pub fn toggle_palette<R: Runtime>(app: &AppHandle<R>) {
 /// item had its own copy that skipped the recording, so a palette opened from
 /// the menu had nothing to paste into and Enter could only copy.
 pub fn show_palette<R: Runtime>(app: &AppHandle<R>) {
-    let Some(window) = app.get_webview_window(PALETTE_WINDOW) else {
+    if app.get_webview_window(PALETTE_WINDOW).is_none() {
         return;
-    };
+    }
     if let Some(target) = app.try_state::<PasteTarget>() {
         target.remember(current_frontmost_pid());
     }
+    mark_summoned();
     // Summoning is asking for the overlay: it floats again, over whatever
-    // it was sunk beneath when a working window opened.
-    let _ = window.set_always_on_top(true);
-    let _ = window.show();
-    let _ = window.set_focus();
+    // it was sunk beneath when a working window opened — on the Space and the
+    // screen the user is on, not wherever it was last left.
+    present(app, PALETTE_WINDOW, Some(Float::Above));
+    let _ = app.emit_to(PALETTE_WINDOW, PALETTE_SUMMONED_EVENT, ());
 }
+
+/// Puts the palette away and hands the front back to where the user was.
+///
+/// Hiding our window does not hand activation back — an application with no
+/// window on screen stays the active one — so the keyboard went nowhere until
+/// the user clicked something. The application recorded on the way in is
+/// asked for the front explicitly, the same way a paste asks for it.
+pub fn hide_palette<R: Runtime>(app: &AppHandle<R>) {
+    let target = app
+        .try_state::<PasteTarget>()
+        .and_then(|target| target.current());
+    put_palette_away(app);
+    if let Some(pid) = target.filter(|pid| *pid != std::process::id() as i32) {
+        activate(pid);
+    }
+}
+
+/// Hides the palette and drops its target, without activating anything.
+///
+/// For when something else is about to take the front on its own — an
+/// application being launched — and handing it to the previous target would
+/// put that window in front of the one the user asked for.
+pub fn put_palette_away<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window(PALETTE_WINDOW) {
+        let _ = window.hide();
+    }
+    forget_paste_target(app);
+}
+
+#[cfg(target_os = "macos")]
+fn activate(pid: i32) {
+    platform_macos::activate_pid(pid);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate(_pid: i32) {}
 
 /// Clears the recorded paste target, for when the palette goes away.
 pub fn forget_paste_target<R: Runtime>(app: &AppHandle<R>) {
@@ -371,9 +640,12 @@ pub fn forget_paste_target<R: Runtime>(app: &AppHandle<R>) {
 /// summons it — because a click into the floating palette owes its snaps
 /// the same target a summon would record: the window the user was last
 /// working in, whoever they touched most recently before this window rose.
+///
+/// A guess, though, and the summon's own record is not: see
+/// `focus_target_update` for when the guess is allowed to stand.
 pub fn remember_target_on_focus<R: Runtime>(app: &AppHandle<R>) {
     if let Some(target) = app.try_state::<PasteTarget>() {
-        target.remember(last_active_before_us());
+        target.remember_on_focus(last_active_before_us(), since_last_summon());
     }
 }
 
@@ -410,9 +682,10 @@ pub fn hide_instead_of_closing<R: Runtime>(
 ) {
     if should_hide_instead_of_closing(window.label()) {
         api.prevent_close();
-        let _ = window.hide();
         if window.label() == PALETTE_WINDOW {
-            forget_paste_target(&window.app_handle().clone());
+            hide_palette(window.app_handle());
+        } else {
+            let _ = window.hide();
         }
     }
 }
@@ -476,6 +749,69 @@ mod tests {
         target.remember(Some(4242));
         target.remember(None);
         assert_eq!(target.current(), None);
+    }
+
+    #[test]
+    fn the_shortcut_hides_a_palette_in_front_and_shows_one_that_is_not() {
+        assert_eq!(toggle_decision(false, false, None), Toggle::Show);
+        assert_eq!(toggle_decision(true, true, None), Toggle::Hide);
+        // Visible but behind another application: the press asks to see it.
+        let long_ago = Some(Duration::from_secs(30));
+        assert_eq!(toggle_decision(true, false, long_ago), Toggle::Show);
+        assert_eq!(toggle_decision(true, false, None), Toggle::Show);
+    }
+
+    #[test]
+    fn a_quick_second_press_hides_the_palette_before_it_has_become_key() {
+        // Pressed twice in quick succession, the second press arrived while the
+        // palette was on screen but activation had not landed yet, and it was
+        // summoned again instead of put away.
+        let just_now = Some(Duration::from_millis(120));
+        assert_eq!(toggle_decision(true, false, just_now), Toggle::Hide);
+        // Not for a palette that is not on screen at all.
+        assert_eq!(toggle_decision(false, false, just_now), Toggle::Show);
+    }
+
+    #[test]
+    fn the_focus_after_a_summon_does_not_overwrite_what_the_summon_recorded() {
+        // The summon records the frontmost application exactly; the focus
+        // event right after it can only guess from the z-order.
+        let fresh = Some(Duration::from_millis(50));
+        assert_eq!(focus_target_update(Some(4242), Some(777), fresh), None);
+
+        let target = PasteTarget::new();
+        target.remember(Some(4242));
+        target.remember_on_focus(Some(777), fresh);
+        assert_eq!(target.current(), Some(4242));
+    }
+
+    #[test]
+    fn an_empty_guess_never_erases_a_target() {
+        let stale = Some(Duration::from_secs(30));
+        assert_eq!(focus_target_update(Some(4242), None, stale), None);
+        assert_eq!(focus_target_update(Some(4242), Some(0), stale), None);
+
+        let target = PasteTarget::new();
+        target.remember(Some(4242));
+        target.remember_on_focus(None, stale);
+        assert_eq!(target.current(), Some(4242));
+    }
+
+    #[test]
+    fn the_guess_fills_an_empty_target_and_follows_a_click_long_after_the_summon() {
+        // Nothing recorded — a fresh launch that activated itself — so the
+        // guess is the best answer there is, however recent the summon.
+        assert_eq!(
+            focus_target_update(None, Some(777), Some(Duration::from_millis(50))),
+            Some(777)
+        );
+        // A click into a palette left standing while the user worked
+        // elsewhere: the summon's record is the stale one now.
+        assert_eq!(
+            focus_target_update(Some(4242), Some(777), Some(Duration::from_secs(30))),
+            Some(777)
+        );
+        assert_eq!(focus_target_update(Some(4242), Some(777), None), Some(777));
     }
 
     #[test]

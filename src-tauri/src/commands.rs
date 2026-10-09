@@ -71,6 +71,7 @@ macro_rules! trove_command_registry {
             save_chat_settings => $crate::commands::save_chat_settings,
             open_chat_window => $crate::commands::open_chat_window,
             snap_window => $crate::snap::snap_window,
+            hide_palette => $crate::commands::hide_palette,
             check_for_update => $crate::updater::check_for_update,
             install_update => $crate::updater::install_update,
         }
@@ -598,11 +599,23 @@ pub async fn launch_app<R: tauri::Runtime>(
     launch_app_service(state.inner(), path).await?;
     // The application the user picked is starting; leaving the palette in
     // front of it would put a window between them and what they asked for.
-    // Hidden, not closed — closing is the Quit item's job and only its.
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
+    // Hidden, not closed — closing is the Quit item's job and only its. And
+    // the front is not handed back to where the user was: the application
+    // being launched takes it, and the previous one would land on top of it.
+    crate::hotkey::put_palette_away(&app);
     Ok(())
+}
+
+/// Puts the palette away from its own interface — Escape's last step, the
+/// summoning shortcut pressed inside it, a finished snap — and hands the front
+/// back to the window the user was working in.
+///
+/// The interface used to hide its window itself, which left this application
+/// active with nothing on screen and the keyboard going nowhere, and left the
+/// paste target in place for a summon it no longer belonged to.
+#[tauri::command(rename_all = "camelCase")]
+pub fn hide_palette<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    crate::hotkey::hide_palette(&app);
 }
 
 /// The side an application icon is rendered to. Double the ~31 CSS pixels
@@ -782,9 +795,12 @@ async fn paste_into_previous_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>
     // entry is on the clipboard whatever happens next, and a palette left
     // standing in front of the window the user meant to paste into is a worse
     // answer than a refusal they can read once they come back.
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
+    //
+    // Through `hide_palette`, so a refusal still returns the front to where
+    // the user was and the target does not outlive the summon it belonged
+    // to. The pid was read above, and the paste below asks for the front
+    // again before it types: being asked twice is harmless.
+    crate::hotkey::hide_palette(app);
     match paste_readiness(target) {
         Some(mode) => {
             if mode == CopyModeDto::CopiedOnlyPermissionRequired {
@@ -1738,7 +1754,22 @@ pub async fn save_settings_with_app<R: tauri::Runtime>(
     // loop rather than touching `NSApp` here, so the activation-policy change
     // lands on the main thread without a `run_on_main_thread` wrapper.
     #[cfg(target_os = "macos")]
-    let _ = app.set_dock_visibility(stored.dock_icon);
+    {
+        let _ = app.set_dock_visibility(stored.dock_icon);
+        // Hiding the tile turns this into an accessory application, and the
+        // policy change can take key status from the window the user is
+        // typing in — the settings window the checkbox lives in. Asked for
+        // again afterwards; both requests travel the same event-loop queue,
+        // so this one lands after the policy change.
+        //
+        // Only a window on screen: focusing orders a window in, and a save
+        // from anywhere else must not conjure the settings up.
+        if let Some(settings) = app.get_webview_window("settings")
+            && settings.is_visible().unwrap_or(false)
+        {
+            let _ = settings.set_focus();
+        }
+    }
     // The snap shortcuts are registered with the system exactly like the
     // summoning one, so saving swaps them live rather than at next launch.
     if let Some(active_snap) = app.try_state::<crate::snap::ActiveSnapShortcuts>() {

@@ -190,14 +190,8 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 hotkey::hide_instead_of_closing(window, api);
             }
-            // The palette entered by a click — not by its shortcut — still
-            // owes its snaps the window the user was last working in, so
-            // coming forward is when the target is remembered.
-            if let tauri::WindowEvent::Focused(focused) = event
-                && *focused
-                && window.label() == "main"
-            {
-                hotkey::remember_target_on_focus(window.app_handle());
+            if let tauri::WindowEvent::Focused(focused) = event {
+                hotkey::window_focus_changed(window, *focused);
             }
         })
         .invoke_handler(commands::invoke_handler())
@@ -205,12 +199,11 @@ pub fn run() {
         .expect("error while building Trove")
         .run(|app, event| {
             // Clicking the Dock tile has to summon something, or the tile is
-            // a button that does nothing. macOS sends this when the tile is
-            // clicked with no window on screen, and the palette is what the
-            // click is asking for.
+            // a button that does nothing. Which window it brings back is
+            // `hotkey::reopen`'s to decide.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
-                hotkey::show_palette(app);
+                hotkey::reopen(app);
             }
             // Neither parameter is read off macOS, and the workspace builds
             // with `-D warnings`.
