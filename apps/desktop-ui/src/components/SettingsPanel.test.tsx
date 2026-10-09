@@ -560,7 +560,9 @@ describe("Settings page and storage semantics", () => {
     expect(
       screen.getByText(/saving changes the active shortcut immediately/i),
     ).toBeVisible();
-    expect(hotkey).toHaveFocus();
+    // Focus moves in a passive effect after the settings arrive, which a busy
+    // test run can flush a tick after the field first appears.
+    await waitFor(() => expect(hotkey).toHaveFocus());
     expect(
       screen.getByRole("button", { name: "Close settings" }),
     ).toBeVisible();
