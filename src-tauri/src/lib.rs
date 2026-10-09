@@ -9,6 +9,7 @@ pub mod monitor;
 pub mod snap;
 pub mod state;
 pub mod tray;
+pub mod updater;
 
 use tauri::Manager;
 
@@ -35,6 +36,7 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_dir = state::resolve_data_dir(app.handle())?;
             let app_state = state::AppState::open_data_dir(data_dir)?;
@@ -81,6 +83,7 @@ pub fn run() {
             app.manage(hotkey::ReleasedSystemHotkeys::new());
             app.manage(hotkey::PasteTarget::new());
             app.manage(hotkey::PastePrompt::new());
+            app.manage(updater::PendingUpdate::default());
             let control = monitor::MonitorControl::new();
             app.manage(control.clone());
             // The window spends most of its life hidden, so the menu bar is

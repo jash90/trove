@@ -32,6 +32,7 @@ import type { ClipboardGateway } from "../lib/gateway";
 import { SNAP_SHORTCUTS, defaultSnapShortcuts } from "../lib/snapShortcuts";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { StorageStats } from "./StorageStats";
+import { UpdatesSection } from "./UpdatesSection";
 
 const MAX_DENYLIST_ENTRIES = 200;
 const MAX_DENYLIST_ENTRY_BYTES = 256;
@@ -263,6 +264,10 @@ const SETTINGS_TABS: readonly SettingsTab[] = [
   { id: "export", label: "Export" },
 ];
 
+/// Last, because it is reached for least, and only where there is an application to replace —
+/// the browser preview has none.
+const UPDATES_TAB: SettingsTab = { id: "updates", label: "Updates" };
+
 export const expiryLabel = (
   expiresAt: number | null,
   now: number,
@@ -429,6 +434,27 @@ export const SettingsPanel = ({
       setShortcutBusy(false);
     }
   };
+  const { checkForUpdate, installUpdate, onOpenSettingsTab } = gateway;
+  const updates =
+    checkForUpdate && installUpdate
+      ? {
+          checkForUpdate: checkForUpdate.bind(gateway),
+          installUpdate: installUpdate.bind(gateway),
+        }
+      : null;
+  const tabs = updates ? [...SETTINGS_TABS, UPDATES_TAB] : SETTINGS_TABS;
+
+  // The menu bar's "Check for updates…" lands here: it opens this window and
+  // names the tab, and the answer lives on that tab.
+  useEffect(
+    () =>
+      onOpenSettingsTab?.call(gateway, (tab) => {
+        if (tabs.some((candidate) => candidate.id === tab)) setActiveTab(tab);
+      }),
+    // `tabs` is derived from the gateway alone, so the gateway is the dependency.
+    [gateway],
+  );
+
   // Its own window now, so the first field takes focus when the settings
   // arrive — no trap to build, because there is nothing behind it to escape to.
   useEffect(() => {
@@ -812,7 +838,7 @@ export const SettingsPanel = ({
             ) : null}
 
             <SettingsTabs
-              tabs={SETTINGS_TABS}
+              tabs={tabs}
               active={activeTab}
               onSelect={setActiveTab}
             />
@@ -1387,6 +1413,10 @@ export const SettingsPanel = ({
                     </p>
                   ) : null}
                 </section>
+              ) : null}
+
+              {activeTab === "updates" && updates ? (
+                <UpdatesSection gateway={updates} />
               ) : null}
             </div>
 

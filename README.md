@@ -7,8 +7,9 @@ every other asset are bundled locally.
 **Two deliberate exceptions:** the preview of a link entry fetches the page's
 title and icon (turnable off in settings — see "Link previews" below), and the
 optional keyvault pane reads your own secret vault when you configure it —
-see "Keyvault" below. Apart from those, the application makes no network
-requests at all.
+see "Keyvault" below. Checking for a new release is a third, and happens only
+when you press **Check for updates** — see "Updates" below. Apart from those,
+the application makes no network requests at all.
 
 ## Status
 
@@ -214,8 +215,37 @@ grep -rEoh 'https?://[^"'"'"' )]*' apps/desktop-ui/dist \
   | grep -v 'www\.w3\.org' | grep -v 'api\.openai\.com' | sort -u
 ```
 
-Installer signing is out of scope for the first release — which is why the build
-stops at `--no-bundle`.
+CI stops at `--no-bundle`; signing, notarisation and the disk image belong to
+the release workflow (`.github/workflows/release.yml`), which runs on a `v*` tag.
+
+## Updates
+
+Settings → **Updates** (or **Check for updates…** in the menu bar) asks for
+`latest.json` from the public repository
+[`jash90/trove-releases`](https://github.com/jash90/trove-releases) — this
+repository is private, and its releases cannot be read without a token. Nothing
+checks on its own: opening the tab does not go online, the button does.
+
+An update is installed only if `Trove.app.tar.gz` carries a minisign signature
+from the key whose public half is in `src-tauri/tauri.conf.json`
+(`plugins.updater.pubkey`). The archive is packed from the signed, notarised and
+stapled application, so the bundle that replaces the old one passes Gatekeeper
+as it is. Trove then restarts.
+
+Releasing needs, once:
+
+1. `pnpm tauri signer generate -w ~/.tauri/trove-updater.key` — keep the key and
+   its password somewhere safe. Losing them strands every installed copy on the
+   version it has.
+2. The contents of `~/.tauri/trove-updater.key.pub` in `plugins.updater.pubkey`.
+   The release workflow refuses to build while the placeholder is there.
+3. Repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the key file's contents),
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, and `RELEASES_REPO_TOKEN` — a
+   fine-grained token with `contents: write` on `jash90/trove-releases` only.
+
+Each tag then publishes the disk image, `Trove.app.tar.gz`, its `.sig` and
+`latest.json` there. Copies older than the first release with an updater have to
+be replaced by hand from the disk image once.
 
 ## Importing an archive
 

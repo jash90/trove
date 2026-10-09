@@ -131,6 +131,18 @@ export const mockGateway: ClipboardGateway = {
   },
   chooseExportDirectory: async () => "synthetic://clipboard-export",
   exportHistory: async () => ({ records: 4, images: 1, withoutPayload: 1 }),
+  // The browser preview is never out of date: there is no release behind it,
+  // and an install that resolved would promise a restart that cannot happen.
+  checkForUpdate: async () => ({
+    currentVersion: "0.0.0-preview",
+    available: false,
+    version: null,
+    notes: null,
+  }),
+  installUpdate: async () => {
+    throw new Error("no_pending_update");
+  },
+  onOpenSettingsTab: () => () => undefined,
   // The browser preview has no vault behind it; the settings pane still gets
   // a list to show, and copies that went nowhere but never fail.
   keyvaultList: async () =>

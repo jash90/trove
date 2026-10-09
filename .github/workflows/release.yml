@@ -17,6 +17,17 @@
 #   APPLE_API_KEY               base64 of the App Store Connect .p8
 #   APPLE_API_KEY_ID            the key id
 #   APPLE_API_ISSUER            the issuer id
+#   TAURI_SIGNING_PRIVATE_KEY   the updater's minisign private key, the whole
+#                               file `tauri signer generate` wrote. Its public
+#                               half is compiled into every copy of the app, so
+#                               losing this key strands them all on the version
+#                               they have.
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  the password that key was made with
+#   RELEASES_REPO_TOKEN         fine-grained token, contents: write on
+#                               jash90/trove-releases and nothing else. That
+#                               public repository is where installed copies
+#                               look for updates: this one is private, and its
+#                               releases cannot be read without a token.
 name: Release
 
 on:
@@ -76,6 +87,15 @@ jobs:
             grep -q "\"\?version\"\? *[:=] *\"$VERSION\"" "$f" \
               || { echo "::error::$f does not declare version $VERSION"; exit 1; }
           done
+
+      # A build carrying the placeholder would check for updates and refuse
+      # every one it found, and the only way out of that is a manual install.
+      - name: Check the updater key is the real one
+        run: |
+          if grep -q "REPLACE_WITH_TROVE_UPDATER_PUBLIC_KEY" src-tauri/tauri.conf.json; then
+            echo "::error::src-tauri/tauri.conf.json still has the placeholder updater public key"
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -212,6 +232,31 @@ jobs:
           spctl -a -vv -t open --context context:primary-signature "$DMG"
           spctl -a -vv "target/release/bundle/macos/Trove.app"
 
+      # What an installed copy downloads to update itself. Packed from the
+      # stapled application — not by `tauri build`, whose archive would predate
+      # the signature above — so the bundle that replaces the old one passes
+      # Gatekeeper as it stands.
+      #
+      # COPYFILE_DISABLE keeps macOS tar from adding AppleDouble `._` files,
+      # which would land inside the bundle and break its sealed resources.
+      - name: Build the updater archive
+        id: updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          ARCHIVE="$RUNNER_TEMP/Trove.app.tar.gz"
+          COPYFILE_DISABLE=1 tar -czf "$ARCHIVE" -C target/release/bundle/macos Trove.app
+          tar -tzf "$ARCHIVE" | grep -q "^Trove.app/Contents/MacOS/" \
+            || { echo "::error::the updater archive does not hold the application"; exit 1; }
+          if tar -tzf "$ARCHIVE" | grep -q "/\._"; then
+            echo "::error::the updater archive carries AppleDouble files"; exit 1
+          fi
+          pnpm tauri signer sign "$ARCHIVE"
+          test -s "$ARCHIVE.sig" \
+            || { echo "::error::signing the updater archive produced no signature"; exit 1; }
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -222,6 +267,47 @@ jobs:
             gh release upload "$TAG" "$DMG" --clobber
           else
             gh release create "$TAG" "$DMG" --title "$TAG" --generate-notes
+          fi
+
+      # The notes come from the release just published here, where
+      # --generate-notes can see the pull requests; the public repository has
+      # no history to generate them from.
+      - name: Write the update manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          ARCHIVE: ${{ steps.updater.outputs.archive }}
+        run: |
+          NOTES="$(gh release view "$TAG" --json body --jq .body)"
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$NOTES" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg signature "$(cat "$ARCHIVE.sig")" \
+            --arg url "https://github.com/jash90/trove-releases/releases/download/$TAG/Trove.app.tar.gz" \
+            '{version: $version, notes: $notes, pub_date: $date,
+              platforms: {"darwin-aarch64": {signature: $signature, url: $url}}}' \
+            > "$RUNNER_TEMP/latest.json"
+          cat "$RUNNER_TEMP/latest.json"
+
+      # Last, because this is the step that makes the release reach people:
+      # installed copies read `releases/latest/download/latest.json` here.
+      - name: Publish to the public releases repository
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          DMG: ${{ steps.dmg.outputs.path }}
+          ARCHIVE: ${{ steps.updater.outputs.archive }}
+        run: |
+          REPO="jash90/trove-releases"
+          FILES=("$DMG" "$ARCHIVE" "$ARCHIVE.sig" "$RUNNER_TEMP/latest.json")
+          if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+            gh release upload "$TAG" "${FILES[@]}" --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" "${FILES[@]}" --repo "$REPO" \
+              --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest
           fi
 
       - name: Remove the signing keychain

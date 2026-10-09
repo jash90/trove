@@ -1131,3 +1131,145 @@ describe("expiryLabel", () => {
     expect(expiryLabel(null, now)).toBeNull();
   });
 });
+
+describe("Updates tab", () => {
+  const upToDate = {
+    currentVersion: "1.8.1",
+    available: false,
+    version: null,
+    notes: null,
+  };
+  const newer = {
+    currentVersion: "1.8.1",
+    available: true,
+    version: "1.9.0",
+    notes: "Faster search.\nFewer surprises.",
+  };
+
+  it("is absent where there is no application to replace", async () => {
+    render(<SettingsPanel gateway={makeGateway()} />);
+    await loadSettings();
+    expect(screen.queryByRole("tab", { name: "Updates" })).toBeNull();
+  });
+
+  it("does not go online until the button is pressed, then says it is current", async () => {
+    const checkForUpdate = vi.fn(async () => upToDate);
+    render(
+      <SettingsPanel
+        gateway={makeGateway({ checkForUpdate, installUpdate: vi.fn() })}
+      />,
+    );
+    await loadSettings();
+    await openTab("Updates");
+    expect(checkForUpdate).not.toHaveBeenCalled();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Check for updates" }),
+    );
+
+    expect(
+      await screen.findByText("Trove 1.8.1 is the latest version."),
+    ).toBeVisible();
+    expect(checkForUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Install and restart" })).toBeNull();
+  });
+
+  it("offers a newer release with its notes and reports the download as it goes", async () => {
+    let report!: (progress: { downloaded: number; total: number | null }) => void;
+    const finished = deferred<void>();
+    const installUpdate = vi.fn(async (onProgress) => {
+      report = onProgress;
+      return finished.promise;
+    });
+    render(
+      <SettingsPanel
+        gateway={makeGateway({
+          checkForUpdate: vi.fn(async () => newer),
+          installUpdate,
+        })}
+      />,
+    );
+    await loadSettings();
+    await openTab("Updates");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Check for updates" }),
+    );
+
+    expect(
+      await screen.findByText("Trove 1.9.0 is available — you have 1.8.1."),
+    ).toBeVisible();
+    expect(screen.getByText(/Faster search\./)).toBeVisible();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Install and restart" }),
+    );
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    // Checking again mid-download would race the install for the same release.
+    expect(
+      screen.getByRole("button", { name: "Check for updates" }),
+    ).toBeDisabled();
+
+    act(() => report({ downloaded: 42, total: 100 }));
+    expect(screen.getByText("Downloading… 42%")).toBeVisible();
+    act(() => report({ downloaded: 100, total: 100 }));
+    expect(screen.getByText("Installing and restarting…")).toBeVisible();
+  });
+
+  it("words a refused signature and lets the user check again", async () => {
+    render(
+      <SettingsPanel
+        gateway={makeGateway({
+          checkForUpdate: vi.fn(async () => newer),
+          installUpdate: vi.fn(async () => {
+            throw "update_signature_invalid";
+          }),
+        })}
+      />,
+    );
+    await loadSettings();
+    await openTab("Updates");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Check for updates" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Install and restart" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "did not carry Trove's signature",
+    );
+    expect(
+      screen.getByRole("button", { name: "Check for updates" }),
+    ).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Install and restart" })).toBeNull();
+  });
+
+  it("opens when the menu bar asks for it", async () => {
+    let openTabFromMenu!: (tab: string) => void;
+    render(
+      <SettingsPanel
+        gateway={makeGateway({
+          checkForUpdate: vi.fn(async () => upToDate),
+          installUpdate: vi.fn(),
+          onOpenSettingsTab: vi.fn((listener) => {
+            openTabFromMenu = listener;
+            return () => undefined;
+          }),
+        })}
+      />,
+    );
+    await loadSettings();
+
+    act(() => openTabFromMenu("updates"));
+    expect(screen.getByRole("tab", { name: "Updates" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    // A name this window does not have is ignored rather than leaving it on nothing.
+    act(() => openTabFromMenu("nonsense"));
+    expect(screen.getByRole("tab", { name: "Updates" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+});

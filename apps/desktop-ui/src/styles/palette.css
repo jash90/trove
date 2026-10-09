@@ -1301,6 +1301,15 @@
   line-height: 1.5;
 }
 
+/* Release notes arrive as the release's plain text; their line breaks are the
+ * only structure they have, so they are kept rather than run together. */
+.settings-notice .update-notes {
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  color: var(--muted);
+}
+
 .settings-notice-actions {
   display: flex;
   gap: 8px;
@@ -1669,7 +1678,9 @@
 }
 
 .settings-tabs__tab {
-  padding: 7px 12px;
+  /* Nine tabs share one row at the window's default width; any more side padding and the last
+     one wraps onto a row of its own. */
+  padding: 7px 9px;
   cursor: pointer;
   color: var(--muted);
   background: transparent;

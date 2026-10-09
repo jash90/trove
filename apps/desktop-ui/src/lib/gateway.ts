@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -14,6 +14,7 @@ import {
  validateImportAnalysis,
  validateImportProgress,
  validateStorageStats,
+ validateUpdateInfo,
  type AppEntry,
  type AppSettings,
  type ChatMessage,
@@ -37,6 +38,8 @@ import {
  type PairingStatus,
  type ShortcutStatus,
  type ShortcutRelease,
+ type UpdateInfo,
+ type UpdateProgress,
 } from "./contracts";
 import { mockGateway } from "./mockGateway";
 
@@ -183,6 +186,20 @@ export interface ClipboardGateway {
  restoreSystemShortcut?(): Promise<ShortcutRelease>;
  /** Opens the Keyboard shortcut list, for when the automatic route is refused. */
  openKeyboardSettings?(): Promise<void>;
+ /**
+  * Asks the releases repository whether a newer build exists. The only
+  * network call the update feature makes until the user accepts what it found.
+  *
+  * Optional: the browser preview has no application to replace.
+  */
+ checkForUpdate?(): Promise<UpdateInfo>;
+ /**
+  * Downloads, verifies and installs what the last check found, then restarts
+  * the application — so on success this never resolves in practice.
+  */
+ installUpdate?(onProgress: (progress: UpdateProgress) => void): Promise<void>;
+ /** The menu bar asking the settings window to switch to one of its tabs. */
+ onOpenSettingsTab?(listener: (tab: string) => void): () => void;
 }
 
 /**
@@ -252,6 +269,15 @@ export const tauriGateway: ClipboardGateway = {
  restoreSystemShortcut: () =>
   invoke<ShortcutRelease>("restore_system_shortcut"),
  openKeyboardSettings: () => invoke<void>("open_keyboard_settings_window"),
+ checkForUpdate: () =>
+  invoke<UpdateInfo>("check_for_update").then(validateUpdateInfo),
+ installUpdate: (onProgress) => {
+  const channel = new Channel<UpdateProgress>();
+  channel.onmessage = onProgress;
+  return invoke<void>("install_update", { onProgress: channel });
+ },
+ onOpenSettingsTab: (listener) =>
+  subscribe<string>("open-settings-tab", listener),
  linkPreview: (eventId) =>
   invoke<LinkPreview | null>("get_link_preview", { eventId }),
  onLinkPreviewReady: (listener) =>

@@ -18,6 +18,7 @@ use crate::monitor::MonitorControl;
 const SHOW_ID: &str = "show";
 const SETTINGS_ID: &str = "settings";
 const PAUSE_ID: &str = "pause";
+const UPDATE_ID: &str = "update";
 const QUIT_ID: &str = "quit";
 
 /// Label for the pause entry, which doubles as the recording indicator.
@@ -42,9 +43,10 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri
         true,
         None::<&str>,
     )?;
+    let update = MenuItem::with_id(app, UPDATE_ID, "Check for updates…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT_ID, "Quit", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&show, &settings, &pause, &separator, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &settings, &pause, &update, &separator, &quit])?;
 
     let menu_control = control.clone();
     let pause_item = pause.clone();
@@ -100,6 +102,10 @@ fn on_menu_event<R: Runtime>(
     match event.id().as_ref() {
         SHOW_ID => crate::hotkey::show_palette(app),
         SETTINGS_ID => crate::hotkey::show_settings(app),
+        // Opens the tab rather than checking from here: the answer, the
+        // release notes and the install button all live there, and a menu
+        // has nowhere to show them.
+        UPDATE_ID => crate::hotkey::show_settings_tab(app, "updates"),
         PAUSE_ID => {
             let paused = !control.is_paused();
             control.set_paused(paused);
