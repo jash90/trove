@@ -14,6 +14,8 @@ tauri-plugin-autostart = "2.5.1"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-global-shortcut = "2.3.2"
+# Pinned exactly: 2.5 and later require tauri ^2.12, and this application is on 2.11.
+tauri-plugin-single-instance = "=2.4.5"
 trove-core = { path = "../crates/trove-core" }
 trove-store = { path = "../crates/trove-store" }
 trove-search = { path = "../crates/trove-search" }
@@ -23,6 +25,7 @@ trove-keyvault = { path = "../crates/trove-keyvault" }
 trove-launcher = { path = "../crates/trove-launcher" }
 trove-link-preview = { path = "../crates/trove-link-preview" }
 reqwest.workspace = true
+rustix.workspace = true
 tauri-plugin-updater = { version = "2.12.0", default-features = false, features = ["native-tls", "zip", "system-proxy"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -39,7 +42,7 @@ zstd.workspace = true
 aes-gcm.workspace = true
 base64.workspace = true
 image.workspace = true
-# Reads `Info.plist` so a test can assert the bundle declares LSUIElement, which keeps a Dock tile from flashing during launch regardless of the dockIcon setting.
+# Reads `Info.plist` so tests can assert the bundle declares LSUIElement, which keeps a Dock tile from flashing during launch regardless of the dockIcon setting, and LSMultipleInstancesProhibited.
 plist.workspace = true
 rsa.workspace = true
 sha2.workspace = true

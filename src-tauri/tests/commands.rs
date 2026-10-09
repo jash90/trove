@@ -2430,6 +2430,28 @@ fn the_bundle_never_flashes_a_dock_tile_during_launch() {
     );
 }
 
+/// Launch Services keeps the application to one user session at a time when
+/// the bundle says so, so fast user switching cannot start a second copy
+/// beside one that already watches the clipboard and holds the shortcut.
+/// Launches within a session are the single-instance plugin's and the
+/// instance lock's to turn away; this is the guard that acts before any of
+/// this application's code runs.
+#[test]
+fn the_bundle_runs_in_one_user_session_at_a_time() {
+    let info: plist::Value =
+        plist::from_bytes(include_bytes!("../Info.plist")).expect("Info.plist must parse");
+    let prohibited = info
+        .as_dictionary()
+        .and_then(|info| info.get("LSMultipleInstancesProhibited"))
+        .and_then(plist::Value::as_boolean);
+
+    assert_eq!(
+        prohibited,
+        Some(true),
+        "without LSMultipleInstancesProhibited, a second user session can start its own Trove while the first is still running"
+    );
+}
+
 /// Each window is opened over something it must not disappear behind: the
 /// palette over whatever the user is working in, settings over the palette.
 /// Asserted against the configuration file itself because that is where the

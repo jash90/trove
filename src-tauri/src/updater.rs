@@ -134,6 +134,13 @@ pub async fn install_update<R: Runtime>(
         )
         .await
         .map_err(|error| error_code(&error).to_owned())?;
+    // The restart starts the new process before this one exits, and the new
+    // one would find this one's socket still listening and hand itself over
+    // to an application on its way out. Taking the socket down first lets
+    // the new process claim it; the instance lock covers the overlap.
+    if crate::single_instance_enabled() {
+        tauri_plugin_single_instance::destroy(&app);
+    }
     app.restart()
 }
 
