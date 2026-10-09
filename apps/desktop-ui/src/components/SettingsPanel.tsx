@@ -10,7 +10,9 @@ import {
   Vault,
   X,
 } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -29,6 +31,10 @@ import type {
   StorageStats as StorageStatsContract,
 } from "../lib/contracts";
 import type { ClipboardGateway } from "../lib/gateway";
+import {
+  acceleratorFromKeyEvent,
+  normalizePlatformHotkey,
+} from "../lib/hotkeys";
 import { SNAP_SHORTCUTS, defaultSnapShortcuts } from "../lib/snapShortcuts";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { StorageStats } from "./StorageStats";
@@ -39,145 +45,12 @@ const MAX_DENYLIST_ENTRY_BYTES = 256;
 const MIN_RETENTION_DAYS = 1;
 const MAX_RETENTION_DAYS = 3_650;
 
-/**
- * One canonical command-family primary at most: CommandOrControl and Command
- * resolve to the same physical key on a given platform, so accepting both
- * would register a shortcut the user cannot press. Control is a different
- * key entirely and may ride along beside a command-family primary — ⌘⌃ is
- * the chord Rectangle's corner snaps live on.
- */
-const PRIMARY_MODIFIERS = new Map([
-  ["commandorcontrol", "CommandOrControl"],
-  ["command", "Command"],
-  ["control", "Control"],
-]);
-const SECONDARY_MODIFIERS = new Map([
-  ["alt", "Alt"],
-  ["shift", "Shift"],
-]);
-const HOTKEY_KEY_PATTERN =
-  /^(?:[A-Z0-9]|SPACE|ARROW(?:LEFT|RIGHT|UP|DOWN)|F(?:[1-9]|1\d|2[0-4]))$/u;
-/** Keys the platform syntax spells out rather than showing as a character. */
-const NAMED_KEYS: Record<string, string> = {
-  SPACE: "Space",
-  ARROWLEFT: "ArrowLeft",
-  ARROWRIGHT: "ArrowRight",
-  ARROWUP: "ArrowUp",
-  ARROWDOWN: "ArrowDown",
-};
 const DENYLIST_ENTRY_PATTERN = /^[a-z0-9._-]+$/u;
 
-export const normalizePlatformHotkey = (value: string): string => {
-  const invalid = (): never => {
-    throw new Error("invalid_hotkey");
-  };
-  const parts = value.split("+").map((part) => part.trim());
-  if (parts.length < 2 || parts.some((part) => part.length === 0)) invalid();
+// The shortcut grammar lives in its own module so the palette can record a
+// chord without pulling this whole form into the bundle it launches with.
+export { acceleratorFromKeyEvent, normalizePlatformHotkey };
 
-  const upper = parts.at(-1)!.toUpperCase();
-  if (!HOTKEY_KEY_PATTERN.test(upper)) invalid();
-  // Named keys are spelled in title case by the platform shortcut syntax;
-  // single characters and function keys stay uppercase.
-  const key = NAMED_KEYS[upper] ?? upper;
-
-  let primary: string | null = null;
-  let controlHeld = false;
-  const secondary = new Set<string>();
-  for (const part of parts.slice(0, -1)) {
-    const token = part.toLowerCase();
-    const asPrimary = PRIMARY_MODIFIERS.get(token);
-    if (asPrimary !== undefined) {
-      // Control beside a command-family token is an extra modifier (⌘⌃),
-      // not a second primary; Control twice, or two command-family tokens,
-      // are one key held twice and remain nonsense.
-      if (token === "control") {
-        if (controlHeld) invalid();
-        controlHeld = true;
-        continue;
-      }
-      if (primary !== null) invalid();
-      primary = asPrimary;
-      continue;
-    }
-    const asSecondary = SECONDARY_MODIFIERS.get(token);
-    if (asSecondary === undefined) return invalid();
-    if (secondary.has(asSecondary)) return invalid();
-    secondary.add(asSecondary);
-  }
-  // Control standing alone is itself a primary; beside a command-family one
-  // it stays the extra modifier it was recorded as.
-  if (primary === null && controlHeld) {
-    primary = "Control";
-    controlHeld = false;
-  }
-  // Alt on its own is enough — ⌥Space is an ordinary launcher shortcut, and the systems people
-  // compare this against bind exactly that. Shift on its own is not: Shift+A is how a capital A
-  // is typed, so a global binding on it would swallow ordinary typing everywhere.
-  if (primary === null && !secondary.has("Alt")) invalid();
-
-  return [
-    ...(primary === null ? [] : [primary]),
-    ...(secondary.has("Alt") ? ["Alt"] : []),
-    ...(secondary.has("Shift") ? ["Shift"] : []),
-    ...(controlHeld ? ["Control"] : []),
-    key,
-  ].join("+");
-};
-
-/**
- * The shortcut a key press describes, or nothing when it does not describe one yet.
- *
- * Reads `code` rather than `key`: with Alt held, macOS reports composed characters in `key`, so
- * ⌥K arrives as `˚` and the shortcut would record a character nobody can type on purpose.
- *
- * Returns null while only modifiers are down — a combination is not finished until a real key
- * joins it — and when the only modifier held is Shift, because Shift+A is how a capital A is
- * typed and a global binding on it would swallow ordinary typing everywhere else. ⌘, ⌃ and ⌥
- * each stand on their own; ⌥Space is an ordinary launcher shortcut; ⌘⌃ together are two keys
- * and record as one chord.
- *
- * The candidate goes through {@link normalizePlatformHotkey} rather than being assembled into
- * final form here, so there is one place that decides what a valid shortcut is.
- */
-export const acceleratorFromKeyEvent = (event: {
-  code: string;
-  metaKey: boolean;
-  ctrlKey: boolean;
-  altKey: boolean;
-  shiftKey: boolean;
-}): string | null => {
-  const key = (() => {
-    if (/^Key[A-Z]$/u.test(event.code)) return event.code.slice(3);
-    if (/^Digit[0-9]$/u.test(event.code)) return event.code.slice(5);
-    if (event.code === "Space") return "SPACE";
-    if (/^F(?:[1-9]|1\d|2[0-4])$/u.test(event.code)) return event.code;
-    if (/^Arrow(?:Left|Right|Up|Down)$/u.test(event.code))
-      return event.code.toUpperCase();
-    return null;
-  })();
-  if (key === null) return null;
-
-  // ⌘⌃ are two different keys and a chord worth recording — Rectangle's
-  // corner snaps live on it — so Control rides along beside a command
-  // primary rather than being rejected as a second one.
-  const primary = event.metaKey
-    ? "CommandOrControl"
-    : event.ctrlKey
-      ? "Control"
-      : null;
-  if (primary === null && !event.altKey) return null;
-
-  const parts = primary === null ? [] : [primary];
-  if (event.altKey) parts.push("Alt");
-  if (event.shiftKey) parts.push("Shift");
-  if (event.ctrlKey && event.metaKey) parts.push("Control");
-  parts.push(key);
-  try {
-    return normalizePlatformHotkey(parts.join("+"));
-  } catch {
-    return null;
-  }
-};
 
 /**
  * Bundle identifiers and executable names share one rule so the same
@@ -464,15 +337,12 @@ export const SettingsPanel = ({
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [settings, native, paired, shortcut] = await Promise.all([
+      const [settings, native, paired] = await Promise.all([
         gateway.getSettings(),
         gateway.isAutostartEnabled().catch(() => null),
         gateway.keyvaultIdentity().catch(() => null),
-        gateway.getShortcutStatus?.().catch(() => null) ??
-          Promise.resolve(null),
       ]);
       if (cancelled) return;
-      setShortcutStatus(shortcut);
       setPersisted(settings);
       setIdentity(paired);
       setHotkey(settings.hotkey);
@@ -497,22 +367,77 @@ export const SettingsPanel = ({
     };
   }, [gateway]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const next = await gateway.getStorageStats();
-        if (cancelled) return;
+  // The storage figures and the shortcut's standing are facts about the
+  // machine, not about this form: the history grows while the window is
+  // hidden, and another application can take the chord at any time. This
+  // window is created hidden at launch and shown, never remounted, so reading
+  // them once at mount answered for a moment long past. They are read again
+  // whenever the window comes forward.
+  const liveRequest = useRef(0);
+  const refreshLive = useCallback(() => {
+    const id = ++liveRequest.current;
+    const current = (): boolean => id === liveRequest.current;
+    void gateway
+      .getStorageStats()
+      .then((next) => {
+        if (!current()) return;
         setStats(next);
         setStorageStatus("ready");
-      } catch {
-        if (!cancelled) setStorageStatus("unavailable");
-      }
-    })();
+      })
+      .catch(() => {
+        if (current()) setStorageStatus("unavailable");
+      });
+    void (
+      gateway.getShortcutStatus?.().catch(() => null) ?? Promise.resolve(null)
+    ).then((status) => {
+      if (current()) setShortcutStatus(status);
+    });
+  }, [gateway]);
+
+  // On mount only when somebody can see the answer. The window is mounted
+  // hidden at every launch, and a full-table count plus a read of the system
+  // shortcut table is work the launch should not wait behind for a window
+  // nobody opened; its first focus pays for it instead. The browser preview
+  // and the tests have no window at all, and read straight away.
+  useEffect(() => {
+    try {
+      void getCurrentWindow()
+        .isVisible()
+        .then((visible) => {
+          if (visible) refreshLive();
+        })
+        .catch(() => refreshLive());
+    } catch {
+      refreshLive();
+    }
+    return () => {
+      liveRequest.current++;
+    };
+  }, [refreshLive]);
+
+  useEffect(() => {
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    // try/catch around the call itself, not only the promise: outside a Tauri
+    // window getCurrentWindow throws where it stands.
+    try {
+      void getCurrentWindow()
+        .onFocusChanged(({ payload: focused }) => {
+          if (focused) refreshLive();
+        })
+        .then((unlisten) => {
+          if (cancelled) unlisten();
+          else stop = unlisten;
+        })
+        .catch(() => undefined);
+    } catch {
+      /* no window to listen to; the mount read above is all there is */
+    }
     return () => {
       cancelled = true;
+      stop?.();
     };
-  }, [gateway]);
+  }, [refreshLive]);
 
   // The form is noValidate on purpose: native constraint validation would
   // silently swallow the submit for an out-of-range number and the user would

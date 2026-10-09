@@ -18,7 +18,7 @@ import {
   type PaletteMode,
   type PaletteView,
 } from "./components/PaletteHeader";
-import { acceleratorFromKeyEvent } from "./components/SettingsPanel";
+import { acceleratorFromKeyEvent } from "./lib/hotkeys";
 import { PaletteWorkspace } from "./components/PaletteWorkspace";
 import { useAppsCatalog } from "./hooks/useAppsCatalog";
 import { useVaultCatalog } from "./hooks/useVaultCatalog";
