@@ -221,10 +221,8 @@ the release workflow (`.github/workflows/release.yml`), which runs on a `v*` tag
 ## Updates
 
 Settings → **Updates** (or **Check for updates…** in the menu bar) asks for
-`latest.json` from the public repository
-[`jash90/trove-releases`](https://github.com/jash90/trove-releases) — this
-repository is private, and its releases cannot be read without a token. Nothing
-checks on its own: opening the tab does not go online, the button does.
+`latest.json` from the latest release of this repository. Nothing checks on its
+own: opening the tab does not go online, the button does.
 
 An update is installed only if `Trove.app.tar.gz` carries a minisign signature
 from the key whose public half is in `src-tauri/tauri.conf.json`
@@ -239,13 +237,13 @@ Releasing needs, once:
    version it has.
 2. The contents of `~/.tauri/trove-updater.key.pub` in `plugins.updater.pubkey`.
    The release workflow refuses to build while the placeholder is there.
-3. Repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the key file's contents),
-   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, and `RELEASES_REPO_TOKEN` — a
-   fine-grained token with `contents: write` on `jash90/trove-releases` only.
+3. Repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the key file's contents) and
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 
 Each tag then publishes the disk image, `Trove.app.tar.gz`, its `.sig` and
-`latest.json` there. Copies older than the first release with an updater have to
-be replaced by hand from the disk image once.
+`latest.json` on its release. 1.8.1 and earlier have no updater, and 1.9.0
+looks for updates in a repository that no longer exists, so both have to be
+replaced by hand from the disk image once.
 
 ## Importing an archive
 

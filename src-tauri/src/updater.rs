@@ -5,7 +5,7 @@
 //! leads there. That keeps the promise the README makes about network calls.
 //!
 //! The work is done by `tauri-plugin-updater`. It reads `latest.json` from the
-//! public releases repository, refuses an archive whose minisign signature does
+//! latest release of this repository, refuses an archive whose minisign signature does
 //! not match the key compiled into the application, and swaps the `.app` bundle
 //! in place. What lives here is the part the interface needs: a check that
 //! remembers what it found, so the install that follows cannot be pointed at a
