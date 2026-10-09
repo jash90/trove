@@ -30,6 +30,15 @@ objc2-app-kit = { version = "0.3.2", features = [
     # `runningApplicationWithProcessIdentifier:` takes a `pid_t`, which the
     # bindings only expose once libc is in the build.
     "libc",
+    # The alert a launch that cannot start shows: `runModal` is gated on
+    # `NSApplication`, and `addButtonWithTitle:` returns an `NSButton`, which
+    # drags in the view hierarchy it belongs to.
+    "NSAlert",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSResponder",
+    "NSView",
 ] }
 # `NSValue` is where `NSNumber` lives, and `NSObject` is what `NSDictionary::from_slices`
 # is gated on — both are needed to hand the Accessibility check its options dictionary.

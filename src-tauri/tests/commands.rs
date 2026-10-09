@@ -143,11 +143,11 @@ fn a_relaunch_registers_the_shortcut_that_was_saved() {
     // leaving the palette with no way in: the screen that fixes the value is
     // reached through the palette.
     assert_eq!(
-        hotkey::shortcut_for_launch(None),
+        trove_app::hotkey::shortcut_for_launch(None),
         hotkey::default_shortcut()
     );
     assert_eq!(
-        hotkey::shortcut_for_launch(Some("not-a-shortcut")),
+        trove_app::hotkey::shortcut_for_launch(Some("not-a-shortcut")),
         hotkey::default_shortcut()
     );
 }
@@ -492,6 +492,48 @@ async fn the_dock_icon_the_user_asked_for_survives_a_reopen() {
 
     let reopened = AppState::open_data_dir(directory.path()).unwrap();
     assert!(commands::dock_icon_enabled(&reopened.store));
+}
+
+#[tokio::test]
+async fn a_launch_reads_the_saved_settings_once_and_applies_all_of_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let mut snaps = AppSettingsDto::default().snap_shortcuts;
+    snaps.insert("maximize".to_owned(), "CommandOrControl+Alt+M".to_owned());
+    let requested = AppSettingsDto {
+        dock_icon: true,
+        hotkey: "Control+Alt+7".to_owned(),
+        snap_shortcuts: snaps.clone(),
+        ..AppSettingsDto::default()
+    };
+    commands::save_settings_service(&state, requested)
+        .await
+        .unwrap();
+
+    let launch = commands::launch_settings(&state.store);
+
+    assert!(launch.dock_icon);
+    assert_eq!(launch.hotkey, "Control+Alt+7");
+    assert_eq!(launch.snap_shortcuts, snaps);
+}
+
+#[test]
+fn a_launch_with_no_settings_row_gets_the_fallbacks_each_setting_had() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+
+    let launch = commands::launch_settings(&state.store);
+
+    // The same answers the separate reads gave before startup read the row once.
+    assert_eq!(launch.dock_icon, commands::dock_icon_enabled(&state.store));
+    assert_eq!(
+        trove_app::hotkey::shortcut_for_launch(Some(launch.hotkey.as_str())),
+        trove_app::hotkey::shortcut_for_launch(None)
+    );
+    assert_eq!(
+        launch.snap_shortcuts,
+        commands::snap_shortcuts(&state.store)
+    );
 }
 
 #[tokio::test]
@@ -2485,6 +2527,32 @@ fn both_windows_float_above_whatever_they_were_summoned_over() {
         window_named("settings")["alwaysOnTop"],
         serde_json::json!(true),
         "settings is opened from the palette and must come out above it"
+    );
+}
+
+/// The palette is created hidden and shown by `setup` once the store is open.
+///
+/// Created visible, it sat on screen as an empty always-on-top rectangle for
+/// as long as setup held the main thread — the whole of a migration on the
+/// first launch after an update — and a launch at login, which shows nothing,
+/// still flashed it. Asserted against the configuration file for the same
+/// reason as the window levels above: the mock context never reads it.
+#[test]
+fn the_palette_starts_hidden_until_setup_decides_to_show_it() {
+    let config: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let main = config["app"]["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["label"] == "main")
+        .expect("no window labelled main")
+        .clone();
+
+    assert_eq!(
+        main["visible"],
+        serde_json::json!(false),
+        "the palette must not be on screen before the store behind it is open"
     );
 }
 

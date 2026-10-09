@@ -5,6 +5,7 @@
 //! system bumps on every write, so an unchanged clipboard costs one integer
 //! read and nothing else.
 
+pub mod alert;
 pub mod icons;
 pub mod markers;
 pub mod paste;
@@ -12,6 +13,7 @@ pub mod pasteboard;
 pub mod symbolic_hotkeys;
 pub mod window_snap;
 
+pub use alert::StartupAlertChoice;
 pub use icons::application_icon_png;
 pub use markers::{MarkerPolicy, classify_types};
 pub use paste::{

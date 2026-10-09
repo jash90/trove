@@ -97,7 +97,7 @@ impl ActiveSnapShortcuts {
 pub fn install<R: Runtime>(app: &AppHandle<R>, map: &BTreeMap<String, String>) {
     for (id, chord) in map {
         let Some(shortcut) = crate::hotkey::parse_shortcut(chord) else {
-            eprintln!("trove: snap shortcut {chord} does not parse");
+            crate::log::log_line(&format!("snap shortcut {chord} does not parse"));
             continue;
         };
         let action = id.clone();
@@ -111,7 +111,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, map: &BTreeMap<String, String>) {
                     }
                 });
         if let Err(error) = registered {
-            eprintln!("trove: snap shortcut {chord} unavailable: {error}");
+            crate::log::log_line(&format!("snap shortcut {chord} unavailable: {error}"));
         }
     }
 }
