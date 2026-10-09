@@ -11,6 +11,8 @@ interface UseListNavigationOptions<T> {
 interface UseListNavigationResult {
   selectedKey: string | null;
   setSelectedKey: (key: string) => void;
+  /** Forgets the selection, so the first row is selected again. */
+  resetSelection: () => void;
   handleKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
 }
 
@@ -90,6 +92,7 @@ export const useListNavigation = <T>({
   return {
     selectedKey,
     setSelectedKey: setStoredSelectedKey,
+    resetSelection: () => setStoredSelectedKey(null),
     handleKeyDown,
   };
 };

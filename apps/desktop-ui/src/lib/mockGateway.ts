@@ -250,6 +250,10 @@ export const mockGateway: ClipboardGateway = {
   // A browser preview cannot move anyone's windows; resolving true keeps
   // the palette's flow walkable where Tauri is absent.
   snapWindow: async () => true,
+  // Nothing to hide and nothing summons a browser tab; both are no-ops so
+  // the preview keeps working where Tauri is absent.
+  hidePalette: async () => undefined,
+  onPaletteSummoned: () => () => undefined,
   onChatEvent: (listener) => {
     chatStreamListener = listener;
     return () => {

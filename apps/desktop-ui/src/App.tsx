@@ -222,6 +222,9 @@ const ClipboardPalette = (): React.JSX.Element => {
   useEffect(() => {
     searchInputRef.current?.focus();
   }, []);
+  // Read by the window-focus listener below, which is registered once and
+  // would otherwise see only the first render's answer.
+  const modalOpenRef = useRef(false);
   useEffect(() => {
     // The palette is hidden and shown, never destroyed, so the effect above runs once and never
     // again — the second time it was summoned the caret was nowhere. Focus follows the window
@@ -238,7 +241,10 @@ const ClipboardPalette = (): React.JSX.Element => {
       void getCurrentWindow()
         .onFocusChanged(({ payload: focused }) => {
           if (focused) {
-            focusSearch();
+            // Not out from under an open dialog: coming back to a confirm or
+            // the import wizard means coming back to it, and the field behind
+            // it is inert anyway.
+            if (!modalOpenRef.current) focusSearch();
             // Settings may have changed in their own window while this one
             // was out of front; the next summoning picks them up.
             refreshSettings();
@@ -390,6 +396,30 @@ const ClipboardPalette = (): React.JSX.Element => {
     void gateway.openSettingsWindow().catch(() => undefined);
 
   const modalOpen = actions.deleteTargetId !== null || workspace !== "none";
+  modalOpenRef.current = modalOpen;
+
+  // A summon is a fresh start in all but the query: the view goes back to
+  // its categories, the first row is selected, the last errand's alert is
+  // gone — and the query stays, selected, so typing replaces it and Enter
+  // or an arrow can still reuse it. Refocusing by Cmd-Tab or a click is not
+  // a summon and keeps everything where it was.
+  const handlePaletteSummoned = (): void => {
+    if (modalOpen) return;
+    setMode("home");
+    setHomeTileIndex(null);
+    navigation.resetSelection();
+    snapNavigation.resetSelection();
+    setLaunchError(null);
+    actions.clearFeedback();
+    searchInputRef.current?.focus();
+    searchInputRef.current?.select();
+  };
+  const paletteSummonedRef = useRef(handlePaletteSummoned);
+  paletteSummonedRef.current = handlePaletteSummoned;
+  useEffect(
+    () => gateway.onPaletteSummoned?.(() => paletteSummonedRef.current()),
+    [gateway],
+  );
 
   // Only one workspace at a time. Focus returns to the search field rather
   // than to whatever opened the dialog: the palette has one place a keyboard
@@ -530,9 +560,15 @@ const ClipboardPalette = (): React.JSX.Element => {
   };
   // Hidden rather than closed, the same as every other way the palette goes
   // away: closing it would end the process and take the history recording with
-  // it. Outside a Tauri window there is nothing to hide, and the palette works
-  // in a browser without one.
+  // it. Through the core when it can, which also hands the front back to the
+  // window the user was working in and drops the paste target with the
+  // summon. Outside a Tauri window there is nothing to hide, and the palette
+  // works in a browser without one.
   const hideWindow = (): void => {
+    if (gateway.hidePalette) {
+      void gateway.hidePalette().catch(() => undefined);
+      return;
+    }
     try {
       void getCurrentWindow()
         .hide()

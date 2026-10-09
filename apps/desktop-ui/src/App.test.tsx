@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -804,5 +805,83 @@ describe("the unified palette", () => {
     expect(
       screen.getByRole("dialog", { name: "Import history" }),
     ).toBeVisible();
+  });
+
+  // The listener the core's "palette-summoned" event reaches, captured so a
+  // test can summon the palette the way the shortcut does.
+  const summonableGateway = (): {
+    gateway: ClipboardGateway;
+    summon: () => void;
+  } => {
+    let listener: (() => void) | null = null;
+    return {
+      gateway: {
+        ...mockGateway,
+        onPaletteSummoned: (next) => {
+          listener = next;
+          return () => {
+            listener = null;
+          };
+        },
+      },
+      summon: () => act(() => listener?.()),
+    };
+  };
+
+  it("selects the query and goes back to the categories when summoned", async () => {
+    const user = userEvent.setup();
+    const { gateway, summon } = summonableGateway();
+    render(<App gateway={gateway} />);
+    const search = screen.getByRole<HTMLInputElement>("searchbox");
+
+    await user.type(search, "project note");
+    await waitFor(() =>
+      expect(historyResults().getAllByRole("option").length).toBeGreaterThan(0),
+    );
+    search.blur();
+
+    summon();
+
+    // Focused with the query kept and selected: typing replaces it, and an
+    // arrow or Enter can still reuse it.
+    expect(search).toHaveFocus();
+    expect(search.value).toBe("project note");
+    expect(search.selectionStart).toBe(0);
+    expect(search.selectionEnd).toBe("project note".length);
+    // And back on the categories, not on the list the last errand left.
+    await waitFor(() => expect(homeTiles()).toHaveLength(5));
+  });
+
+  it("drops the last errand's alert when summoned", async () => {
+    const { gateway, summon } = summonableGateway();
+    const launchApp = vi.fn(async () => {
+      throw new Error("launch_failed");
+    });
+    render(<App gateway={{ ...gateway, launchApp }} />);
+    await settleApps();
+    fireEvent.keyDown(screen.getByRole("searchbox"), { key: "Enter" });
+    expect(await screen.findByRole("alert")).toBeVisible();
+
+    summon();
+
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("does not pull focus out of an open dialog when summoned", async () => {
+    const user = userEvent.setup();
+    const { gateway, summon } = summonableGateway();
+    render(<App gateway={gateway} />);
+
+    await user.keyboard("{Meta>}i{/Meta}");
+    const dialog = await screen.findByRole("dialog", {
+      name: "Import history",
+    });
+
+    summon();
+
+    expect(screen.getByRole("searchbox")).not.toHaveFocus();
+    expect(dialog).toBeVisible();
   });
 });

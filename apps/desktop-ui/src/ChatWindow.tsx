@@ -1,4 +1,5 @@
 import { ArrowUp, Download, MessageSquareText, Paperclip, Play, Settings2, Square, Trash2, X } from 'lucide-react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
@@ -84,6 +85,45 @@ const ChatConversation = (): React.JSX.Element => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // The window is hidden and shown, never rebuilt, and the composer was never
+  // given focus: opened from the palette, the window came forward with the
+  // caret nowhere and the first keystrokes went nowhere either. Focus follows
+  // the window coming forward instead — unless the settings or a preview is
+  // open on top, which is what the user is coming back to.
+  const composerBlockedRef = useRef(false);
+  composerBlockedRef.current = settingsOpen || preview !== null;
+  useEffect(() => {
+    const focusComposer = (): void => {
+      if (!composerBlockedRef.current) inputRef.current?.focus();
+    };
+    focusComposer();
+    window.addEventListener('focus', focusComposer);
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    // The native window's focus as well as the document's: the shell does
+    // not promise the document hears about a window becoming key. Guarded
+    // the same way the palette's listener is — outside a Tauri window
+    // getCurrentWindow throws where it stands.
+    try {
+      void getCurrentWindow()
+        .onFocusChanged(({ payload: focused }) => {
+          if (focused) focusComposer();
+        })
+        .then((unlisten) => {
+          if (cancelled) unlisten();
+          else stop = unlisten;
+        })
+        .catch(() => undefined);
+    } catch {
+      /* no window to listen to; the document's focus event still answers */
+    }
+    return () => {
+      cancelled = true;
+      stop?.();
+      window.removeEventListener('focus', focusComposer);
+    };
+  }, []);
 
   useEffect(() => {
     void gateway
