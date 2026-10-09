@@ -258,6 +258,88 @@ fn adopt_legacy_data_dir(current: PathBuf, legacy: Option<PathBuf>) -> PathBuf {
     }
 }
 
+/// How long a starting process waits for the instance lock before giving up.
+///
+/// An update restarts the application by starting the new process first and
+/// only then exiting the old one, so for a moment the old process still holds
+/// the lock. Three seconds covers that handoff without leaving a genuine
+/// second launch hanging around for long before it steps aside.
+pub const INSTANCE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Proof that this process is the one running against the history.
+///
+/// The single-instance plugin is what normally turns a second launch away,
+/// but it decides by a socket in `/tmp`, which anything can delete, and it
+/// gives up quietly when it cannot connect. Two processes writing one history
+/// double every entry, and one's blob collection can reclaim a blob the other
+/// has written and not yet committed. An advisory lock held for the life of
+/// the process is the guarantee that does not depend on the socket: the
+/// kernel releases it when the process ends, however it ends, so a crash can
+/// never leave it stuck.
+///
+/// It is taken in the application's setup and nowhere else. Opening a store
+/// is not where it belongs: tests reopen one data directory many times over,
+/// and the store has no business deciding which process owns the history.
+pub struct InstanceLock {
+    // Never read: holding the open descriptor is what holds the lock.
+    _file: std::fs::File,
+}
+
+impl InstanceLock {
+    /// Takes the lock at `path`, retrying until `wait` has passed.
+    ///
+    /// Contention that outlasts the wait is reported as
+    /// [`std::io::ErrorKind::WouldBlock`], so the caller can tell another
+    /// instance apart from a lock file that could not be opened at all.
+    pub fn acquire(path: &Path, wait: std::time::Duration) -> std::io::Result<Self> {
+        use rustix::fs::{FlockOperation, flock};
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(rustix::io::Errno::WOULDBLOCK) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(std::io::ErrorKind::WouldBlock.into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(errno) => return Err(errno.into()),
+            }
+        }
+    }
+}
+
+/// Where the instance lock lives.
+///
+/// Beside the data directory rather than inside it: adopting the directory
+/// left by the application's old name moves the data directory wholesale,
+/// and a lock moved out from under the process holding it no longer guards
+/// the path the next process looks at. A data directory given through
+/// `TROVE_DATA_DIR` is never adopted or moved, so its lock can sit inside it,
+/// which also keeps two such directories from blocking each other.
+pub fn instance_lock_path(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("TROVE_DATA_DIR") {
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir)?;
+        return Ok(dir.join(".trove-instance.lock"));
+    }
+    let data_dir = app.path().app_data_dir()?;
+    let (Some(parent), Some(name)) = (data_dir.parent(), data_dir.file_name()) else {
+        anyhow::bail!("data directory has no parent to hold the instance lock");
+    };
+    std::fs::create_dir_all(parent)?;
+    Ok(parent.join(format!("{}.lock", name.to_string_lossy())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +541,70 @@ mod tests {
         let current = root.path().join("missing").join("pl.local.trove");
 
         assert_eq!(adopt_legacy_data_dir(current, Some(legacy.clone())), legacy);
+    }
+
+    #[test]
+    fn a_second_instance_lock_on_the_same_path_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pl.local.trove.lock");
+        let _first = InstanceLock::acquire(&path, std::time::Duration::ZERO).unwrap();
+
+        let second = InstanceLock::acquire(&path, std::time::Duration::ZERO);
+
+        assert_eq!(
+            second.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::WouldBlock),
+            "contention must read as another instance, not as a broken lock file"
+        );
+    }
+
+    #[test]
+    fn the_instance_lock_is_free_again_once_its_holder_lets_go() {
+        // The kernel releases the lock with the descriptor, which is what
+        // keeps a crashed instance from locking the history away for good.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pl.local.trove.lock");
+        drop(InstanceLock::acquire(&path, std::time::Duration::ZERO).unwrap());
+
+        assert!(InstanceLock::acquire(&path, std::time::Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn a_waiting_instance_lock_is_taken_when_the_old_process_lets_go() {
+        // The shape of an update: the new process starts while the old one
+        // still holds the lock, and must wait it out rather than step aside.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pl.local.trove.lock");
+        let old = InstanceLock::acquire(&path, std::time::Duration::ZERO).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(old);
+        });
+
+        let new = InstanceLock::acquire(&path, INSTANCE_LOCK_WAIT);
+
+        release.join().unwrap();
+        assert!(new.is_ok());
+    }
+
+    #[test]
+    fn instance_locks_in_different_directories_do_not_block_each_other() {
+        // Separate data directories are separate histories, as two
+        // `TROVE_DATA_DIR` runs side by side are.
+        let one = tempfile::tempdir().unwrap();
+        let two = tempfile::tempdir().unwrap();
+        let _first = InstanceLock::acquire(
+            &one.path().join(".trove-instance.lock"),
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        assert!(
+            InstanceLock::acquire(
+                &two.path().join(".trove-instance.lock"),
+                std::time::Duration::ZERO
+            )
+            .is_ok()
+        );
     }
 }

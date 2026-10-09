@@ -27,8 +27,38 @@ pub async fn purge_retired_settings(store: &trove_store::StoreHandle) {
     let _ = store.delete_setting("typesafe").await;
 }
 
+/// Whether this process turns away a second launch through the
+/// single-instance plugin.
+///
+/// Not when `TROVE_DATA_DIR` is set: that is how a development or test run is
+/// pointed at a history of its own, and it has to be able to start alongside
+/// the installed application, which the plugin would refuse because it keys
+/// on the bundle identifier the two share. Such a run is still guarded by the
+/// instance lock inside its own data directory.
+pub fn single_instance_enabled() -> bool {
+    std::env::var_os("TROVE_DATA_DIR").is_none()
+}
+
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // First, so a second launch exits before any other plugin has done
+    // anything on its behalf. Two instances record every copy twice, put two
+    // items on the menu bar, and let one reclaim blobs the other has written
+    // but not yet committed. A second launch can come from the login item,
+    // which runs the binary directly rather than through Launch Services,
+    // from `open -n`, from a second copy of the bundle, or from an update's
+    // restart. The running instance is told instead, and answers the way a
+    // click on its Dock tile is answered: with the palette.
+    if single_instance_enabled() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // The plugin calls this from a task on the async runtime, and
+            // summoning the palette reads the frontmost application and moves
+            // a window, both of which belong on the main thread.
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || hotkey::show_palette(&handle));
+        }));
+    }
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -38,6 +68,23 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Before the data directory is resolved, because resolving it can
+            // move the legacy directory, and that is already writing to the
+            // history.
+            let lock_path = state::instance_lock_path(app.handle())?;
+            match state::InstanceLock::acquire(&lock_path, state::INSTANCE_LOCK_WAIT) {
+                Ok(lock) => {
+                    app.manage(lock);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    eprintln!("trove: another instance is already running");
+                    std::process::exit(0);
+                }
+                // A lock file that cannot be opened is not another instance,
+                // and refusing to start over it would take the history away
+                // over a guard. The single-instance plugin still stands.
+                Err(error) => eprintln!("trove: instance lock unavailable ({error})"),
+            }
             let data_dir = state::resolve_data_dir(app.handle())?;
             let app_state = state::AppState::open_data_dir(data_dir)?;
             // The menu bar is where this application exists on screen, so it
