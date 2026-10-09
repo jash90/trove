@@ -23,11 +23,6 @@
 #                               losing this key strands them all on the version
 #                               they have.
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  the password that key was made with
-#   RELEASES_REPO_TOKEN         fine-grained token, contents: write on
-#                               jash90/trove-releases and nothing else. That
-#                               public repository is where installed copies
-#                               look for updates: this one is private, and its
-#                               releases cannot be read without a token.
 name: Release
 
 on:
@@ -266,12 +261,13 @@ jobs:
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" "$DMG" --clobber
           else
-            gh release create "$TAG" "$DMG" --title "$TAG" --generate-notes
+            # A draft until the updater files are on it: published now, it would
+            # be `releases/latest` without a `latest.json`, and every check made
+            # in that minute would report the server as unreachable.
+            gh release create "$TAG" "$DMG" --title "$TAG" --generate-notes --draft
           fi
 
-      # The notes come from the release just published here, where
-      # --generate-notes can see the pull requests; the public repository has
-      # no history to generate them from.
+      # The notes are the ones --generate-notes just wrote for the release.
       - name: Write the update manifest
         env:
           GH_TOKEN: ${{ github.token }}
@@ -280,35 +276,29 @@ jobs:
           ARCHIVE: ${{ steps.updater.outputs.archive }}
         run: |
           NOTES="$(gh release view "$TAG" --json body --jq .body)"
-          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
           jq -n \
             --arg version "$VERSION" \
             --arg notes "$NOTES" \
             --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg signature "$(cat "$ARCHIVE.sig")" \
-            --arg url "https://github.com/jash90/trove-releases/releases/download/$TAG/Trove.app.tar.gz" \
+            --arg url "https://github.com/jash90/trove/releases/download/$TAG/Trove.app.tar.gz" \
             '{version: $version, notes: $notes, pub_date: $date,
               platforms: {"darwin-aarch64": {signature: $signature, url: $url}}}' \
             > "$RUNNER_TEMP/latest.json"
           cat "$RUNNER_TEMP/latest.json"
 
       # Last, because this is the step that makes the release reach people:
-      # installed copies read `releases/latest/download/latest.json` here.
-      - name: Publish to the public releases repository
+      # installed copies read `releases/latest/download/latest.json` here, and
+      # a release without it is one they cannot see.
+      - name: Publish the updater files
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
-          DMG: ${{ steps.dmg.outputs.path }}
           ARCHIVE: ${{ steps.updater.outputs.archive }}
         run: |
-          REPO="jash90/trove-releases"
-          FILES=("$DMG" "$ARCHIVE" "$ARCHIVE.sig" "$RUNNER_TEMP/latest.json")
-          if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
-            gh release upload "$TAG" "${FILES[@]}" --repo "$REPO" --clobber
-          else
-            gh release create "$TAG" "${FILES[@]}" --repo "$REPO" \
-              --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest
-          fi
+          gh release upload "$TAG" --clobber \
+            "$ARCHIVE" "$ARCHIVE.sig" "$RUNNER_TEMP/latest.json"
+          gh release edit "$TAG" --draft=false --latest
 
       - name: Remove the signing keychain
         if: always()
