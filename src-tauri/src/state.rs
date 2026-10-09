@@ -318,21 +318,29 @@ impl InstanceLock {
     }
 }
 
-/// Where the instance lock lives.
-///
-/// Beside the data directory rather than inside it: adopting the directory
-/// left by the application's old name moves the data directory wholesale,
-/// and a lock moved out from under the process holding it no longer guards
-/// the path the next process looks at. A data directory given through
-/// `TROVE_DATA_DIR` is never adopted or moved, so its lock can sit inside it,
-/// which also keeps two such directories from blocking each other.
+/// Where the instance lock lives, for the data directory this run uses:
+/// the one given through `TROVE_DATA_DIR`, or the application's own.
 pub fn instance_lock_path(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("TROVE_DATA_DIR") {
-        let dir = PathBuf::from(dir);
-        std::fs::create_dir_all(&dir)?;
-        return Ok(dir.join(".trove-instance.lock"));
-    }
-    let data_dir = app.path().app_data_dir()?;
+    let data_dir = match std::env::var_os("TROVE_DATA_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => app.path().app_data_dir()?,
+    };
+    instance_lock_path_for(&data_dir)
+}
+
+/// The instance lock for `data_dir`: `<parent>/<name>.lock`, beside the data
+/// directory and never inside it.
+///
+/// Inside it would break two things. The store adopts an existing data
+/// directory without a database only when it is empty, so a lock file put
+/// there first makes a fresh directory unusable; and creating the directory
+/// here would give it default permissions instead of the private ones the
+/// store creates it with. Adopting the directory left by the application's old
+/// name also moves the data directory wholesale, and a lock moved out from
+/// under the process holding it no longer guards the path the next process
+/// looks at. Only the parent is created. Separate data directories still get
+/// separate locks, so two `TROVE_DATA_DIR` runs do not block each other.
+pub fn instance_lock_path_for(data_dir: &Path) -> anyhow::Result<PathBuf> {
     let (Some(parent), Some(name)) = (data_dir.parent(), data_dir.file_name()) else {
         anyhow::bail!("data directory has no parent to hold the instance lock");
     };
@@ -594,17 +602,39 @@ mod tests {
         let one = tempfile::tempdir().unwrap();
         let two = tempfile::tempdir().unwrap();
         let _first = InstanceLock::acquire(
-            &one.path().join(".trove-instance.lock"),
+            &instance_lock_path_for(&one.path().join("data")).unwrap(),
             std::time::Duration::ZERO,
         )
         .unwrap();
 
         assert!(
             InstanceLock::acquire(
-                &two.path().join(".trove-instance.lock"),
+                &instance_lock_path_for(&two.path().join("data")).unwrap(),
                 std::time::Duration::ZERO
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn a_fresh_data_directory_still_opens_once_its_instance_lock_is_held() {
+        // The order setup runs in: lock first, then open the store. The lock
+        // must not create the data directory or put anything in it, or the
+        // store refuses to adopt it.
+        let root = tempfile::tempdir().unwrap();
+        let data_dir = root.path().join("data").join("dev");
+
+        let lock_path = instance_lock_path_for(&data_dir).unwrap();
+        let _lock = InstanceLock::acquire(&lock_path, std::time::Duration::ZERO).unwrap();
+        let existed_before_the_store = data_dir.exists();
+
+        if let Err(error) = AppState::open_data_dir(&data_dir) {
+            panic!("a fresh data directory must open with the lock held: {error:#}");
+        }
+        assert!(
+            !existed_before_the_store,
+            "the store creates the data directory, with its own permissions"
+        );
+        assert_eq!(lock_path, root.path().join("data").join("dev.lock"));
     }
 }

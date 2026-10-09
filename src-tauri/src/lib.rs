@@ -34,7 +34,7 @@ pub async fn purge_retired_settings(store: &trove_store::StoreHandle) {
 /// pointed at a history of its own, and it has to be able to start alongside
 /// the installed application, which the plugin would refuse because it keys
 /// on the bundle identifier the two share. Such a run is still guarded by the
-/// instance lock inside its own data directory.
+/// instance lock kept beside its own data directory.
 pub fn single_instance_enabled() -> bool {
     std::env::var_os("TROVE_DATA_DIR").is_none()
 }
