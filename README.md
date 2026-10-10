@@ -1,5 +1,7 @@
 # Trove
 
+**English** | [Polski](README.pl.md)
+
 A local clipboard history manager. Rust core, Tauri 2 shell, React interface.
 The history, its index and its blobs never leave this device, and fonts and
 every other asset are bundled locally.
