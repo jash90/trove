@@ -190,19 +190,23 @@ code (`launch_invalid`, `app_not_found`, `app_not_launchable`,
 
 ## Quality gates
 
-All of these must pass before a task is closed:
+All of these must pass before a task is closed. `scripts/ci.sh` runs them in
+this order (the same gates the CI workflow ran):
 
 ```bash
 cargo fmt --all --check
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 
-pnpm --dir apps/desktop-ui test -- --run
-pnpm --dir apps/desktop-ui typecheck
-pnpm --dir apps/desktop-ui build
+pnpm typecheck
+pnpm test
+pnpm build
 
-cargo tauri build --debug --no-bundle
+pnpm tauri build --debug --no-bundle
 ```
+
+`git config core.hooksPath .githooks` makes every `git push` run
+`scripts/ci.sh` first.
 
 Checking that the built bundle references no remote resource at all (only XML
 namespaces and the chat settings' default endpoint are allowed — the first is
@@ -215,8 +219,9 @@ grep -rEoh 'https?://[^"'"'"' )]*' apps/desktop-ui/dist \
   | grep -v 'www\.w3\.org' | grep -v 'api\.openai\.com' | sort -u
 ```
 
-CI stops at `--no-bundle`; signing, notarisation and the disk image belong to
-the release workflow (`.github/workflows/release.yml`), which runs on a `v*` tag.
+The gates stop at `--no-bundle`; signing, notarisation and the disk image
+belong to `scripts/release.sh`, which builds and publishes a release from this
+Mac — see [RELEASING.md](RELEASING.md).
 
 ## Updates
 
@@ -236,11 +241,11 @@ Releasing needs, once:
    its password somewhere safe. Losing them strands every installed copy on the
    version it has.
 2. The contents of `~/.tauri/trove-updater.key.pub` in `plugins.updater.pubkey`.
-   The release workflow refuses to build while the placeholder is there.
-3. Repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the key file's contents) and
-   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+   The release script refuses to build while the placeholder is there.
+3. The key's path in `~/.config/local-release/tauri-updater.env` and its
+   password next to it — see [RELEASING.md](RELEASING.md).
 
-Each tag then publishes the disk image, `Trove.app.tar.gz`, its `.sig` and
+Each release then publishes the disk image, `Trove.app.tar.gz`, its `.sig` and
 `latest.json` on its release. 1.8.1 and earlier have no updater, and 1.9.0
 looks for updates in a repository that no longer exists, so both have to be
 replaced by hand from the disk image once.
