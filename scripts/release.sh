@@ -324,8 +324,12 @@ write_manifest() {
 
 if [[ $DRY_RUN -eq 1 ]]; then
   # The notes GitHub would generate, without creating anything.
-  NOTES="$(gh api "repos/$REPO/releases/generate-notes" -f tag_name="$TAG" \
-    -f target_commitish="$HEAD_SHA" --jq .body 2>/dev/null || echo "Trove $VERSION")"
+  # On an API error gh prints the error body to stdout, so the output is only
+  # used when the call succeeded.
+  if ! NOTES="$(gh api "repos/$REPO/releases/generate-notes" -f tag_name="$TAG" \
+      -f target_commitish="$HEAD_SHA" --jq .body 2> /dev/null)" || [[ -z $NOTES ]]; then
+    NOTES="Trove $VERSION"
+  fi
   write_manifest "$NOTES"
   (cd "$OUT" && shasum -a 256 "$DMG_NAME" "$ARCHIVE_NAME" > SHA256SUMS)
   log "Dry run complete: nothing was tagged, pushed or published."
