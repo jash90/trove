@@ -93,6 +93,12 @@ APP="$ROOT/target/release/bundle/macos/Trove.app"
 DMG_NAME="Trove_${VERSION}_aarch64.dmg"
 ARCHIVE_NAME="Trove.app.tar.gz"
 
+# Pipelines below never end in `grep -q`: with pipefail, grep exiting at the
+# first match kills the writer with SIGPIPE and the whole check reads as false.
+
+# team_of <path> — the TeamIdentifier a signature carries.
+team_of() { codesign -dvv "$1" 2>&1 | sed -n 's/^TeamIdentifier=//p'; }
+
 # Strict in a real run, a warning in a dry run.
 gate() {
   if [[ $DRY_RUN -eq 1 ]]; then warn "$* (ignored: --dry-run)"; else die "$*"; fi
@@ -157,7 +163,7 @@ fi
 
 # The certificate is picked by SHA-1: two Developer ID certificates on this
 # account share a name, and signing by name fails as ambiguous.
-security find-identity -v -p codesigning | grep -q "$APPLE_SIGNING_IDENTITY" \
+security find-identity -v -p codesigning | grep -F > /dev/null "$APPLE_SIGNING_IDENTITY" \
   || die "signing identity $APPLE_SIGNING_IDENTITY is not in the keychain"
 xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" > /dev/null 2>&1 \
   || die "notarytool profile '$NOTARY_PROFILE' does not work (see RELEASING.md)"
@@ -209,7 +215,7 @@ log "Sign the application"
 codesign --force --deep --timestamp --options runtime --sign "$APPLE_SIGNING_IDENTITY" "$APP"
 # The exit code is not enough: a failed sign can leave the previous signature
 # in place, so the identity itself is what gets checked.
-codesign -dvv "$APP" 2>&1 | grep -q "^TeamIdentifier=$APPLE_TEAM_ID\$" \
+[[ $(team_of "$APP") == "$APPLE_TEAM_ID" ]] \
   || die "the bundle is not signed by team $APPLE_TEAM_ID"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
@@ -250,7 +256,7 @@ hdiutil create -volname "Trove" -srcfolder "$WORK/dmg-stage" -ov -format UDZO "$
 
 log "Sign, notarise and staple the disk image"
 codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
-codesign -dvv "$DMG" 2>&1 | grep -q "^TeamIdentifier=$APPLE_TEAM_ID\$" \
+[[ $(team_of "$DMG") == "$APPLE_TEAM_ID" ]] \
   || die "the disk image is not signed by team $APPLE_TEAM_ID"
 notarise "$DMG"
 xcrun stapler staple "$DMG"
@@ -273,9 +279,9 @@ spctl -a -vv "$APP"
 log "Build and sign the updater archive"
 ARCHIVE="$WORK/$ARCHIVE_NAME"
 COPYFILE_DISABLE=1 tar -czf "$ARCHIVE" -C "$(dirname "$APP")" Trove.app
-tar -tzf "$ARCHIVE" | grep -q "^Trove.app/Contents/MacOS/" \
+tar -tzf "$ARCHIVE" | grep > /dev/null "^Trove.app/Contents/MacOS/" \
   || die "the updater archive does not hold the application"
-if tar -tzf "$ARCHIVE" | grep -q "/\._"; then
+if tar -tzf "$ARCHIVE" | grep > /dev/null "/\._"; then
   die "the updater archive carries AppleDouble files"
 fi
 TAURI_SIGNING_PRIVATE_KEY_PATH="$UPDATER_KEY" \
