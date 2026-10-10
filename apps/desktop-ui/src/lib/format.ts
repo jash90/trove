@@ -1,3 +1,4 @@
+import { getLocale, t, type MessageKey } from '../i18n';
 import { MAX_THUMBNAIL_BASE64_BYTES, type ContentKind, type Thumbnail } from './contracts';
 
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
@@ -25,31 +26,43 @@ export const formatCount = (value: number): string =>
 
 export const fileBasename = (value: string): string => {
   const segments = value.split(/[\\/]/u).filter(Boolean);
-  return segments.at(-1) ?? 'Unnamed file';
+  return segments.at(-1) ?? t('format.unnamedFile');
 };
 
 export const formatByteSize = (bytes: number): string => {
   if (bytes < 1_024) return `${bytes} B`;
-  if (bytes < 1_048_576) return `${(bytes / 1_024).toLocaleString('en-US', { maximumFractionDigits: 1 })} KB`;
-  return `${(bytes / 1_048_576).toLocaleString('en-US', { maximumFractionDigits: 1 })} MB`;
+  const numberLocale = getLocale() === 'pl' ? 'pl-PL' : 'en-US';
+  if (bytes < 1_048_576) return `${(bytes / 1_024).toLocaleString(numberLocale, { maximumFractionDigits: 1 })} KB`;
+  return `${(bytes / 1_048_576).toLocaleString(numberLocale, { maximumFractionDigits: 1 })} MB`;
 };
 
-export const KIND_LABELS: Record<ContentKind, string> = {
-  text: 'Text',
-  link: 'Link',
-  image: 'Image',
-  file: 'File',
-  color: 'Colour',
-  code: 'Code',
-  html: 'HTML',
+const KIND_KEYS: Record<ContentKind, MessageKey> = {
+  text: 'kind.text',
+  link: 'kind.link',
+  image: 'kind.image',
+  file: 'kind.file',
+  color: 'kind.color',
+  code: 'kind.code',
+  html: 'kind.html',
 };
 
-const CAPTURED_AT_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+/** The name of a content kind, in the current language. */
+export const kindLabel = (kind: ContentKind): string => t(KIND_KEYS[kind]);
+
+const CAPTURED_AT_OPTIONS: Intl.DateTimeFormatOptions = {
   day: '2-digit',
   month: 'short',
   hour: '2-digit',
   minute: '2-digit',
-});
+};
+const capturedAtFormatters = new Map<string, Intl.DateTimeFormat>();
 
-export const formatCapturedAt = (capturedAtMs: number): string =>
-  CAPTURED_AT_FORMATTER.format(capturedAtMs);
+export const formatCapturedAt = (capturedAtMs: number): string => {
+  const dateLocale = getLocale() === 'pl' ? 'pl-PL' : 'en-GB';
+  let formatter = capturedAtFormatters.get(dateLocale);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(dateLocale, CAPTURED_AT_OPTIONS);
+    capturedAtFormatters.set(dateLocale, formatter);
+  }
+  return formatter.format(capturedAtMs);
+};

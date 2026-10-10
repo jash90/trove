@@ -1,6 +1,7 @@
 import { KeyRound } from 'lucide-react';
 import type { CSSProperties, MouseEventHandler } from 'react';
 
+import { t } from '../i18n';
 import type { KeyvaultSecret } from '../lib/contracts';
 
 interface VaultRowProps {
@@ -39,7 +40,7 @@ export const VaultRow = ({
       id={`vault-option-${index}`}
       role="option"
       aria-selected={selected}
-      aria-label={`Vault secret: ${secret.name}`}
+      aria-label={t('vault.row.label', { name: secret.name })}
       data-slug={secret.slug}
       className={`history-row vault-row${selected ? ' is-selected' : ''}`}
       style={style}
@@ -54,7 +55,7 @@ export const VaultRow = ({
         <span className="history-row__metadata">
           <span>{secret.slug}</span>
           {secret.category ? <span>{secret.category}</span> : null}
-          <span>Keyvault</span>
+          <span>{t('vault.row.source')}</span>
         </span>
       </span>
     </div>

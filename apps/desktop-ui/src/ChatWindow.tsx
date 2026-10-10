@@ -24,31 +24,27 @@ import {
   type ChatStreamEvent,
 } from './lib/contracts';
 import { GatewayProvider, useGateway, type ClipboardGateway } from './lib/gateway';
+import { t, type MessageKey } from './i18n';
 
 /** The interface's copy for the core's stable refusal codes. */
-const CHAT_ERROR_SENTENCES: Record<string, string> = {
-  chat_key_unavailable:
-    'The key could not be read from the vault. Check that it is paired and the slug is right.',
-  chat_network_error: 'The provider could not be reached. Check the connection and the base URL.',
-  chat_provider_refused:
-    'The provider refused the request. Check the model name and the key.',
-  chat_key_missing: 'Add this provider\u2026s API key in the chat settings first.',
-  chat_key_refused:
-    'The provider refused this key. Check it — and if it is a Z.ai Coding Plan key, choose the Coding Plan provider, whose endpoint is its own.',
-  chat_endpoint_not_found:
-    'The provider has no such model or endpoint. Check the model name, or load the list again.',
-  chat_rate_limited: 'The provider is rate-limiting. Wait a moment and try again.',
-  chat_models_unavailable:
-    'The model list could not be fetched. The suggestions stand; type on.',
-  chat_invalid_request: 'That message could not be sent.',
-  chat_stream_ended_empty: 'The provider closed the stream without answering.',
-  chat_stream_malformed: 'The provider sent a stream this window cannot read.',
-  chat_event_unavailable: 'The answer could not be delivered to the window.',
-  chat_settings_unavailable: 'The chat settings could not be read.',
+const CHAT_ERROR_SENTENCES: Record<string, MessageKey> = {
+  chat_key_unavailable: 'chat.error.key_unavailable',
+  chat_network_error: 'chat.error.network_error',
+  chat_provider_refused: 'chat.error.provider_refused',
+  chat_key_missing: 'chat.error.key_missing',
+  chat_key_refused: 'chat.error.key_refused',
+  chat_endpoint_not_found: 'chat.error.endpoint_not_found',
+  chat_rate_limited: 'chat.error.rate_limited',
+  chat_models_unavailable: 'chat.error.models_unavailable',
+  chat_invalid_request: 'chat.error.invalid_request',
+  chat_stream_ended_empty: 'chat.error.stream_ended_empty',
+  chat_stream_malformed: 'chat.error.stream_malformed',
+  chat_event_unavailable: 'chat.error.event_unavailable',
+  chat_settings_unavailable: 'chat.error.settings_unavailable',
 };
 
 const sentenceForCode = (code: string): string =>
-  CHAT_ERROR_SENTENCES[code] ?? 'The model could not be reached. Try again in a moment.';
+  t(CHAT_ERROR_SENTENCES[code] ?? 'chat.error.unknown');
 
 interface ChatDisplayMessage {
   role: ChatRole;
@@ -195,7 +191,7 @@ const ChatConversation = (): React.JSX.Element => {
           // Older messages send no attachments: the model has seen them,
           // and resending megabytes with every turn serves nobody.
         })),
-      { role: 'user', content: content === '' ? '(see attachments)' : content, attachments: riding },
+      { role: 'user', content: content === '' ? t('chat.seeAttachments') : content, attachments: riding },
     ];
     setMessages((previous) => [
       ...previous,
@@ -248,7 +244,7 @@ const ChatConversation = (): React.JSX.Element => {
     for (const file of Array.from(files).slice(0, 4)) {
       if (file.type.startsWith('image/')) {
         if (file.size > 3 * 1024 * 1024) {
-          refused.push(`${file.name} is over 3 MB`);
+          refused.push(t('chat.attach.tooLarge', { name: file.name, limit: '3 MB' }));
           continue;
         }
         const reader = new FileReader();
@@ -263,7 +259,7 @@ const ChatConversation = (): React.JSX.Element => {
         reader.readAsDataURL(file);
       } else if (isTextFile(file)) {
         if (file.size > 256 * 1024) {
-          refused.push(`${file.name} is over 256 KB`);
+          refused.push(t('chat.attach.tooLarge', { name: file.name, limit: '256 KB' }));
           continue;
         }
         const reader = new FileReader();
@@ -275,7 +271,7 @@ const ChatConversation = (): React.JSX.Element => {
         };
         reader.readAsText(file);
       } else {
-        refused.push(`${file.name} — only images and text files can ride along`);
+        refused.push(t('chat.attach.unsupported', { name: file.name }));
       }
     }
     if (refused.length > 0) {
@@ -316,7 +312,7 @@ const ChatConversation = (): React.JSX.Element => {
   }, [settings]);
 
   return (
-    <main className="chat-shell" aria-label="Trove chat">
+    <main className="chat-shell" aria-label={t('chat.label')}>
       <header className="chat-header">
         <MessageSquareText size={16} strokeWidth={1.8} aria-hidden="true" />
         <span className="chat-header__model">{modelLabel}</span>
@@ -324,7 +320,7 @@ const ChatConversation = (): React.JSX.Element => {
           <button
             type="button"
             className="chat-icon-button"
-            aria-label="Chat settings"
+            aria-label={t('chat.settings')}
             aria-expanded={settingsOpen}
             onClick={() => setSettingsOpen((open) => !open)}
           >
@@ -333,14 +329,14 @@ const ChatConversation = (): React.JSX.Element => {
           <button
             type="button"
             className="chat-icon-button"
-            aria-label="Save the conversation as Markdown"
+            aria-label={t('chat.saveMarkdown')}
             disabled={messages.length === 0}
             onClick={() => {
               const markdown = messages
                 .map((message) =>
                   message.error !== null
                     ? `> ${message.error}`
-                    : `${message.role === 'user' ? '## You' : '## Model'}\n\n${message.content}`,
+                    : `## ${message.role === 'user' ? t('chat.markdown.you') : t('chat.markdown.model')}\n\n${message.content}`,
                 )
                 .join('\n\n---\n\n');
               void gateway
@@ -353,7 +349,7 @@ const ChatConversation = (): React.JSX.Element => {
           <button
             type="button"
             className="chat-icon-button"
-            aria-label="Clear the conversation"
+            aria-label={t('chat.clear')}
             disabled={messages.length === 0 || streaming}
             onClick={() => setMessages([])}
           >
@@ -369,9 +365,7 @@ const ChatConversation = (): React.JSX.Element => {
       <div className="chat-log" ref={listRef} role="log" aria-live="polite">
         {messages.length === 0 ? (
           <p className="chat-empty">
-            A conversation with the model the settings name. The key is given in
-            the settings here and stored in this application; the conversation
-            goes only to the provider named above.
+            {t('chat.empty')}
           </p>
         ) : (
           messages.map((message, index) => (
@@ -399,7 +393,7 @@ const ChatConversation = (): React.JSX.Element => {
                   // answer itself starts arriving.
                   open={message.pending && message.content === ''}
                 >
-                  <summary>Thinking</summary>
+                  <summary>{t('chat.thinking')}</summary>
                   <p className="chat-thinking__text">{message.reasoning}</p>
                 </details>
               ) : null}
@@ -411,7 +405,7 @@ const ChatConversation = (): React.JSX.Element => {
                     onPreview={setPreview}
                   />
                   {message.pending && message.content === '' && message.reasoning === '' ? (
-                    <span className="chat-message__waiting" aria-label="Thinking">
+                    <span className="chat-message__waiting" aria-label={t('chat.thinking')}>
                       …
                     </span>
                   ) : null}
@@ -420,7 +414,7 @@ const ChatConversation = (): React.JSX.Element => {
                 <p className="chat-message__content">
                   {message.error ?? message.content}
                   {message.pending && message.content === '' ? (
-                    <span className="chat-message__waiting" aria-label="Thinking">
+                    <span className="chat-message__waiting" aria-label={t('chat.thinking')}>
                       …
                     </span>
                   ) : null}
@@ -446,7 +440,7 @@ const ChatConversation = (): React.JSX.Element => {
                 <button
                   type="button"
                   className="chat-chip__remove"
-                  aria-label={`Remove ${attachment.name}`}
+                  aria-label={t('chat.attach.remove', { name: attachment.name })}
                   onClick={() =>
                     setAttachments((previous) =>
                       previous.filter((_, position) => position !== index),
@@ -463,7 +457,7 @@ const ChatConversation = (): React.JSX.Element => {
         <button
           type="button"
           className="chat-icon-button"
-          aria-label="Attach files"
+          aria-label={t('chat.attach')}
           disabled={!capable || attachments.length >= 4}
           onClick={() => fileInputRef.current?.click()}
         >
@@ -474,7 +468,7 @@ const ChatConversation = (): React.JSX.Element => {
           type="file"
           multiple
           className="sr-only"
-          aria-label="Attach files"
+          aria-label={t('chat.attach')}
           tabIndex={-1}
           accept="image/*,.md,.txt,.json,.csv,.yaml,.yml,.toml,.rs,.ts,.tsx,.js,.jsx,.py,.go,.java,.c,.h,.cpp,.sh,.html,.css,.sql,.swift,.kt"
           onChange={(event) => {
@@ -486,10 +480,10 @@ const ChatConversation = (): React.JSX.Element => {
           ref={inputRef}
           className="chat-composer__input"
           rows={3}
-          placeholder={capable ? 'Write to the model…' : 'Chat is unavailable in this window.'}
+          placeholder={capable ? t('chat.placeholder') : t('chat.unavailable')}
           value={draft}
           disabled={!capable}
-          aria-label="Message"
+          aria-label={t('chat.message')}
           onChange={(event) => setDraft(event.currentTarget.value)}
           onKeyDown={handleDraftKeyDown}
         />
@@ -497,7 +491,7 @@ const ChatConversation = (): React.JSX.Element => {
           <button
             type="button"
             className="chat-composer__send"
-            aria-label="Stop the answer"
+            aria-label={t('chat.stop')}
             onClick={stop}
           >
             <Square size={15} aria-hidden="true" />
@@ -506,7 +500,7 @@ const ChatConversation = (): React.JSX.Element => {
           <button
             type="button"
             className="chat-composer__send"
-            aria-label="Send the message"
+            aria-label={t('chat.send')}
             disabled={draft.trim() === '' || !capable}
             onClick={send}
           >
@@ -583,7 +577,7 @@ const ArtifactPreview = ({
               filename: 'artifact.tsx',
             })?.code ?? '';
         } catch (error) {
-          const note = `The JSX did not compile:\n\n${String(error)}`;
+          const note = `${t('artifact.compileFailed')}:\n\n${String(error)}`;
           frame.contentWindow?.postMessage(
             { kind: 'artifact', language: 'jsx', error: note },
             '*',
@@ -597,7 +591,7 @@ const ArtifactPreview = ({
         );
         setCompileState({ phase: 'ready' });
       })
-      .catch(() => setCompileState({ phase: 'failed', note: 'The compiler could not be loaded.' }));
+      .catch(() => setCompileState({ phase: 'failed', note: t('artifact.compilerMissing') }));
   }, []);
 
   useEffect(() => {
@@ -609,20 +603,20 @@ const ArtifactPreview = ({
   }, [send]);
 
   return (
-    <div className="chat-artifact" role="dialog" aria-label="Artifact preview">
+    <div className="chat-artifact" role="dialog" aria-label={t('artifact.preview')}>
       <header className="chat-artifact__bar">
         <span className="chat-artifact__title">{preview.language}</span>
         <span className="chat-artifact__note">
           {compileState.phase === 'compiling'
-            ? 'Compiling…'
+            ? t('artifact.compiling')
             : compileState.phase === 'failed'
-              ? 'The JSX did not compile'
-              : 'Runs sandboxed — nothing of this application is reachable'}
+              ? t('artifact.compileFailed')
+              : t('artifact.sandboxed')}
         </span>
         <button
           type="button"
           className="chat-icon-button"
-          aria-label="Close the preview"
+          aria-label={t('artifact.close')}
           onClick={onClose}
         >
           <X size={15} aria-hidden="true" />
@@ -631,7 +625,7 @@ const ArtifactPreview = ({
       <iframe
         ref={frameRef}
         className="chat-artifact__frame"
-        title="Artifact preview"
+        title={t('artifact.preview')}
         sandbox="allow-scripts"
         srcDoc={ARTIFACT_BOOTSTRAP}
         onLoad={send}
@@ -722,7 +716,7 @@ const CodeBlock = ({
             className="chat-code__action chat-code__action--run"
             onClick={() => onPreview({ language, source: text })}
           >
-            <Play size={11} aria-hidden="true" /> Preview
+            <Play size={11} aria-hidden="true" /> {t('code.preview')}
           </button>
         ) : null}
         <button
@@ -738,7 +732,7 @@ const CodeBlock = ({
               .catch(() => undefined);
           }}
         >
-          {copied ? 'Copied' : 'Copy'}
+          {copied ? t('code.copied') : t('code.copy')}
         </button>
         <button
           type="button"
@@ -753,7 +747,7 @@ const CodeBlock = ({
               .catch(() => undefined);
           }}
         >
-          {saved ? 'Saved' : 'Save as file'}
+          {saved ? t('code.saved') : t('code.saveFile')}
         </button>
       </div>
       <pre>{node}</pre>
@@ -856,7 +850,7 @@ const ChatSettingsForm = ({
       }}
     >
       <label className="chat-settings__field">
-        <span>Provider</span>
+        <span>{t('chat.form.provider')}</span>
         <select
           value={provider}
           onChange={(event) => switchProvider(event.currentTarget.value as ChatProvider)}
@@ -869,13 +863,13 @@ const ChatSettingsForm = ({
         </select>
       </label>
       <label className="chat-settings__field">
-        <span>API key</span>
+        <span>{t('chat.form.apiKey')}</span>
         <input
           type="password"
           value={keys[chatKeyField(provider)]}
           spellCheck={false}
           autoComplete="off"
-          placeholder={`${providerEntry?.label ?? provider} key`}
+          placeholder={t('chat.form.keyPlaceholder', { provider: providerEntry?.label ?? provider })}
           onChange={(event) => {
             // Read before the updater: the synthetic event is recycled by
             // the time React runs it, and currentTarget would be null.
@@ -886,12 +880,12 @@ const ChatSettingsForm = ({
         />
       </label>
       <label className="chat-settings__field">
-        <span>Model</span>
+        <span>{t('chat.form.model')}</span>
         <select
           value={model}
           onChange={(event) => setModel(event.currentTarget.value)}
         >
-          {model === '' ? <option value="">Pick a model…</option> : null}
+          {model === '' ? <option value="">{t('chat.form.pickModel')}</option> : null}
           {options.map((id) => (
             <option key={id} value={id}>
               {id}
@@ -905,15 +899,15 @@ const ChatSettingsForm = ({
         onClick={loadModels}
         disabled={fetching}
       >
-        {fetching ? 'Loading…' : 'Load models'}
+        {fetching ? t('chat.form.loading') : t('chat.form.loadModels')}
       </button>
       {fetchFailed ? (
         <span className="chat-settings__fetch-note" role="status">
-          The list could not be fetched; the suggestions stand.
+          {t('chat.form.fetchFailed')}
         </span>
       ) : null}
       <button type="submit" className="chat-settings__save">
-        Save
+        {t('chat.form.save')}
       </button>
     </form>
   );

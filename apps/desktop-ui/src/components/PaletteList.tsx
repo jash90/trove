@@ -1,6 +1,7 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useEffect, useRef } from 'react';
 
+import { t } from '../i18n';
 import { keyOfItem, type PaletteItem } from '../lib/paletteItems';
 import { AppRow } from './AppRow';
 import { VaultRow } from './VaultRow';
@@ -51,7 +52,7 @@ export const PaletteList = ({
       ref={scrollRef}
       id="history-results"
       role="listbox"
-      aria-label="Applications, secrets and history results"
+      aria-label={t('list.label')}
       className="history-list"
     >
       <div

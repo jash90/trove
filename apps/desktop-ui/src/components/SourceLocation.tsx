@@ -1,5 +1,6 @@
 import { FolderSearch } from 'lucide-react';
 
+import { t } from '../i18n';
 import { fileBasename } from '../lib/format';
 
 interface SourceLocationProps {
@@ -21,13 +22,13 @@ export const SourceLocation = ({
   onReveal,
 }: SourceLocationProps): React.JSX.Element => (
   <section className="source-location" aria-labelledby="source-location-title">
-    <span className="preview-label">Source location</span>
+    <span className="preview-label">{t('source.location')}</span>
     <h3 id="source-location-title">{fileBasename(path)}</h3>
     <p className="source-location__path">{path}</p>
     {exists ? (
       <button type="button" className="source-location__reveal" onClick={onReveal}>
         <FolderSearch size={15} aria-hidden="true" />
-        Show in Finder
+        {t('source.reveal')}
       </button>
     ) : null}
   </section>

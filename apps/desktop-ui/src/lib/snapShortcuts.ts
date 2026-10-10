@@ -1,3 +1,5 @@
+import { t } from "../i18n";
+
 /**
  * The snap positions the keyboard can drive, one row per chord.
  *
@@ -8,49 +10,81 @@
  */
 export interface SnapShortcut {
  id: string;
- label: string;
+ readonly label: string;
  chord: string;
 }
 
 export const SNAP_SHORTCUTS: readonly SnapShortcut[] = [
  {
   id: "leftHalf",
-  label: "Left half",
+  get label() {
+   return t("snap.leftHalf");
+  },
   chord: "CommandOrControl+Alt+ArrowLeft",
  },
  {
   id: "rightHalf",
-  label: "Right half",
+  get label() {
+   return t("snap.rightHalf");
+  },
   chord: "CommandOrControl+Alt+ArrowRight",
  },
- { id: "topHalf", label: "Top half", chord: "CommandOrControl+Alt+ArrowUp" },
+ {
+  id: "topHalf",
+  get label() {
+   return t("snap.topHalf");
+  },
+  chord: "CommandOrControl+Alt+ArrowUp",
+ },
  {
   id: "bottomHalf",
-  label: "Bottom half",
+  get label() {
+   return t("snap.bottomHalf");
+  },
   chord: "CommandOrControl+Alt+ArrowDown",
  },
  {
   id: "topLeft",
-  label: "Top left",
+  get label() {
+   return t("snap.topLeft");
+  },
   chord: "CommandOrControl+Control+ArrowLeft",
  },
  {
   id: "topRight",
-  label: "Top right",
+  get label() {
+   return t("snap.topRight");
+  },
   chord: "CommandOrControl+Control+ArrowRight",
  },
  {
   id: "bottomLeft",
-  label: "Bottom left",
+  get label() {
+   return t("snap.bottomLeft");
+  },
   chord: "CommandOrControl+Control+Shift+ArrowLeft",
  },
  {
   id: "bottomRight",
-  label: "Bottom right",
+  get label() {
+   return t("snap.bottomRight");
+  },
   chord: "CommandOrControl+Control+Shift+ArrowRight",
  },
- { id: "maximize", label: "Maximize", chord: "CommandOrControl+Alt+F" },
- { id: "center", label: "Center", chord: "CommandOrControl+Alt+C" },
+ {
+  id: "maximize",
+  get label() {
+   return t("snap.maximize");
+  },
+  chord: "CommandOrControl+Alt+F",
+ },
+ {
+  id: "center",
+  get label() {
+   return t("snap.center");
+  },
+  chord: "CommandOrControl+Alt+C",
+ },
 ];
 
 /** The map a fresh install snaps with. */

@@ -1,5 +1,6 @@
 import { Globe, LoaderCircle, ShieldOff } from 'lucide-react';
 
+import { t } from '../i18n';
 import type { LinkPreview } from '../lib/contracts';
 
 interface LinkPreviewCardProps {
@@ -27,7 +28,7 @@ export const LinkPreviewCard = ({ preview }: LinkPreviewCardProps): React.JSX.El
       // turning here forever.
       <div className="link-card__image link-card__image--pending" role="status">
         <LoaderCircle className="image-preview__spinner" size={20} aria-hidden="true" />
-        <span>Loading preview…</span>
+        <span>{t('preview.loading')}</span>
       </div>
     ) : null}
     <div className="link-card__identity">
@@ -56,7 +57,7 @@ export const LinkPreviewCard = ({ preview }: LinkPreviewCardProps): React.JSX.El
     {preview.localOnly ? (
       <p className="link-card__note">
         <ShieldOff size={13} aria-hidden="true" />
-        Link preview fetching is off — only the address is shown.
+        {t('link.localOnly')}
       </p>
     ) : null}
   </div>

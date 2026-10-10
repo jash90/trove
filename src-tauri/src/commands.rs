@@ -74,6 +74,7 @@ macro_rules! trove_command_registry {
             hide_palette => $crate::commands::hide_palette,
             check_for_update => $crate::updater::check_for_update,
             install_update => $crate::updater::install_update,
+            get_locale => $crate::commands::get_locale,
         }
     };
 }
@@ -616,6 +617,13 @@ pub async fn launch_app<R: tauri::Runtime>(
 #[tauri::command(rename_all = "camelCase")]
 pub fn hide_palette<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     crate::hotkey::hide_palette(&app);
+}
+
+/// The interface language, `"en"` or `"pl"`: the same answer the menu bar
+/// and the window titles use, so the windows never disagree with them.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_locale() -> &'static str {
+    crate::locale::current().code()
 }
 
 /// The side an application icon is rendered to. Double the ~31 CSS pixels

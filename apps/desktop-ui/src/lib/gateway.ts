@@ -42,6 +42,7 @@ import {
  type UpdateProgress,
 } from "./contracts";
 import { mockGateway } from "./mockGateway";
+import { t } from "../i18n";
 
 export interface ClipboardGateway {
  search(request: SearchRequest): Promise<HistoryPage>;
@@ -251,13 +252,15 @@ export const tauriGateway: ClipboardGateway = {
   invoke<CopyResult>("copy_event", { eventId, plainText, paste }),
  chooseImportFile: () =>
   open({
-   title: "Choose a clipboard history export",
+   title: t("dialog.importFile"),
    multiple: false,
-   filters: [{ name: "Clipboard export", extensions: ["json", "rayconfig"] }],
+   filters: [
+    { name: t("dialog.importFilter"), extensions: ["json", "rayconfig"] },
+   ],
   }),
  chooseImportDirectory: () =>
   open({
-   title: "Choose the clipboard history export directory",
+   title: t("dialog.importDirectory"),
    directory: true,
    recursive: true,
    multiple: false,
@@ -298,7 +301,7 @@ export const tauriGateway: ClipboardGateway = {
   subscribe<number>("link-preview-ready", listener),
  chooseExportDirectory: () =>
   save({
-   title: "Choose a directory for the history export",
+   title: t("dialog.exportDirectory"),
    defaultPath: "clipboard-export",
   }),
  exportHistory: (directory) =>
@@ -328,7 +331,7 @@ export const tauriGateway: ClipboardGateway = {
  chatListModels: () => invoke<string[]>("chat_list_models"),
  saveGeneratedFile: async (defaultName, contents) => {
   const target = await save({
-   title: "Save the file the chat produced",
+   title: t("dialog.saveChatFile"),
    defaultPath: defaultName,
   });
   if (target === null) return false;
@@ -386,7 +389,7 @@ interface GatewayProviderProps {
 
 const GatewayContext = createContext<ClipboardGateway | null>(null);
 
-const isTauriRuntime = (): boolean =>
+export const isTauriRuntime = (): boolean =>
  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export const GatewayProvider = ({

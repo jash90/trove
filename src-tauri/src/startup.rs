@@ -5,6 +5,8 @@ use std::path::Path;
 
 use trove_store::StoreError;
 
+use crate::locale::{Text, tr};
+
 /// The argument the login item passes, so a launch at login can be told apart
 /// from one the person asked for.
 pub const AUTOSTART_ARG: &str = "--autostart";
@@ -81,28 +83,26 @@ impl StartupFailure {
         }
     }
 
-    /// The alert's headline and the sentence under it.
+    /// The alert's headline and the sentence under it, in the shell's language.
     pub fn message(self) -> (&'static str, &'static str) {
+        let (title, detail) = self.texts();
+        (tr(title), tr(detail))
+    }
+
+    fn texts(self) -> (Text, Text) {
         match self {
             Self::SchemaNewer => (
-                "Trove cannot open your history",
-                "It was saved by a newer version of Trove. Install the latest \
-                 version to open it; this one has left it untouched.",
+                Text::StartupSchemaNewerTitle,
+                Text::StartupSchemaNewerDetail,
             ),
             Self::Permissions => (
-                "Trove cannot use its data folder",
-                "The folder must belong to you and be readable only by you. \
-                 Check its owner and permissions, then open Trove again.",
+                Text::StartupPermissionsTitle,
+                Text::StartupPermissionsDetail,
             ),
-            Self::Locked => (
-                "Trove's history is in use",
-                "Another copy of Trove, or another program, has the history \
-                 open. Quit it and open Trove again.",
-            ),
+            Self::Locked => (Text::StartupLockedTitle, Text::StartupLockedDetail),
             Self::Unavailable => (
-                "Trove cannot open its storage",
-                "The history database could not be opened. The details are in \
-                 ~/Library/Logs/Trove/trove.log.",
+                Text::StartupUnavailableTitle,
+                Text::StartupUnavailableDetail,
             ),
         }
     }
@@ -129,6 +129,8 @@ pub fn refuse_to_start(error: &anyhow::Error, data_dir: Option<&Path>) -> ! {
             message,
             detail,
             data_dir.is_some_and(Path::exists),
+            tr(Text::AlertShowDataFolder),
+            tr(Text::AlertQuit),
         );
         if choice == platform_macos::StartupAlertChoice::ShowDataFolder
             && let Some(dir) = data_dir
