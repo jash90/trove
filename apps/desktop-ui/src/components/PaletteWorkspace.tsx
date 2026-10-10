@@ -1,5 +1,7 @@
 import { PanelRightOpen } from "lucide-react";
 
+import { t } from "../i18n";
+
 import type {
   HistoryItem,
   LinkPreview as LinkPreviewContract,
@@ -96,12 +98,12 @@ export const PaletteWorkspace = ({
       <button
         type="button"
         className="preview-toggle"
-        aria-label="Show the selected entry preview"
+        aria-label={t("workspace.showPreview")}
         disabled={items.length === 0 || mode === "windows"}
         onClick={onOpenPreview}
       >
         <PanelRightOpen size={15} aria-hidden="true" />
-        Preview
+        {t("workspace.preview")}
       </button>
       {launchError ? (
         <p className="apps-launch-error" role="alert">

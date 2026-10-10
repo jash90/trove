@@ -1,5 +1,7 @@
 import { AppWindowMac, ClipboardX, LoaderCircle, TriangleAlert } from 'lucide-react';
 
+import { useT } from '../i18n';
+
 type EmptyStateKind = 'loading' | 'empty' | 'error';
 type EmptyStateSubject = 'history' | 'applications' | 'vault';
 
@@ -16,57 +18,16 @@ interface EmptyStateProps {
   quiet?: boolean;
 }
 
-const STATE_COPY: Record<EmptyStateSubject, Record<EmptyStateKind, { title: string; detail: string }>> = {
-  history: {
-    loading: {
-      title: 'Loading history…',
-      detail: 'Sorting the most recent entries.',
-    },
-    empty: {
-      title: 'The history is empty',
-      detail: 'Copied items appear here automatically.',
-    },
-    error: {
-      title: 'The history could not be loaded',
-      detail: 'Try again in a moment.',
-    },
-  },
-  applications: {
-    loading: {
-      title: 'Loading applications…',
-      detail: 'Reading the installed bundles.',
-    },
-    empty: {
-      title: 'No application matched',
-      detail: 'Type less to widen the results.',
-    },
-    error: {
-      title: 'The applications could not be loaded',
-      detail: 'Try again in a moment.',
-    },
-  },
-  vault: {
-    loading: {
-      title: 'Reading the vault…',
-      detail: 'Asking the paired vault for its keys.',
-    },
-    empty: {
-      title: 'No keys to show',
-      detail: 'A paired vault lists its keys here. Pair one in Settings.',
-    },
-    error: {
-      title: 'The vault could not be reached',
-      detail: 'Check the connection and try again.',
-    },
-  },
-};
-
 export const EmptyState = ({
   kind,
   subject = 'history',
   quiet = false,
 }: EmptyStateProps): React.JSX.Element => {
-  const copy = STATE_COPY[subject][kind];
+  const t = useT();
+  const copy = {
+    title: t(`empty.${subject}.${kind}.title`),
+    detail: t(`empty.${subject}.${kind}.detail`),
+  };
   const Icon =
     kind === 'loading'
       ? LoaderCircle

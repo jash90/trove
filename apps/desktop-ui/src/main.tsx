@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 
+import { invoke } from '@tauri-apps/api/core';
 import { lazy, StrictMode, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 
@@ -8,6 +9,8 @@ import '@fontsource-variable/source-serif-4';
 import '@fontsource-variable/space-grotesk';
 
 import { App } from './App';
+import { detectLocale, getLocale, setLocale } from './i18n';
+import { isTauriRuntime } from './lib/gateway';
 import './styles/tokens.css';
 import './styles/global.css';
 import './styles/palette.css';
@@ -36,20 +39,38 @@ const windowHash = window.location.hash;
 const isSettingsWindow = windowHash === '#settings';
 const isChatWindow = windowHash === '#chat';
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    {isSettingsWindow ? (
-      // Nothing as the fallback: the chunk is local and arrives within a
-      // frame or two, and a placeholder flashing first would be all anyone saw.
-      <Suspense fallback={null}>
-        <SettingsWindow />
-      </Suspense>
-    ) : isChatWindow ? (
-      <Suspense fallback={null}>
-        <ChatWindow />
-      </Suspense>
-    ) : (
-      <App />
-    )}
-  </StrictMode>,
-);
+/// The interface language comes from the shell when there is one, so the
+/// windows agree with the menu bar; the browser's languages are the answer in
+/// development and the fallback if the shell does not reply.
+const resolveLocale = async (): Promise<void> => {
+  if (isTauriRuntime()) {
+    try {
+      setLocale(detectLocale([await invoke<string>('get_locale')]));
+    } catch {
+      // The navigator's answer, already in place, stands.
+    }
+  }
+  document.documentElement.lang = getLocale();
+};
+
+void resolveLocale().then(render);
+
+function render(): void {
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      {isSettingsWindow ? (
+        // Nothing as the fallback: the chunk is local and arrives within a
+        // frame or two, and a placeholder flashing first would be all anyone saw.
+        <Suspense fallback={null}>
+          <SettingsWindow />
+        </Suspense>
+      ) : isChatWindow ? (
+        <Suspense fallback={null}>
+          <ChatWindow />
+        </Suspense>
+      ) : (
+        <App />
+      )}
+    </StrictMode>,
+  );
+}

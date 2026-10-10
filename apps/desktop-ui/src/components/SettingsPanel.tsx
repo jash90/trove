@@ -31,6 +31,7 @@ import type {
   StorageStats as StorageStatsContract,
 } from "../lib/contracts";
 import type { ClipboardGateway } from "../lib/gateway";
+import { t, useT, type MessageKey } from "../i18n";
 import {
   acceleratorFromKeyEvent,
   normalizePlatformHotkey,
@@ -91,20 +92,14 @@ interface SettingsPanelProps {
 
 type StorageStatus = "loading" | "ready" | "unavailable";
 
-const TRANSACTION_ERROR =
-  "The settings could not be applied. Nothing was saved.";
-const EXPORT_ERROR =
-  "The export could not be written. Check that the directory is empty and writable.";
-const RETENTION_ERROR = "Give a whole number of days from 1 to 3650.";
-const HOTKEY_ERROR =
-  "A shortcut needs a modifier and one letter, digit or function key.";
-const SNAP_ERROR = "Every window shortcut needs a modifier and one key.";
-const SNAP_DUPLICATE_ERROR =
-  "Each window shortcut, and the global one, must be a different combination.";
-const DENYLIST_ERROR =
-  "The exclusion list holds an invalid entry, or is too long.";
-const KEYVAULT_SAVE_FIRST =
-  "Save the vault address, token and private key first — the pane reads what is saved.";
+const TRANSACTION_ERROR: MessageKey = "settings.error.transaction";
+const EXPORT_ERROR: MessageKey = "settings.error.export";
+const RETENTION_ERROR: MessageKey = "settings.error.retention";
+const HOTKEY_ERROR: MessageKey = "settings.error.hotkey";
+const SNAP_ERROR: MessageKey = "settings.error.snap";
+const SNAP_DUPLICATE_ERROR: MessageKey = "settings.error.snapDuplicate";
+const DENYLIST_ERROR: MessageKey = "settings.error.denylist";
+const KEYVAULT_SAVE_FIRST: MessageKey = "settings.keyvault.saveFirst";
 
 /**
  * The code out of a rejected vault call. The core rejects with the bare code
@@ -127,19 +122,24 @@ export const vaultErrorCode = (error: unknown): string =>
 /// Labels are short because a tab label is not a heading — seven of them share one row, and the
 /// full names are in the section headings where there is room for them.
 const SETTINGS_TABS: readonly SettingsTab[] = [
-  { id: "shortcut", label: "Shortcut" },
-  { id: "windows", label: "Windows" },
-  { id: "retention", label: "Retention" },
-  { id: "apps", label: "Apps" },
-  { id: "links", label: "Links" },
-  { id: "keyvault", label: "Keyvault" },
-  { id: "storage", label: "Storage" },
-  { id: "export", label: "Export" },
+  { id: "shortcut", get label() { return t("settings.tab.shortcut"); } },
+  { id: "windows", get label() { return t("settings.tab.windows"); } },
+  { id: "retention", get label() { return t("settings.tab.retention"); } },
+  { id: "apps", get label() { return t("settings.tab.apps"); } },
+  { id: "links", get label() { return t("settings.tab.links"); } },
+  { id: "keyvault", get label() { return t("settings.tab.keyvault"); } },
+  { id: "storage", get label() { return t("settings.tab.storage"); } },
+  { id: "export", get label() { return t("settings.tab.export"); } },
 ];
 
 /// Last, because it is reached for least, and only where there is an application to replace —
 /// the browser preview has none.
-const UPDATES_TAB: SettingsTab = { id: "updates", label: "Updates" };
+const UPDATES_TAB: SettingsTab = {
+  id: "updates",
+  get label() {
+    return t("settings.tab.updates");
+  },
+};
 
 export const expiryLabel = (
   expiresAt: number | null,
@@ -147,73 +147,72 @@ export const expiryLabel = (
 ): string | null => {
   if (expiresAt === null) return null;
   const minutes = Math.floor((expiresAt - now) / 60_000);
-  if (minutes <= 0) return "This code has expired. Press Connect again.";
-  if (minutes === 1) return "This code works for about a minute more.";
-  return `This code works for about ${minutes} more minutes.`;
+  if (minutes <= 0) return t("settings.keyvault.expiry.expired");
+  return t("settings.keyvault.expiry.minutes", { count: minutes });
 };
 
 export const pairingMessage = (status: string): string => {
   switch (status) {
     case "paired":
-      return "Connected. This device has its own key and its own token now.";
+      return t("settings.pairing.paired");
     case "expired":
-      return "That connection request expired. Start again.";
+      return t("settings.pairing.expired");
     case "alreadyClaimed":
-      return "That connection was already collected — by something other than this application. Start again, and approve only the fingerprint shown here.";
+      return t("settings.pairing.alreadyClaimed");
     case "notFound":
-      return "That connection request no longer exists. Start again.";
+      return t("settings.pairing.notFound");
     default:
-      return "Connecting stopped unexpectedly.";
+      return t("settings.pairing.unknown");
   }
 };
 
 export const keyvaultErrorMessage = (code: string): string => {
   switch (code) {
     case "keyvault_vault_api_not_advertised":
-      return "That address answers, but nothing there says where its vault is. Check the address, or update the vault so its page advertises one.";
+      return t("settings.keyvault.error.apiNotAdvertised");
     case "keyvault_no_vault_address":
-      return "Nothing here names a vault yet. Type its address above, then connect.";
+      return t("settings.keyvault.error.noAddress");
     case "keyvault_pairing_page_unknown":
-      return "This vault has not published where its web interface lives, so there is nowhere to send you to approve.";
+      return t("settings.keyvault.error.pairingPageUnknown");
     case "keyvault_browser_failed":
-      return "Could not open a browser to finish connecting.";
+      return t("settings.keyvault.error.browserFailed");
     case "keyvault_pairing_failed":
-      return "Could not start connecting to that vault.";
+      return t("settings.keyvault.error.pairingFailed");
     case "keyvault_device_identity_invalid":
-      return "The device vault identity at ~/.config/keyvault/agent.json could not be read.";
+      return t("settings.keyvault.error.identityInvalid");
     case "keyvault_not_configured":
-      return KEYVAULT_SAVE_FIRST;
+      return t(KEYVAULT_SAVE_FIRST);
     case "keyvault_invalid_config":
     case "keyvault_invalid_url":
     case "keyvault_invalid_token":
     case "keyvault_invalid_private_key":
-      return "The saved vault configuration is incomplete or malformed — check all three fields.";
+      return t("settings.keyvault.error.invalidConfig");
     case "keyvault_unauthorized":
-      return "The token was refused — create a new one in the vault.";
+      return t("settings.keyvault.error.unauthorized");
     case "keyvault_agent_access_disabled":
-      return "The vault will not hand this secret to agents — enable agent access for it there.";
+      return t("settings.keyvault.error.agentAccessDisabled");
     case "keyvault_not_found":
-      return "No such secret inside this token’s scope.";
+      return t("settings.keyvault.error.notFound");
     case "keyvault_rate_limited":
-      return "The vault allows one read a second — try again in a moment.";
+      return t("settings.keyvault.error.rateLimited");
     case "keyvault_decrypt_failed":
-      return "The private key does not match the one the vault seals to.";
+      return t("settings.keyvault.error.decryptFailed");
     case "keyvault_pairing_payload_invalid":
-      return "Connecting got as far as the vault answering, but what it sent back was not a complete identity. The vault deployment is misconfigured.";
+      return t("settings.keyvault.error.payloadInvalid");
     case "keyvault_device_identity_missing":
-      return "This device has no vault identity yet. Use Connect to pair it.";
+      return t("settings.keyvault.error.identityMissing");
     case "keyvault_bad_response":
-      return "The vault replied in a shape this version does not understand.";
+      return t("settings.keyvault.error.badResponse");
     case "keyvault_invalid_slug":
-      return "That secret name is not one the vault can hold.";
+      return t("settings.keyvault.error.invalidSlug");
     case "keyvault_envelope_invalid":
     case "keyvault_envelope_unsupported_version":
     case "keyvault_envelope_too_large":
-      return "The sealed answer from the vault was not one this version can open.";
+      return t("settings.keyvault.error.envelope");
     case "keyvault_transport_failed":
-      return "The vault could not be reached. Check the address and the connection.";
+      return t("settings.keyvault.error.transport");
     default:
-      return "The vault answered with something this pane could not read.";
+      return t("settings.keyvault.error.unknown");
   }
 };
 
@@ -233,11 +232,11 @@ export const shortcutReleaseNotice = (
     case "applied":
       return null;
     case "alreadyFree":
-      return "Nothing in the system was holding that shortcut.";
+      return t("settings.shortcut.release.alreadyFree");
     case "needsLogout":
-      return "Saved. It takes effect after you log out and back in.";
+      return t("settings.shortcut.release.needsLogout");
     default:
-      return "Trove could not change the system shortcut. Open Keyboard Shortcuts, turn the conflicting one off, then try again.";
+      return t("settings.shortcut.release.failed");
   }
 };
 
@@ -245,6 +244,7 @@ export const SettingsPanel = ({
   gateway,
   onClose,
 }: SettingsPanelProps): React.JSX.Element => {
+  const t = useT();
   const [persisted, setPersisted] = useState<AppSettings | null>(null);
   const [hotkey, setHotkey] = useState("");
   const [autostart, setAutostart] = useState(false);
@@ -306,7 +306,7 @@ export const SettingsPanel = ({
     } catch {
       // The change was refused before it began — the application had not
       // finished starting — so nothing in the system moved.
-      setShortcutNotice("Trove is still starting. Try again in a moment.");
+      setShortcutNotice(t("settings.shortcut.starting"));
     } finally {
       setShortcutBusy(false);
     }
@@ -456,7 +456,7 @@ export const SettingsPanel = ({
     try {
       nextHotkey = normalizePlatformHotkey(hotkey);
     } catch {
-      setError(HOTKEY_ERROR);
+      setError(t(HOTKEY_ERROR));
       return;
     }
 
@@ -469,14 +469,14 @@ export const SettingsPanel = ({
       for (const { id } of SNAP_SHORTCUTS) {
         const chord = normalizePlatformHotkey(snapShortcuts[id] ?? "");
         if (taken.has(chord)) {
-          setError(SNAP_DUPLICATE_ERROR);
+          setError(t(SNAP_DUPLICATE_ERROR));
           return;
         }
         taken.add(chord);
         nextSnapShortcuts[id] = chord;
       }
     } catch {
-      setError(SNAP_ERROR);
+      setError(t(SNAP_ERROR));
       return;
     }
 
@@ -489,7 +489,7 @@ export const SettingsPanel = ({
         parsed < MIN_RETENTION_DAYS ||
         parsed > MAX_RETENTION_DAYS
       ) {
-        setError(RETENTION_ERROR);
+        setError(t(RETENTION_ERROR));
         return;
       }
       nextRetention = parsed;
@@ -499,7 +499,7 @@ export const SettingsPanel = ({
     try {
       nextDenylist = normalizeDenylistEntries(denylist.split("\n"));
     } catch {
-      setError(DENYLIST_ERROR);
+      setError(t(DENYLIST_ERROR));
       return;
     }
 
@@ -532,7 +532,7 @@ export const SettingsPanel = ({
         try {
           await gateway.setAutostartEnabled(autostart);
         } catch {
-          setError(TRANSACTION_ERROR);
+          setError(t(TRANSACTION_ERROR));
           setNativeAutostart(
             await gateway.isAutostartEnabled().catch(() => null),
           );
@@ -548,7 +548,7 @@ export const SettingsPanel = ({
         if (autostartChanged) {
           await gateway.setAutostartEnabled(!autostart).catch(() => undefined);
         }
-        setError(TRANSACTION_ERROR);
+        setError(t(TRANSACTION_ERROR));
       }
       setNativeAutostart(await gateway.isAutostartEnabled().catch(() => null));
       setPending(false);
@@ -597,7 +597,7 @@ export const SettingsPanel = ({
       await gateway.keyvaultResetPairing();
       setIdentity(await gateway.keyvaultIdentity());
       setVaultUrl(previous);
-      setPairNotice("Pairing forgotten. Connect again when you are ready.");
+      setPairNotice(t("settings.keyvault.forgotten"));
     } catch (error) {
       setVaultError(keyvaultErrorMessage(vaultErrorCode(error)));
     }
@@ -706,7 +706,7 @@ export const SettingsPanel = ({
       setExportSummary(await gateway.exportHistory(directory));
     } catch {
       // The failure may carry a path, so only a fixed sentence is shown.
-      setError(EXPORT_ERROR);
+      setError(t(EXPORT_ERROR));
     }
     setExporting(false);
   };
@@ -733,18 +733,17 @@ export const SettingsPanel = ({
       >
         <header className="workflow-dialog__header">
           <div>
-            <span className="workflow-kicker">Local configuration</span>
-            <h1 id="settings-dialog-title">Settings</h1>
+            <span className="workflow-kicker">{t("settings.kicker")}</span>
+            <h1 id="settings-dialog-title">{t("settings.title")}</h1>
           </div>
         </header>
 
         <p id="settings-dialog-description" className="workflow-warning">
-          Settings stay local. Nothing is synchronised or sent beyond this
-          device.
+          {t("settings.description")}
         </p>
 
         {persisted === null ? (
-          <p className="workflow-pending">Loading settings…</p>
+          <p className="workflow-pending">{t("settings.loading")}</p>
         ) : (
           <form className="settings-form" noValidate onSubmit={handleSubmit}>
             {error ? (
@@ -754,15 +753,23 @@ export const SettingsPanel = ({
             ) : null}
             {saved && !error ? (
               <p className="workflow-status" role="status">
-                Settings saved.
+                {t("settings.saved")}
               </p>
             ) : null}
             {autostartMismatch ? (
               <p className="workflow-status" role="status">
-                The autostart state differs from the saved setting.{" "}
-                <span>saved: {persisted.autostart ? "on" : "off"}</span>
+                {t("settings.autostart.mismatch")}{" "}
+                <span>
+                  {t("settings.autostart.saved", {
+                    state: persisted.autostart ? t("settings.on") : t("settings.off"),
+                  })}
+                </span>
                 {", "}
-                <span>system: {nativeAutostart ? "on" : "off"}</span>
+                <span>
+                  {t("settings.autostart.system", {
+                    state: nativeAutostart ? t("settings.on") : t("settings.off"),
+                  })}
+                </span>
               </p>
             ) : null}
 
@@ -786,10 +793,10 @@ export const SettingsPanel = ({
                     <span className="settings-section-icon" aria-hidden="true">
                       <KeyRound size={16} />
                     </span>
-                    <h2 id="settings-hotkey-title">Shortcut and startup</h2>
+                    <h2 id="settings-hotkey-title">{t("settings.shortcut.title")}</h2>
                   </div>
                   <label className="settings-field" htmlFor="settings-hotkey">
-                    <span>Global shortcut</span>
+                    <span>{t("settings.shortcut.global")}</span>
                     <input
                       ref={hotkeyRef}
                       id="settings-hotkey"
@@ -818,9 +825,7 @@ export const SettingsPanel = ({
                             "⌘",
                           )}
                         </strong>{" "}
-                        is a system shortcut, so macOS answers it before Trove
-                        ever sees it. Trove can turn that system shortcut off
-                        for you.
+                        {t("settings.shortcut.heldBySystem")}
                       </p>
                       <div className="settings-notice-actions">
                         <button
@@ -832,7 +837,7 @@ export const SettingsPanel = ({
                             )
                           }
                         >
-                          Free it for Trove
+                          {t("settings.shortcut.free")}
                         </button>
                         <button
                           type="button"
@@ -842,7 +847,7 @@ export const SettingsPanel = ({
                               .catch(() => undefined)
                           }
                         >
-                          Open Keyboard Shortcuts
+                          {t("settings.shortcut.openKeyboard")}
                         </button>
                       </div>
                     </div>
@@ -852,8 +857,7 @@ export const SettingsPanel = ({
                   shortcutStatus.releasedIds.length > 0 ? (
                     <div className="settings-notice" role="status">
                       <p>
-                        Trove turned a system shortcut off to free this
-                        combination.
+                        {t("settings.shortcut.released")}
                       </p>
                       <div className="settings-notice-actions">
                         <button
@@ -865,7 +869,7 @@ export const SettingsPanel = ({
                             )
                           }
                         >
-                          Give it back to the system
+                          {t("settings.shortcut.restore")}
                         </button>
                       </div>
                     </div>
@@ -873,9 +877,7 @@ export const SettingsPanel = ({
                   {shortcutStatus !== null && !shortcutStatus.registered ? (
                     <div className="settings-notice" role="status">
                       <p>
-                        Another application is holding this combination, so
-                        Trove could not register it. Record a different one
-                        above, or quit whatever is holding it.
+                        {t("settings.shortcut.notRegistered")}
                       </p>
                     </div>
                   ) : null}
@@ -885,12 +887,9 @@ export const SettingsPanel = ({
                     </p>
                   ) : null}
                   <p className="settings-help">
-                    Click the field and press the combination you want — hold{" "}
-                    <kbd>⌘</kbd>,<kbd>⌃</kbd> or <kbd>⌥</kbd> and press a key.
-                    Shift alone is not recorded: it would swallow ordinary
-                    typing everywhere else. Saving changes the active shortcut
-                    immediately; if the new one is already taken by another
-                    application, the previous one stays in force.
+                    {t("settings.shortcut.help.before")}{" "}
+                    <kbd>⌘</kbd>,<kbd>⌃</kbd> {t("settings.shortcut.help.or")}{" "}
+                    <kbd>⌥</kbd> {t("settings.shortcut.help.after")}
                   </p>
                   <label
                     className="settings-toggle"
@@ -905,7 +904,7 @@ export const SettingsPanel = ({
                       }
                     />
                     <span>
-                      <Power size={14} aria-hidden="true" /> Launch at login
+                      <Power size={14} aria-hidden="true" /> {t("settings.autostart")}
                     </span>
                   </label>
                   <label
@@ -921,16 +920,12 @@ export const SettingsPanel = ({
                       }
                     />
                     <span>
-                      <LayoutGrid size={14} aria-hidden="true" /> Show in the
-                      Dock
+                      <LayoutGrid size={14} aria-hidden="true" />{" "}
+                      {t("settings.dockIcon")}
                     </span>
                   </label>
                   <p className="settings-help">
-                    Off, Trove lives on the menu bar alone — no Dock tile and no
-                    ⌘Tab entry, which suits a window that is summoned by a
-                    keystroke and put away again. On, the tile appears and
-                    clicking it summons the palette. Saving applies it
-                    immediately; macOS only.
+                    {t("settings.dockIcon.help")}
                   </p>
                 </section>
               ) : null}
@@ -944,13 +939,10 @@ export const SettingsPanel = ({
                     <span className="settings-section-icon" aria-hidden="true">
                       <Move size={16} />
                     </span>
-                    <h2 id="settings-windows-title">Window snapping</h2>
+                    <h2 id="settings-windows-title">{t("settings.windows.title")}</h2>
                   </div>
                   <p className="settings-help">
-                    Moves the frontmost window, the way Rectangle does. It needs
-                    the same Accessibility permission as pasting, and recording
-                    works like the global shortcut above: press the combination
-                    you want.
+                    {t("settings.windows.help")}
                   </p>
                   {SNAP_SHORTCUTS.map(({ id, label }) => (
                     <label
@@ -994,7 +986,7 @@ export const SettingsPanel = ({
                     <span className="settings-section-icon" aria-hidden="true">
                       <Timer size={16} />
                     </span>
-                    <h2 id="settings-retention-title">History retention</h2>
+                    <h2 id="settings-retention-title">{t("settings.retention.title")}</h2>
                   </div>
                   <label
                     className="settings-toggle"
@@ -1008,13 +1000,13 @@ export const SettingsPanel = ({
                         setUnlimitedRetention(event.currentTarget.checked)
                       }
                     />
-                    <span>Bez limitu retencji</span>
+                    <span>{t("settings.retention.unlimited")}</span>
                   </label>
                   <label
                     className="settings-field"
                     htmlFor="settings-retention-days"
                   >
-                    <span>Days kept</span>
+                    <span>{t("settings.retention.days")}</span>
                     <input
                       id="settings-retention-days"
                       type="number"
@@ -1029,9 +1021,7 @@ export const SettingsPanel = ({
                     />
                   </label>
                   <p className="settings-help">
-                    History is unlimited by default. Turning retention on
-                    permanently deletes entries older than the given number of
-                    days.
+                    {t("settings.retention.help")}
                   </p>
                 </section>
               ) : null}
@@ -1045,7 +1035,7 @@ export const SettingsPanel = ({
                     <span className="settings-section-icon" aria-hidden="true">
                       <ShieldBan size={16} />
                     </span>
-                    <h2 id="settings-denylist-title">Applications</h2>
+                    <h2 id="settings-denylist-title">{t("settings.apps.title")}</h2>
                   </div>
                   <label className="settings-toggle">
                     <input
@@ -1055,17 +1045,13 @@ export const SettingsPanel = ({
                         setPaletteModes(event.currentTarget.checked)
                       }
                     />
-                    Open the palette on its categories
+                    {t("settings.apps.paletteModes")}
                   </label>
                   <p className="settings-help">
-                    On, the palette opens on three categories — Applications,
-                    Clipboard history and the Key vault — picked with 1/2/3 or
-                    Tab, and typing means the history. Off, one combined list
-                    answers everything at once. Takes effect the next time the
-                    palette is summoned.
+                    {t("settings.apps.paletteModes.help")}
                   </p>
                   <label className="settings-field" htmlFor="settings-denylist">
-                    <span>Bundle identifiers or executable names</span>
+                    <span>{t("settings.apps.denylist")}</span>
                     <textarea
                       id="settings-denylist"
                       rows={4}
@@ -1077,8 +1063,7 @@ export const SettingsPanel = ({
                     />
                   </label>
                   <p className="settings-help">
-                    One entry per line, at most {MAX_DENYLIST_ENTRIES}. Content
-                    copied in these applications never reaches the history.
+                    {t("settings.apps.denylist.help", { max: MAX_DENYLIST_ENTRIES })}
                   </p>
                 </section>
               ) : null}
@@ -1094,7 +1079,7 @@ export const SettingsPanel = ({
                 >
                   <h2 id="settings-links-title">
                     <Globe size={15} aria-hidden="true" />
-                    Link previews
+                    {t("settings.links.title")}
                   </h2>
                   <label className="settings-toggle">
                     <input
@@ -1104,15 +1089,10 @@ export const SettingsPanel = ({
                         setLinkPreviews(event.currentTarget.checked)
                       }
                     />
-                    Fetch the page title and icon
+                    {t("settings.links.fetch")}
                   </label>
                   <p className="settings-help">
-                    This is the only place the application talks to the network.
-                    On, it means opening the palette queries the pages visible
-                    in the list — each of them then learns that you are looking
-                    at your clipboard. The result is remembered, so the same
-                    page is asked once. Local and private addresses are never
-                    queried.
+                    {t("settings.links.help")}
                   </p>
                 </section>
               ) : null}
@@ -1124,13 +1104,13 @@ export const SettingsPanel = ({
                 >
                   <h2 id="settings-keyvault-title">
                     <Vault size={15} aria-hidden="true" />
-                    Keyvault
+                    {t("settings.tab.keyvault")}
                   </h2>
                   <label
                     className="settings-field"
                     htmlFor="settings-keyvault-url"
                   >
-                    <span>Vault address</span>
+                    <span>{t("settings.keyvault.address")}</span>
                     <input
                       id="settings-keyvault-url"
                       type="url"
@@ -1151,23 +1131,14 @@ export const SettingsPanel = ({
                   <p className="settings-help">
                     {paired ? (
                       <>
-                        This device is paired. It has its own key and its own
-                        token, and neither can be typed in here.{" "}
-                        <strong>Reset</strong> forgets the pairing so you can
-                        connect again — it only forgets it locally, so the
-                        device stays listed in the vault until the next pairing
-                        retires it or you revoke it there.
+                        {t("settings.keyvault.paired.before")}{" "}
+                        <strong>{t("settings.keyvault.reset")}</strong>{" "}
+                        {t("settings.keyvault.paired.after")}
                       </>
                     ) : (
                       <>
-                        <strong>Connect</strong> pairs this device: it generates
-                        a key here, sends only the public half, and the browser
-                        hands back a token of its own — nothing is pasted, and
-                        the key never leaves this machine. Put in the address
-                        you open your vault at in a browser. The vault answers
-                        with sealed envelopes; a copied key goes to the
-                        clipboard without ever being recorded in the history or
-                        shown here.
+                        <strong>{t("settings.keyvault.connect")}</strong>{" "}
+                        {t("settings.keyvault.unpaired")}
                       </>
                     )}
                   </p>
@@ -1179,7 +1150,9 @@ export const SettingsPanel = ({
                         vaultBusy || pending || paired || pairing !== null
                       }
                     >
-                      {pairing !== null ? "Waiting for approval…" : "Connect"}
+                      {pairing !== null
+                        ? t("settings.keyvault.waiting")
+                        : t("settings.keyvault.connect")}
                     </button>
                     {paired ? (
                       <button
@@ -1187,7 +1160,7 @@ export const SettingsPanel = ({
                         onClick={() => void resetPairing()}
                         disabled={vaultBusy || pending || pairing !== null}
                       >
-                        Reset
+                        {t("settings.keyvault.reset")}
                       </button>
                     ) : null}
                     <button
@@ -1195,24 +1168,24 @@ export const SettingsPanel = ({
                       onClick={() => void testVaultConnection()}
                       disabled={vaultBusy || pending}
                     >
-                      {vaultBusy ? "Talking to the vault…" : "Test connection"}
+                      {vaultBusy
+                        ? t("settings.keyvault.talking")
+                        : t("settings.keyvault.test")}
                     </button>
                   </div>
                   {pairing !== null ? (
                     <div className="settings-pairing" role="status">
                       <p>
-                        A browser was opened to approve this. It is your{" "}
-                        <strong>default</strong>
-                        browser, which may not be the one you are signed into
-                        the vault in — if the page asks you to sign in again,
-                        copy the link below and open it where you already are.
+                        {t("settings.keyvault.browser.before")}{" "}
+                        <strong>{t("settings.keyvault.browser.default")}</strong>{" "}
+                        {t("settings.keyvault.browser.after")}
                       </p>
 
                       <label
                         className="settings-field"
                         htmlFor="settings-pairing-url"
                       >
-                        <span>Pairing link</span>
+                        <span>{t("settings.keyvault.pairingLink")}</span>
                         <input
                           id="settings-pairing-url"
                           readOnly
@@ -1231,25 +1204,24 @@ export const SettingsPanel = ({
                               .catch(() => setCopied(false));
                           }}
                         >
-                          {copied ? "Copied" : "Copy link"}
+                          {copied ? t("settings.keyvault.copied") : t("settings.keyvault.copyLink")}
                         </button>
                         <button
                           type="button"
                           onClick={() => void cancelPairing()}
                         >
-                          Cancel
+                          {t("settings.keyvault.cancel")}
                         </button>
                       </div>
 
                       <p className="settings-help">
-                        Or open <code>/pair</code> on your vault and paste this
-                        code:
+                        {t("settings.keyvault.code.before")} <code>/pair</code>{" "}
+                        {t("settings.keyvault.code.after")}
                       </p>
                       <p className="settings-pair-code">{pairing.code}</p>
 
                       <p className="settings-help">
-                        Check the page shows this fingerprint — it is what ties
-                        that page to this application.
+                        {t("settings.keyvault.fingerprint")}
                       </p>
                       <p className="settings-pair-fingerprint">
                         {pairing.fingerprint}
@@ -1274,19 +1246,18 @@ export const SettingsPanel = ({
                   ) : null}
                   {vaultCopiedSlug !== null ? (
                     <p className="workflow-status" role="status">
-                      {vaultCopiedSlug} is on the clipboard. Paste it where it
-                      is needed.
+                      {t("settings.keyvault.secretCopied", { slug: vaultCopiedSlug })}
                     </p>
                   ) : null}
                   {vaultSecrets !== null ? (
                     vaultSecrets.length === 0 ? (
                       <p className="workflow-status" role="status">
-                        The token can read no secrets.
+                        {t("settings.keyvault.noSecrets")}
                       </p>
                     ) : (
                       <ul
                         className="settings-keyvault-list"
-                        aria-label="Vault secrets"
+                        aria-label={t("settings.keyvault.secrets")}
                       >
                         {vaultSecrets.map((secret) => (
                           <li key={secret.slug}>
@@ -1296,11 +1267,11 @@ export const SettingsPanel = ({
                             </span>
                             <button
                               type="button"
-                              aria-label={`Copy ${secret.slug}`}
+                              aria-label={t("settings.keyvault.copySecret", { slug: secret.slug })}
                               disabled={vaultBusy || pending}
                               onClick={() => void copyVaultSecret(secret.slug)}
                             >
-                              Copy
+                              {t("settings.keyvault.copy")}
                             </button>
                           </li>
                         ))}
@@ -1317,12 +1288,10 @@ export const SettingsPanel = ({
                 >
                   <h2 id="settings-export-title">
                     <Download size={15} aria-hidden="true" />
-                    History export
+                    {t("settings.export.title")}
                   </h2>
                   <p className="settings-help">
-                    Writes the whole history in SuperCmd format —{" "}
-                    {"clipboard.json"},{" clipboard.csv"} i katalog {"images"} z
-                    obrazami. Ten sam format importer czyta z powrotem.
+                    {t("settings.export.help")}
                   </p>
                   <div className="workflow-actions workflow-actions--start">
                     <button
@@ -1330,15 +1299,18 @@ export const SettingsPanel = ({
                       onClick={() => void runExport()}
                       disabled={exporting}
                     >
-                      {exporting ? "Exporting…" : "Export history"}
+                      {exporting ? t("settings.export.pending") : t("settings.export.run")}
                     </button>
                   </div>
                   {exportSummary ? (
                     <p className="workflow-status" role="status">
-                      Wrote {exportSummary.records} entries, of which{" "}
-                      {exportSummary.images} carry an image.{" "}
-                      {exportSummary.withoutPayload} bez zapisanej contents —
-                      were exported as metadata only.
+                      {t("settings.export.summary", {
+                        count: exportSummary.records,
+                        images: exportSummary.images,
+                      })}{" "}
+                      {t("settings.export.withoutPayload", {
+                        count: exportSummary.withoutPayload,
+                      })}
                     </p>
                   ) : null}
                 </section>
@@ -1355,7 +1327,7 @@ export const SettingsPanel = ({
                 className="workflow-primary"
                 disabled={pending}
               >
-                {pending ? "Saving…" : "Save settings"}
+                {pending ? t("settings.saving") : t("settings.save")}
               </button>
             </div>
           </form>
@@ -1364,11 +1336,11 @@ export const SettingsPanel = ({
         <button
           type="button"
           className="workflow-dismiss"
-          aria-label="Close settings"
+          aria-label={t("settings.closeLabel")}
           onClick={onClose}
         >
           <X size={16} aria-hidden="true" />
-          Close
+          {t("settings.close")}
         </button>
       </main>
     </div>

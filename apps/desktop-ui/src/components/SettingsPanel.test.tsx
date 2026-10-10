@@ -350,7 +350,7 @@ describe("SettingsPanel validation and transactions", () => {
     await openTab("Retention");
 
     await user.click(
-      screen.getByRole("checkbox", { name: "Bez limitu retencji" }),
+      screen.getByRole("checkbox", { name: "Keep history without a limit" }),
     );
     expect(
       screen.getByRole("spinbutton", { name: "Days kept" }),

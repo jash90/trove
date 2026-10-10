@@ -1,6 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import { useState } from "react";
 
+import { t, useT } from "../i18n";
 import type { UpdateInfo, UpdateProgress } from "../lib/contracts";
 
 type UpdateGateway = {
@@ -21,17 +22,17 @@ type Phase =
 export const updateErrorMessage = (code: string): string => {
   switch (code) {
     case "update_unreachable":
-      return "The release server could not be reached. Check the connection and try again.";
+      return t("updates.error.unreachable");
     case "update_no_build":
-      return "There is no build of the latest release for this Mac.";
+      return t("updates.error.noBuild");
     case "update_signature_invalid":
-      return "The downloaded update did not carry Trove's signature, so it was not installed.";
+      return t("updates.error.signature");
     case "update_not_writable":
-      return "Trove could not replace itself. Move it to Applications, or check that you can write there, and try again.";
+      return t("updates.error.notWritable");
     case "no_pending_update":
-      return "Check for updates again before installing.";
+      return t("updates.error.noPending");
     default:
-      return "The update did not complete. Trove is unchanged.";
+      return t("updates.error.generic");
   }
 };
 
@@ -58,6 +59,7 @@ export const UpdatesSection = ({
 }: {
   gateway: UpdateGateway;
 }): React.JSX.Element => {
+  const t = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [error, setError] = useState<string | null>(null);
 
@@ -101,17 +103,15 @@ export const UpdatesSection = ({
     >
       <h2 id="settings-updates-title">
         <RefreshCw size={15} aria-hidden="true" />
-        Updates
+        {t("updates.title")}
       </h2>
       <p className="settings-help">
-        {info ? `This is Trove ${info.currentVersion}. ` : null}
-        Trove looks for a new release only when you ask it to. An update is
-        installed only if it carries Trove's signature, and the application
-        restarts to finish.
+        {info ? t("updates.thisIs", { version: info.currentVersion }) : null}
+        {t("updates.help")}
       </p>
       <div className="workflow-actions workflow-actions--start">
         <button type="button" onClick={() => void check()} disabled={busy}>
-          {phase.kind === "checking" ? "Checking…" : "Check for updates"}
+          {phase.kind === "checking" ? t("updates.checking") : t("updates.check")}
         </button>
       </div>
 
@@ -123,14 +123,14 @@ export const UpdatesSection = ({
 
       {info && !info.available ? (
         <p className="workflow-status" role="status">
-          Trove {info.currentVersion} is the latest version.
+          {t("updates.latest", { version: info.currentVersion })}
         </p>
       ) : null}
 
       {info?.available ? (
         <div className="settings-notice">
           <p role="status">
-            Trove {info.version} is available — you have {info.currentVersion}.
+            {t("updates.available", { version: info.version ?? "", current: info.currentVersion })}
           </p>
           {info.notes ? <p className="update-notes">{info.notes}</p> : null}
           {phase.kind === "installing" ? (
@@ -138,7 +138,7 @@ export const UpdatesSection = ({
               <div
                 className="progress-track"
                 role="progressbar"
-                aria-label="Update download"
+                aria-label={t("updates.downloadLabel")}
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={percent ?? undefined}
@@ -147,10 +147,10 @@ export const UpdatesSection = ({
               </div>
               <p className="progress-count" aria-live="polite">
                 {percent === null
-                  ? "Downloading…"
+                  ? t("updates.downloading")
                   : percent < 100
-                    ? `Downloading… ${percent}%`
-                    : "Installing and restarting…"}
+                    ? t("updates.downloadingPercent", { percent })
+                    : t("updates.installing")}
               </p>
             </>
           ) : (
@@ -160,7 +160,7 @@ export const UpdatesSection = ({
                 className="workflow-primary"
                 onClick={() => void install(info)}
               >
-                Install and restart
+                {t("updates.install")}
               </button>
             </div>
           )}

@@ -1,6 +1,7 @@
 import { Search } from "lucide-react";
 import type { ChangeEventHandler, KeyboardEventHandler, Ref } from "react";
 
+import { t, useT } from "../i18n";
 import { formatCount } from "../lib/format";
 import { TypeFilter } from "./TypeFilter";
 
@@ -15,21 +16,27 @@ export type PaletteMode = "history" | "apps" | "vault" | "windows";
  */
 export type PaletteView = PaletteMode | "all" | "home";
 
-/** The categories in picker order. */
+/** The categories in picker order. `label` is read at render time, so it
+ * follows the interface language. */
 export const PALETTE_CATEGORIES: readonly {
   mode: PaletteMode;
   key: string;
-  label: string;
+  readonly label: string;
 }[] = [
-  { mode: "apps", key: "1", label: "Applications" },
-  { mode: "history", key: "2", label: "Clipboard history" },
-  { mode: "vault", key: "3", label: "Key vault" },
-  { mode: "windows", key: "4", label: "Windows" },
+  { mode: "apps", key: "1", get label() { return t("category.apps"); } },
+  { mode: "history", key: "2", get label() { return t("category.history"); } },
+  { mode: "vault", key: "3", get label() { return t("category.vault"); } },
+  { mode: "windows", key: "4", get label() { return t("category.windows"); } },
 ];
 
 /** The chat tile: not a palette view but a window of its own, opened from
  * the chooser like the rest and living beside it. */
-export const PALETTE_CHAT_CATEGORY = { key: "5", label: "Chat" } as const;
+export const PALETTE_CHAT_CATEGORY = {
+  key: "5",
+  get label(): string {
+    return t("category.chat");
+  },
+} as const;
 
 interface PaletteHeaderProps {
   query: string;
@@ -69,6 +76,7 @@ export const PaletteHeader = ({
   onQueryChange,
   onKeyDown,
 }: PaletteHeaderProps): React.JSX.Element => {
+  const t = useT();
   const handleChange: ChangeEventHandler<HTMLInputElement> = (event) => {
     onQueryChange(event.currentTarget.value);
   };
@@ -76,23 +84,23 @@ export const PaletteHeader = ({
   const onHome = mode === "home";
   const searchLabel =
     mode === "apps"
-      ? "Search applications"
+      ? t("search.label.apps")
       : mode === "vault"
-        ? "Search the vault"
+        ? t("search.label.vault")
         : mode === "windows"
-          ? "Arrange windows"
-          : "Search history";
+          ? t("search.label.windows")
+          : t("search.label.history");
   const searchPlaceholder = onHome
-    ? "Search history, or pick a category…"
+    ? t("search.placeholder.home")
     : mode === "apps"
-      ? "Search applications…"
+      ? t("search.placeholder.apps")
       : mode === "vault"
-        ? "Search the vault…"
+        ? t("search.placeholder.vault")
         : mode === "windows"
-          ? "Pick an arrangement…"
+          ? t("search.placeholder.windows")
           : mode === "history"
-            ? "Search history…"
-            : "Search applications and history…";
+            ? t("search.placeholder.history")
+            : t("search.placeholder.all");
 
   return (
     <header className="palette-header">

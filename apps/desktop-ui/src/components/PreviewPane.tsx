@@ -6,7 +6,8 @@ import type {
   LinkPreview as LinkPreviewContract,
   Preview,
 } from '../lib/contracts';
-import { formatByteSize, formatCapturedAt, KIND_LABELS } from '../lib/format';
+import { useT } from '../i18n';
+import { formatByteSize, formatCapturedAt, kindLabel } from '../lib/format';
 import { LinkPreviewCard } from './LinkPreviewCard';
 import { ImagePreview, type ThumbnailStatus } from './ImagePreview';
 import { SourceLocation } from './SourceLocation';
@@ -43,15 +44,16 @@ export const PreviewPane = ({
   onClose,
   onRevealSource,
 }: PreviewPaneProps): React.JSX.Element => {
+  const t = useT();
   return (
-    <aside className="preview-pane" aria-label="Selected entry preview">
+    <aside className="preview-pane" aria-label={t('preview.label')}>
       <header className="preview-pane__header">
-        <h2>{preview ? KIND_LABELS[preview.kind] : 'Select an entry'}</h2>
+        <h2>{preview ? kindLabel(preview.kind) : t('preview.selectEntry')}</h2>
         {onClose ? (
           <button
             type="button"
             className="preview-pane__close"
-            aria-label="Close preview"
+            aria-label={t('preview.close')}
             onClick={onClose}
           >
             <X size={16} aria-hidden="true" />
@@ -63,20 +65,20 @@ export const PreviewPane = ({
         {status === 'loading' ? (
           <div className="preview-placeholder" role="status">
             <Eye size={24} aria-hidden="true" />
-            <span>Loading preview…</span>
+            <span>{t('preview.loading')}</span>
           </div>
         ) : null}
         {status === 'error' ? (
           <div className="preview-placeholder" role="alert">
             <Eye size={24} aria-hidden="true" />
-            <strong>The preview could not be loaded</strong>
-            <span>Select the entry again, or try later.</span>
+            <strong>{t('preview.error.title')}</strong>
+            <span>{t('preview.error.detail')}</span>
           </div>
         ) : null}
         {status === 'idle' ? (
           <div className="preview-placeholder">
             <Eye size={24} aria-hidden="true" />
-            <span>Choose an entry from the history.</span>
+            <span>{t('preview.idle')}</span>
           </div>
         ) : null}
         {status === 'ready' && preview ? (
@@ -100,20 +102,20 @@ export const PreviewPane = ({
             ) : null}
             <dl className="preview-metadata">
               <div>
-                <dt>Source</dt>
-                <dd>{preview.sourceAppName ?? 'Unknown application'}</dd>
+                <dt>{t('preview.meta.source')}</dt>
+                <dd>{preview.sourceAppName ?? t('history.row.unknownApp')}</dd>
               </div>
               <div>
-                <dt>Rozmiar</dt>
+                <dt>{t('preview.meta.size')}</dt>
                 <dd>{formatByteSize(preview.byteSize)}</dd>
               </div>
               {selectedItem && selectedItem.occurrences.length > 0 ? (
                 <div>
-                  <dt>Captured</dt>
+                  <dt>{t('preview.meta.captured')}</dt>
                   <dd>
                     <ul
                       className="preview-metadata__occurrences"
-                      aria-label={`Captured ${selectedItem.occurrenceCount} times, newest first`}
+                      aria-label={t('preview.meta.occurrences', { count: selectedItem.occurrenceCount })}
                     >
                       {selectedItem.occurrences
                         .slice(0, MAX_OCCURRENCE_STAMPS)

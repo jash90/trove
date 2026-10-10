@@ -4,6 +4,7 @@ pub mod export;
 pub mod hotkey;
 pub mod keyvault;
 pub mod links;
+pub mod locale;
 pub mod log;
 pub mod maintenance;
 pub mod monitor;
@@ -166,6 +167,16 @@ pub fn run() {
             // The window spends most of its life hidden, so the menu bar is
             // where the application exists on screen. Failing to place it there
             // is not a reason to refuse to start.
+            // The window titles in tauri.conf.json are the English ones; the
+            // shell's language replaces them before any window is shown.
+            for (label, title) in [
+                ("settings", locale::Text::SettingsWindowTitle),
+                ("chat", locale::Text::ChatWindowTitle),
+            ] {
+                if let Some(window) = app.get_webview_window(label) {
+                    let _ = window.set_title(locale::tr(title));
+                }
+            }
             if let Err(error) = tray::install(app.handle(), control.clone()) {
                 log::log_line(&format!("menu bar item unavailable ({error})"));
             }
