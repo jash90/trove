@@ -354,3 +354,30 @@ describe('ChatWindow', () => {
     expect(stop).toHaveBeenCalledWith('turn-hanging');
   });
 });
+
+describe('the composer', () => {
+  it('takes focus whenever the window comes forward', async () => {
+    // The window is hidden and shown, never rebuilt, and the composer was
+    // never focused: opened from the palette, the first keystrokes went
+    // nowhere.
+    render(<ChatWindow gateway={mockGateway} />);
+    const composer = screen.getByRole('textbox', { name: 'Message' });
+    await waitFor(() => expect(composer).toHaveFocus());
+
+    composer.blur();
+    expect(composer).not.toHaveFocus();
+    fireEvent.focus(window);
+    expect(composer).toHaveFocus();
+  });
+
+  it('leaves the chat settings in front when the window comes back', async () => {
+    const user = userEvent.setup();
+    render(<ChatWindow gateway={mockGateway} />);
+    const composer = screen.getByRole('textbox', { name: 'Message' });
+    await user.click(screen.getByRole('button', { name: 'Chat settings' }));
+
+    composer.blur();
+    fireEvent.focus(window);
+    expect(composer).not.toHaveFocus();
+  });
+});

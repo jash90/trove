@@ -124,6 +124,20 @@ export interface ClipboardGateway {
   */
  snapWindow?(actionId: string): Promise<boolean>;
  /**
+  * Puts the palette away and hands the front back to the window the user
+  * was working in. Hiding the window from here did neither: the application
+  * stayed active with nothing on screen, and the keyboard went nowhere.
+  *
+  * Optional: outside the desktop shell there is no window to hide.
+  */
+ hidePalette?(): Promise<void>;
+ /**
+  * Calls back each time the palette is summoned — by its shortcut, the menu
+  * bar or the Dock — as opposed to merely refocused, which is the moment
+  * the query is selected and the view goes back to its categories.
+  */
+ onPaletteSummoned?(listener: () => void): () => void;
+ /**
   * Calls back for every chat stream event: tokens as they arrive, the
   * settle when the turn ends — by answer, refusal or stop.
   */
@@ -328,6 +342,8 @@ export const tauriGateway: ClipboardGateway = {
   invoke<ChatSettings>("save_chat_settings", { settings }),
  openChatWindow: () => invoke<void>("open_chat_window"),
  snapWindow: (actionId) => invoke<boolean>("snap_window", { actionId }),
+ hidePalette: () => invoke<void>("hide_palette"),
+ onPaletteSummoned: (listener) => subscribe("palette-summoned", listener),
  onChatEvent: (listener) => {
   const stopDelta = subscribe<{ id: string; part: string; text: string }>(
    "chat-delta",

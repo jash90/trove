@@ -39,6 +39,12 @@ objc2-app-kit = { version = "0.3.2", features = [
     "NSControl",
     "NSResponder",
     "NSView",
+    # The summoned windows' Space behaviour and level are set on the window
+    # itself, synchronously, rather than through the runtime's asynchronous
+    # level setter — see `summon`. `NSEvent` is where the pointer's location
+    # is read, so the window opens on the screen the user is looking at.
+    "NSEvent",
+    "NSWindow",
 ] }
 # `NSValue` is where `NSNumber` lives, and `NSObject` is what `NSDictionary::from_slices`
 # is gated on — both are needed to hand the Accessibility check its options dictionary.

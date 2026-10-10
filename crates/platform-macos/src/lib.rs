@@ -10,6 +10,7 @@ pub mod icons;
 pub mod markers;
 pub mod paste;
 pub mod pasteboard;
+pub mod summon;
 pub mod symbolic_hotkeys;
 pub mod window_snap;
 
