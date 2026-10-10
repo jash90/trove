@@ -227,6 +227,7 @@ notarise() {
     --wait --timeout 30m --output-format json)" || true
   status="$(jq -r '.status // "unknown"' <<< "$result" 2>/dev/null || echo unknown)"
   id="$(jq -r '.id // ""' <<< "$result" 2>/dev/null || true)"
+  status="${status:-unknown}"
   if [[ $status != Accepted ]]; then
     [[ -n $id ]] && xcrun notarytool log "$id" --keychain-profile "$NOTARY_PROFILE" >&2 || true
     die "notarisation of $(basename "$file") ended as: $status"
@@ -258,7 +259,13 @@ log "Sign, notarise and staple the disk image"
 codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
 [[ $(team_of "$DMG") == "$APPLE_TEAM_ID" ]] \
   || die "the disk image is not signed by team $APPLE_TEAM_ID"
-notarise "$DMG"
+# Submitted inside a zip, for the same reason as the application: given a
+# bare .dmg, notarytool attaches it locally before uploading, and with other
+# images attached (another release, a mounted download) that attach can hang
+# forever at zero CPU. The service still notarises the image inside the zip,
+# so its ticket staples onto the .dmg afterwards.
+ditto -c -k "$DMG" "$WORK/dmg.zip"
+notarise "$WORK/dmg.zip"
 xcrun stapler staple "$DMG"
 xcrun stapler validate "$DMG"
 
