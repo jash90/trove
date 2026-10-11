@@ -1,4 +1,5 @@
 import type { ClipboardGateway } from "./gateway";
+import { navigatorLocale, setLocale } from "../i18n";
 import {
   SYNTHETIC_APPS,
   SYNTHETIC_APP_ICON,
@@ -273,6 +274,13 @@ export const mockGateway: ClipboardGateway = {
     autostartEnabled = enabled;
   },
   saveSettings: async (nextSettings) => {
+    // The shell would announce the change to every window; the preview has
+    // one window and no shell, so it applies the language itself.
+    setLocale(
+      nextSettings.language === "system"
+        ? navigatorLocale()
+        : nextSettings.language,
+    );
     settings = {
       ...nextSettings,
       denylistedApps: [...nextSettings.denylistedApps],

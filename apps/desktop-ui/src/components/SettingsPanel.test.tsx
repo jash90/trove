@@ -47,6 +47,7 @@ const persistedSettings: AppSettings = {
   autostart: false,
   paletteModes: true,
   dockIcon: false,
+  language: "system",
   retentionDays: 30,
   denylistedApps: ["com.acme.private"],
   linkPreviews: true,
@@ -518,6 +519,46 @@ describe("SettingsPanel validation and transactions", () => {
 
     await waitFor(() => expect(saveSettings).toHaveBeenCalled());
     expect(saveSettings.mock.calls[0]?.[0].dockIcon).toBe(true);
+  });
+
+  it("saves the language the user picked", async () => {
+    const saveSettings = vi.fn(
+      async (nextSettings: AppSettings) => nextSettings,
+    );
+    const user = userEvent.setup();
+    render(<SettingsPanel gateway={makeGateway({ saveSettings })} />);
+    await loadSettings();
+
+    const language = screen.getByRole("combobox", { name: "Language" });
+    expect(language).toHaveValue("system");
+    // Each language is named in itself, so someone who cannot read the
+    // current one can still find theirs.
+    expect(
+      screen.getByRole("option", { name: "Polski" }),
+    ).toBeInTheDocument();
+    await user.selectOptions(language, "pl");
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    await waitFor(() => expect(saveSettings).toHaveBeenCalled());
+    expect(saveSettings.mock.calls[0]?.[0].language).toBe("pl");
+  });
+
+  it("shows the language the settings row remembers", async () => {
+    render(
+      <SettingsPanel
+        gateway={makeGateway({
+          getSettings: vi.fn(async () => ({
+            ...persistedSettings,
+            language: "en" as const,
+          })),
+        })}
+      />,
+    );
+    await loadSettings();
+
+    expect(screen.getByRole("combobox", { name: "Language" })).toHaveValue(
+      "en",
+    );
   });
 
   it("shows the Dock tile the settings row remembers", async () => {

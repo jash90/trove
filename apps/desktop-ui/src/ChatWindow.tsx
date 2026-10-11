@@ -24,7 +24,7 @@ import {
   type ChatStreamEvent,
 } from './lib/contracts';
 import { GatewayProvider, useGateway, type ClipboardGateway } from './lib/gateway';
-import { t, type MessageKey } from './i18n';
+import { t, useLocale, type MessageKey } from './i18n';
 
 /** The interface's copy for the core's stable refusal codes. */
 const CHAT_ERROR_SENTENCES: Record<string, MessageKey> = {
@@ -64,6 +64,10 @@ interface ChatWindowProps {
 }
 
 const ChatConversation = (): React.JSX.Element => {
+  // Subscribed for its re-render alone: everything below translates through
+  // the plain `t`, and the root re-rendering is what carries a language saved
+  // in settings to every string here without remounting the conversation.
+  useLocale();
   const gateway = useGateway();
   const capable =
     gateway.chatSend !== undefined &&

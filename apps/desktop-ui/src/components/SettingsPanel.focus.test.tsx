@@ -40,6 +40,7 @@ const persistedSettings: AppSettings = {
   autostart: false,
   paletteModes: true,
   dockIcon: false,
+  language: "system",
   retentionDays: 30,
   denylistedApps: [],
   linkPreviews: true,

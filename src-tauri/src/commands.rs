@@ -171,6 +171,12 @@ pub struct AppSettingsDto {
     /// before it existed still reads.
     #[serde(default = "default_dock_icon")]
     pub dock_icon: bool,
+    /// The interface language: `system` follows the preferred languages,
+    /// `en` and `pl` hold one regardless of them. Defaulted through serde so
+    /// a settings row written before it existed still reads, and reads as
+    /// the behaviour every earlier version had.
+    #[serde(default)]
+    pub language: crate::locale::Preference,
     /// Where the keyvault pane looks, when it is configured at all.
     ///
     /// Defaulted through serde so a settings row written before it existed
@@ -322,6 +328,7 @@ impl Default for AppSettingsDto {
             link_previews: default_link_previews(),
             palette_modes: default_palette_modes(),
             dock_icon: default_dock_icon(),
+            language: crate::locale::Preference::default(),
             keyvault: KeyvaultSettingsDto::default(),
             snap_shortcuts: crate::snap::defaults(),
         }
@@ -1777,6 +1784,13 @@ pub async fn save_settings_with_app<R: tauri::Runtime>(
         {
             let _ = settings.set_focus();
         }
+    }
+    // The language is held by the shell as much as by the windows: the menu
+    // bar and the window titles are drawn from it. All of them are retexted
+    // here, and every window is told, so nothing goes on speaking the old one
+    // until a relaunch.
+    if crate::locale::set_preference(stored.language) {
+        crate::apply_locale(app);
     }
     // The snap shortcuts are registered with the system exactly like the
     // summoning one, so saving swaps them live rather than at next launch.

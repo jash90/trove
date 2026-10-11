@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { lazy, StrictMode, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 
@@ -42,8 +43,14 @@ const isChatWindow = windowHash === '#chat';
 /// The interface language comes from the shell when there is one, so the
 /// windows agree with the menu bar; the browser's languages are the answer in
 /// development and the fallback if the shell does not reply.
+///
+/// A saved language setting changes it while the windows are open, so every
+/// window also listens for the shell's announcement of the new code.
 const resolveLocale = async (): Promise<void> => {
   if (isTauriRuntime()) {
+    void listen<string>('locale-changed', ({ payload }) => {
+      setLocale(detectLocale([payload]));
+    }).catch(() => undefined);
     try {
       setLocale(detectLocale([await invoke<string>('get_locale')]));
     } catch {

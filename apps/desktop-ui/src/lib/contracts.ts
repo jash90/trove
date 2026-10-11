@@ -88,6 +88,8 @@ export interface KeyvaultSettings {
   privateJwk?: string | null;
 }
 
+export type LanguagePreference = "system" | "en" | "pl";
+
 export interface AppSettings {
   schemaVersion: 1;
   hotkey: string;
@@ -108,6 +110,12 @@ export interface AppSettings {
    * clicking it summons the palette.
    */
   dockIcon: boolean;
+  /**
+   * The interface language: `system` follows the system's preferred
+   * languages, `en` and `pl` hold one regardless of them. Saving applies it
+   * to every window and the menu bar at once.
+   */
+  language: LanguagePreference;
   /**
    * One chord per window-snap position (`leftHalf`, `maximize`, …), the
    * Rectangle-style shortcuts the palette registers globally.

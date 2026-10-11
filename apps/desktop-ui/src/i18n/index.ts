@@ -1,7 +1,7 @@
 /**
  * The interface's two languages: English, which is the default and the
  * fallback for any key a translation lacks, and Polish, chosen when the
- * system's preferred language is Polish.
+ * system's preferred language is Polish or the `language` setting asks for it.
  *
  * Deliberately small: one flat table per language, `{name}` placeholders and
  * `Intl.PluralRules` for counts. The locale is module state rather than React
@@ -35,7 +35,10 @@ const navigatorLanguages = (): string[] => {
   return navigator.language ? [...list, navigator.language] : list;
 };
 
-let current: Locale = detectLocale(navigatorLanguages());
+/** The browser's answer: what `system` means where there is no shell to ask. */
+export const navigatorLocale = (): Locale => detectLocale(navigatorLanguages());
+
+let current: Locale = navigatorLocale();
 const listeners = new Set<() => void>();
 
 export const getLocale = (): Locale => current;

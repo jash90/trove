@@ -75,6 +75,7 @@ export const SYNTHETIC_SETTINGS: AppSettings = {
   linkPreviews: true,
   paletteModes: true,
   dockIcon: false,
+  language: "system",
   snapShortcuts: defaultSnapShortcuts(),
   keyvault: { url: null, token: null, privateJwk: null },
 };
