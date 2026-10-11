@@ -221,6 +221,15 @@ const ClipboardPalette = (): React.JSX.Element => {
     refreshSettings();
   }, [refreshSettings]);
   const focusSearch = (): void => searchInputRef.current?.focus();
+  // Entering a category hands the caret back to the field. A tile is a
+  // button: picking one by mouse, or by Enter after Shift+Tab, leaves focus
+  // on it, and the tile unmounts with home — focus fell to the body and the
+  // first keystrokes in the new list went nowhere. Moved before the tile
+  // goes, so there is nothing for it to fall from.
+  const enterCategory = (next: PaletteMode): void => {
+    setMode(next);
+    focusSearch();
+  };
   useEffect(() => {
     searchInputRef.current?.focus();
   }, []);
@@ -655,7 +664,9 @@ const ClipboardPalette = (): React.JSX.Element => {
       const category = PALETTE_CATEGORIES.find((entry) => entry.key === key);
       if (category) {
         event.preventDefault();
-        setMode(category.mode);
+        // Answered from anywhere in the palette, a tile or a row included —
+        // and the field is where the chosen list is driven from.
+        enterCategory(category.mode);
         return;
       }
     }
@@ -731,7 +742,7 @@ const ClipboardPalette = (): React.JSX.Element => {
         />
         <PaletteWorkspace
           mode={view}
-          onPickCategory={setMode}
+          onPickCategory={enterCategory}
           onOpenChat={() =>
             void gateway.openChatWindow?.().catch(() => undefined)
           }
