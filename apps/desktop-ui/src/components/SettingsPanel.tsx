@@ -117,12 +117,6 @@ export const vaultErrorCode = (error: unknown): string =>
 /** One plain sentence per vault denial. Codes only reach here; never values. */
 /** What to say when a pairing stops for a reason that is not success. */
 /** How long a pairing code is still good for, in words rather than a timestamp. */
-/// The settings, one tab each. Ordered by how often a setting is reached for, not by when it was
-/// written: the shortcut is the thing people come here to change, and storage sits before export
-/// because one is a state and the other an action.
-///
-/// Labels are short because a tab label is not a heading — seven of them share one row, and the
-/// full names are in the section headings where there is room for them.
 /// Each language named in itself, never translated: someone who cannot read
 /// the current one still has to be able to find their own.
 const LANGUAGE_NAMES: Record<Exclude<LanguagePreference, "system">, string> = {
@@ -130,6 +124,12 @@ const LANGUAGE_NAMES: Record<Exclude<LanguagePreference, "system">, string> = {
   pl: "Polski",
 };
 
+/// The settings, one tab each. Ordered by how often a setting is reached for, not by when it was
+/// written: the shortcut is the thing people come here to change, and storage sits before export
+/// because one is a state and the other an action.
+///
+/// Labels are short because a tab label is not a heading — seven of them share one row, and the
+/// full names are in the section headings where there is room for them.
 const SETTINGS_TABS: readonly SettingsTab[] = [
   { id: "shortcut", get label() { return t("settings.tab.shortcut"); } },
   { id: "windows", get label() { return t("settings.tab.windows"); } },
