@@ -7,7 +7,7 @@
 //! the way.
 
 use tauri::{
-    AppHandle, Runtime,
+    AppHandle, Manager, Runtime,
     image::Image,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -36,6 +36,29 @@ fn pause_text(paused: bool) -> Text {
     } else {
         Text::TrayPause
     }
+}
+
+/// The menu's entries, kept so a language change can retext them in place.
+struct TrayItems<R: Runtime> {
+    show: MenuItem<R>,
+    settings: MenuItem<R>,
+    pause: MenuItem<R>,
+    update: MenuItem<R>,
+    quit: MenuItem<R>,
+    control: MonitorControl,
+}
+
+/// Rewrites every entry in the current language. Nothing to do when the
+/// menu bar item never got installed.
+pub fn retext<R: Runtime>(app: &AppHandle<R>) {
+    let Some(items) = app.try_state::<TrayItems<R>>() else {
+        return;
+    };
+    let _ = items.show.set_text(tr(Text::TrayShow));
+    let _ = items.settings.set_text(tr(Text::TraySettings));
+    let _ = items.pause.set_text(pause_label(items.control.is_paused()));
+    let _ = items.update.set_text(tr(Text::TrayCheckForUpdates));
+    let _ = items.quit.set_text(tr(Text::TrayQuit));
 }
 
 pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri::Result<()> {
@@ -89,6 +112,14 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri
             }
         })
         .build(app)?;
+    app.manage(TrayItems {
+        show,
+        settings,
+        pause,
+        update,
+        quit,
+        control,
+    });
     Ok(())
 }
 

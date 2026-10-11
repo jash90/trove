@@ -2,6 +2,7 @@ import {
   Download,
   Globe,
   KeyRound,
+  Languages,
   LayoutGrid,
   Move,
   Power,
@@ -23,6 +24,7 @@ import {
 import type {
   AppSettings,
   KeyvaultIdentity,
+  LanguagePreference,
   PairingStarted,
   ExportSummary as ExportSummaryContract,
   KeyvaultSecret,
@@ -121,6 +123,13 @@ export const vaultErrorCode = (error: unknown): string =>
 ///
 /// Labels are short because a tab label is not a heading — seven of them share one row, and the
 /// full names are in the section headings where there is room for them.
+/// Each language named in itself, never translated: someone who cannot read
+/// the current one still has to be able to find their own.
+const LANGUAGE_NAMES: Record<Exclude<LanguagePreference, "system">, string> = {
+  en: "English",
+  pl: "Polski",
+};
+
 const SETTINGS_TABS: readonly SettingsTab[] = [
   { id: "shortcut", get label() { return t("settings.tab.shortcut"); } },
   { id: "windows", get label() { return t("settings.tab.windows"); } },
@@ -256,6 +265,7 @@ export const SettingsPanel = ({
   const [linkPreviews, setLinkPreviews] = useState(true);
   const [paletteModes, setPaletteModes] = useState(true);
   const [dockIcon, setDockIcon] = useState(false);
+  const [language, setLanguage] = useState<LanguagePreference>("system");
   const [snapShortcuts, setSnapShortcuts] =
     useState<Record<string, string>>(defaultSnapShortcuts);
   const [vaultUrl, setVaultUrl] = useState("");
@@ -360,6 +370,7 @@ export const SettingsPanel = ({
       setLinkPreviews(settings.linkPreviews);
       setPaletteModes(settings.paletteModes);
       setDockIcon(settings.dockIcon);
+      setLanguage(settings.language);
       setSnapShortcuts({
         ...defaultSnapShortcuts(),
         ...settings.snapShortcuts,
@@ -512,6 +523,7 @@ export const SettingsPanel = ({
       linkPreviews,
       paletteModes,
       dockIcon,
+      language,
       snapShortcuts: nextSnapShortcuts,
       // Overrides over the device identity file, each independent of the
       // other. A blank field travels as an absent one, meaning "use the
@@ -926,6 +938,30 @@ export const SettingsPanel = ({
                   </label>
                   <p className="settings-help">
                     {t("settings.dockIcon.help")}
+                  </p>
+                  <label className="settings-field" htmlFor="settings-language">
+                    <span>
+                      <Languages size={14} aria-hidden="true" />{" "}
+                      {t("settings.language")}
+                    </span>
+                    <select
+                      id="settings-language"
+                      value={language}
+                      onChange={(event) =>
+                        setLanguage(
+                          event.currentTarget.value as LanguagePreference,
+                        )
+                      }
+                    >
+                      <option value="system">
+                        {t("settings.language.system")}
+                      </option>
+                      <option value="en">{LANGUAGE_NAMES.en}</option>
+                      <option value="pl">{LANGUAGE_NAMES.pl}</option>
+                    </select>
+                  </label>
+                  <p className="settings-help">
+                    {t("settings.language.help")}
                   </p>
                 </section>
               ) : null}

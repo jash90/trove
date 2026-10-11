@@ -39,6 +39,7 @@ const settings: AppSettings = {
   autostart: false,
   paletteModes: true,
   dockIcon: false,
+  language: "system",
   retentionDays: null,
   denylistedApps: [],
   linkPreviews: true,
