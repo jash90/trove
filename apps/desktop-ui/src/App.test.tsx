@@ -312,6 +312,55 @@ describe("the unified palette", () => {
     await waitFor(() => expect(homeTiles()).toHaveLength(5));
   });
 
+  it("hands the caret to the field when a tile is clicked", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await waitFor(() => expect(homeTiles()).toHaveLength(5));
+
+    await user.click(screen.getByRole("button", { name: /Clipboard history/u }));
+    await waitFor(() =>
+      expect(historyResults().getAllByRole("option").length).toBeGreaterThan(0),
+    );
+    // The tile that held focus is gone with home; the typing that follows
+    // belongs in the field, not nowhere.
+    const search = screen.getByRole("searchbox");
+    expect(search).toHaveFocus();
+    await user.keyboard("note");
+    expect(search).toHaveValue("note");
+  });
+
+  it("hands the caret to the field when a focused tile is pressed", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await waitFor(() => expect(homeTiles()).toHaveLength(5));
+
+    // Shift+Tab is the field's way out to the tiles; Enter on one of them
+    // must land back in the field.
+    screen.getByRole("button", { name: /Applications/u }).focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() =>
+      expect(
+        appsResults()
+          .getAllByRole("option")
+          .filter((option) => option.hasAttribute("data-path")).length,
+      ).toBeGreaterThan(0),
+    );
+    expect(screen.getByRole("searchbox")).toHaveFocus();
+  });
+
+  it("hands the caret to the field when ⌘2 is pressed on a tile", async () => {
+    render(<App />);
+    await waitFor(() => expect(homeTiles()).toHaveLength(5));
+
+    const tile = screen.getByRole("button", { name: /Applications/u });
+    tile.focus();
+    fireEvent.keyDown(tile, { key: "2", metaKey: true });
+    await waitFor(() =>
+      expect(historyResults().getAllByRole("option").length).toBeGreaterThan(0),
+    );
+    expect(screen.getByRole("searchbox")).toHaveFocus();
+  });
+
   it("walks the tiles with the arrows and commits with Enter", async () => {
     render(<App />);
     await waitFor(() => expect(homeTiles()).toHaveLength(5));
