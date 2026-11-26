@@ -586,6 +586,60 @@ async fn ranked_search_rejects_a_recent_mode_cursor() {
 }
 
 #[tokio::test]
+async fn literal_prefixes_beat_contains_and_token_matches_before_the_candidate_limit() {
+    for needle in ["sk-or", "needle", "a", "ab", "lodz"] {
+        let (_directory, store) = open_store();
+        let prefix = if needle == "lodz" {
+            "ŁÓDŹ oldest".to_owned()
+        } else {
+            format!("{needle}-oldest")
+        };
+        store
+            .ingest(text_capture(&prefix, 1, "editor", "Editor", false, 1))
+            .await
+            .unwrap();
+        for index in 0..(MAX_RANKED_CANDIDATES + 2) {
+            store
+                .ingest(text_capture(
+                    &format!("contains {needle} {index}"),
+                    2_000 + index as i64,
+                    "editor",
+                    "Editor",
+                    true,
+                    50,
+                ))
+                .await
+                .unwrap();
+        }
+        let page = store.search(request(needle, 2, None)).unwrap();
+        assert_eq!(
+            page.items[0].preview, prefix,
+            "prefix must survive candidate limiting for {needle}"
+        );
+        assert!(page.items[1].preview.starts_with("contains "));
+        assert!(page.ranked_truncated);
+    }
+}
+
+#[tokio::test]
+async fn literal_contains_beats_separated_tokens_and_respects_filters() {
+    let (_directory, store) = open_store();
+    for (text, app, pinned) in [
+        ("sk-or prefix", "other", false),
+        ("contains SK-OR value", "editor", false),
+        ("sk scattered or", "editor", true),
+    ] {
+        store
+            .ingest(text_capture(text, 1_000, app, app, pinned, 20))
+            .await
+            .unwrap();
+    }
+    let page = store.search(request("sk-or app:editor", 10, None)).unwrap();
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.items[0].preview, "contains SK-OR value");
+}
+
+#[tokio::test]
 async fn ranked_search_caps_candidates_and_uses_stable_tie_breaks() {
     let (_directory, store) = open_store();
     let mut newest_event_id = 0;

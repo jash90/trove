@@ -78,7 +78,9 @@ const KeyboardHarness = ({ items, onActivate }: KeyboardHarnessProps): React.JSX
         ? `app-option-${selectedIndex}`
         : selectedEntry.kind === 'vault'
           ? `vault-option-${selectedIndex}`
-          : `history-option-${selectedEntry.item.eventId}`;
+          : selectedEntry.kind === 'command'
+            ? `command-option-${selectedIndex}`
+            : `history-option-${selectedEntry.item.eventId}`;
 
   return (
     <>
@@ -192,7 +194,7 @@ describe('PaletteList', () => {
               ? `app:${entry.app.path}`
               : entry.kind === 'vault'
                 ? `vault:${entry.secret.slug}`
-                : `history:${entry.item.eventId}`,
+                : entry.kind === 'history' ? `history:${entry.item.eventId}` : 'command:keep-awake',
           );
         }}
       />,
@@ -221,7 +223,7 @@ describe('PaletteList', () => {
               ? `app:${entry.app.path}`
               : entry.kind === 'vault'
                 ? `vault:${entry.secret.slug}`
-                : `history:${entry.item.eventId}`,
+                : entry.kind === 'history' ? `history:${entry.item.eventId}` : 'command:keep-awake',
           );
         }}
       />,

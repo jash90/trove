@@ -175,6 +175,64 @@ describe("the unified palette", () => {
     );
   };
 
+  it.each(["keep awake", "nie usypiaj", "blokuj wygaszanie"])(
+    "toggles Keep Awake from the palette with %s", async (query) => {
+      let settings = { ...SYNTHETIC_SETTINGS, searchAppsByDefault: true };
+      const saveSettings = vi.fn(async (next: typeof settings) => {
+        settings = next;
+        return settings;
+      });
+      const user = userEvent.setup();
+      render(<App gateway={{ ...mockGateway, getSettings: async () => settings, saveSettings }} />);
+      await user.type(screen.getByRole("searchbox"), query);
+      const option = await screen.findByRole("option", { name: "Turn on Keep Awake" });
+      expect(option).toHaveAttribute("aria-selected", "true");
+      expect(option).toHaveTextContent(/^Turn on Keep AwakeCurrently off · Enter to toggle$/);
+      await user.keyboard("{Enter}");
+      expect(await screen.findByRole("option", { name: "Turn off Keep Awake" })).toBeVisible();
+      expect(settings.keepAwake).toBe(true);
+      expect(settings.searchAppsByDefault).toBe(true);
+      await user.keyboard("{Enter}");
+      expect(await screen.findByRole("option", { name: "Turn on Keep Awake" })).toBeVisible();
+      expect(settings.keepAwake).toBe(false);
+      expect(saveSettings).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([["ke", "Keynote"], ["ca", "Calendar"]])(
+    "launches the app for %s + Enter without changing Keep Awake", async (query, name) => {
+      const path = `/Applications/${name}.app`;
+      const launchApp = vi.fn(async () => undefined);
+      const saveSettings = vi.fn(mockGateway.saveSettings);
+      const user = userEvent.setup();
+      render(<App gateway={{
+        ...mockGateway,
+        getSettings: async () => ({ ...SYNTHETIC_SETTINGS, searchAppsByDefault: true }),
+        listApps: async () => [{ name, path, bundleId: null }],
+        launchApp, saveSettings,
+      }} />);
+      await user.type(screen.getByRole("searchbox"), query);
+      await screen.findByRole("option", { name: new RegExp(name) });
+      expect(screen.queryByRole("option", { name: /Keep Awake/ })).not.toBeInTheDocument();
+      await user.keyboard("{Enter}");
+      await waitFor(() => expect(launchApp).toHaveBeenCalledWith(path));
+      expect(saveSettings).not.toHaveBeenCalled();
+    },
+  );
+
+  it("leaves Keep Awake unchanged and shows an error when saving fails", async () => {
+    const user = userEvent.setup();
+    render(<App gateway={{
+      ...mockGateway,
+      saveSettings: vi.fn(async () => { throw new Error("unavailable"); }),
+    }} />);
+    await user.type(screen.getByRole("searchbox"), "keep awake");
+    await screen.findByRole("option", { name: "Turn on Keep Awake" });
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Keep Awake could not be changed");
+    expect(screen.getByRole("option", { name: "Turn on Keep Awake" })).toBeVisible();
+  });
+
   it("opens on its categories, and typing means the history", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -198,6 +256,49 @@ describe("the unified palette", () => {
         .getAllByRole("option")
         .filter((option) => option.hasAttribute("data-path")),
     ).toHaveLength(0);
+  });
+
+  it("searches applications by default on launch and on each summon", async () => {
+    let summon = () => {};
+    render(<App gateway={{
+      ...mockGateway,
+      getSettings: async () => ({ ...SYNTHETIC_SETTINGS, searchAppsByDefault: true }),
+      onPaletteSummoned: (listener) => { summon = listener; return () => {}; },
+    }} />);
+    await waitFor(() => expect(appsResults().getAllByRole("option").some(
+      (option) => option.hasAttribute("data-path"),
+    )).toBe(true));
+    await settleHistory();
+    act(() => summon());
+    await waitFor(() => expect(appsResults().getAllByRole("option").every(
+      (option) => option.hasAttribute("data-path"),
+    )).toBe(true));
+    fireEvent.keyDown(screen.getByRole("searchbox"), { key: "Escape" });
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "Synthetic Browser" } });
+    await waitFor(() => expect(appsResults().getAllByRole("option").every(
+      (option) => option.hasAttribute("data-path"),
+    )).toBe(true));
+  });
+
+  it("picks up a changed default on the next summon without restarting", async () => {
+    let summon = () => {};
+    let settings = { ...SYNTHETIC_SETTINGS };
+    render(<App gateway={{
+      ...mockGateway,
+      getSettings: async () => settings,
+      onPaletteSummoned: (listener) => { summon = listener; return () => {}; },
+    }} />);
+    await settleHistory();
+    settings = { ...settings, searchAppsByDefault: true };
+    act(() => summon());
+    await waitFor(() => expect(appsResults().getAllByRole("option").every(
+      (option) => option.hasAttribute("data-path"),
+    )).toBe(true));
+    settings = { ...settings, paletteModes: false };
+    act(() => summon());
+    await waitFor(() => expect(appsResults().getAllByRole("option").some(
+      (option) => !option.hasAttribute("data-path"),
+    )).toBe(true));
   });
 
   it("opens chat with the categories turned off, where there are no tiles", async () => {

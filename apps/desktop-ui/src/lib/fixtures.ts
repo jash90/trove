@@ -74,6 +74,8 @@ export const SYNTHETIC_SETTINGS: AppSettings = {
   denylistedApps: ["com.apple.Passwords", "com.apple.keychainaccess"],
   linkPreviews: true,
   paletteModes: true,
+  searchAppsByDefault: false,
+  keepAwake: false,
   dockIcon: false,
   language: "system",
   snapShortcuts: defaultSnapShortcuts(),

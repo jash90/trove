@@ -58,8 +58,8 @@ const stemOf = (app: AppEntry): string => {
  *
  * 6 — the query is the name's beginning
  * 5 — the query begins one of the name's words
- * 4 — the query begins the name's initials ("vsc" → "Visual Studio Code")
- * 3 — the query appears inside the name
+ * 4 — the query appears inside the name
+ * 3 — the query begins the name's initials ("vsc" → "Visual Studio Code")
  * 2 — the same first three steps against the bundle directory's name
  * 1 — the query's characters appear in the name in order ("chrm" → "Chrome"),
  *     or appear inside the bundle identifier
@@ -76,8 +76,8 @@ const scoreApp = (app: AppEntry, needle: string): MatchScore => {
   if (name.startsWith(needle)) return 6;
   const words = wordsOf(name);
   if (words.some((word) => word.startsWith(needle))) return 5;
-  if (initialsOf(words).startsWith(needle)) return 4;
-  if (name.includes(needle)) return 3;
+  if (name.includes(needle)) return 4;
+  if (initialsOf(words).startsWith(needle)) return 3;
 
   const stem = normalizeForSearch(stemOf(app));
   if (stem.startsWith(needle)) return 2;

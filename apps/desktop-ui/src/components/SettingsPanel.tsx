@@ -264,6 +264,11 @@ export const SettingsPanel = ({
   const [stats, setStats] = useState<StorageStatsContract | null>(null);
   const [linkPreviews, setLinkPreviews] = useState(true);
   const [paletteModes, setPaletteModes] = useState(true);
+  const [searchAppsByDefault, setSearchAppsByDefault] = useState(false);
+  const [keepAwake, setKeepAwake] = useState(false);
+  const keepAwakeDirty = useRef(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [loadError, setLoadError] = useState(false);
   const [dockIcon, setDockIcon] = useState(false);
   const [language, setLanguage] = useState<LanguagePreference>("system");
   const [snapShortcuts, setSnapShortcuts] =
@@ -369,6 +374,8 @@ export const SettingsPanel = ({
       setDenylist(settings.denylistedApps.join("\n"));
       setLinkPreviews(settings.linkPreviews);
       setPaletteModes(settings.paletteModes);
+      setSearchAppsByDefault(settings.searchAppsByDefault ?? false);
+      setKeepAwake(settings.keepAwake ?? false);
       setDockIcon(settings.dockIcon);
       setLanguage(settings.language);
       setSnapShortcuts({
@@ -376,11 +383,13 @@ export const SettingsPanel = ({
         ...settings.snapShortcuts,
       });
       setVaultUrl(settings.keyvault.url ?? "");
-    })();
+    })().catch(() => {
+      if (!cancelled) setLoadError(true);
+    });
     return () => {
       cancelled = true;
     };
-  }, [gateway]);
+  }, [gateway, loadAttempt]);
 
   // The storage figures and the shortcut's standing are facts about the
   // machine, not about this form: the history grows while the window is
@@ -438,7 +447,17 @@ export const SettingsPanel = ({
     try {
       void getCurrentWindow()
         .onFocusChanged(({ payload: focused }) => {
-          if (focused) refreshLive();
+          if (focused) {
+            refreshLive();
+            // The palette can change this preference while Settings stays mounted.
+            void gateway.getSettings().then((settings) => {
+              if (cancelled || keepAwakeDirty.current) return;
+              setKeepAwake(settings.keepAwake);
+              setPersisted((previous) => previous === null ? null : {
+                ...previous, keepAwake: settings.keepAwake,
+              });
+            }).catch(() => undefined);
+          }
         })
         .then((unlisten) => {
           if (cancelled) unlisten();
@@ -452,7 +471,7 @@ export const SettingsPanel = ({
       cancelled = true;
       stop?.();
     };
-  }, [refreshLive]);
+  }, [refreshLive, gateway]);
 
   // The form is noValidate on purpose: native constraint validation would
   // silently swallow the submit for an out-of-range number and the user would
@@ -522,6 +541,8 @@ export const SettingsPanel = ({
       denylistedApps: nextDenylist,
       linkPreviews,
       paletteModes,
+      searchAppsByDefault,
+      keepAwake,
       dockIcon,
       language,
       snapShortcuts: nextSnapShortcuts,
@@ -555,6 +576,8 @@ export const SettingsPanel = ({
       try {
         const stored = await gateway.saveSettings(next);
         setPersisted(stored);
+        setKeepAwake(stored.keepAwake);
+        keepAwakeDirty.current = false;
         setSaved(true);
       } catch {
         if (autostartChanged) {
@@ -755,7 +778,23 @@ export const SettingsPanel = ({
         </p>
 
         {persisted === null ? (
-          <p className="workflow-pending">{t("settings.loading")}</p>
+          <div>
+            {loadError ? (
+              <>
+                <p className="workflow-alert" role="alert">
+                  {t("settings.loadError")}
+                </p>
+                <button type="button" onClick={() => {
+                  setLoadError(false);
+                  setLoadAttempt((attempt) => attempt + 1);
+                }}>
+                  {t("settings.retry")}
+                </button>
+              </>
+            ) : (
+              <p className="workflow-pending">{t("settings.loading")}</p>
+            )}
+          </div>
         ) : (
           <form className="settings-form" noValidate onSubmit={handleSubmit}>
             {error ? (
@@ -919,6 +958,20 @@ export const SettingsPanel = ({
                       <Power size={14} aria-hidden="true" /> {t("settings.autostart")}
                     </span>
                   </label>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={keepAwake}
+                      onChange={(event) => {
+                        keepAwakeDirty.current = true;
+                        setKeepAwake(event.currentTarget.checked);
+                      }}
+                    />
+                    {t("settings.keepAwake")}
+                  </label>
+                  <p className="settings-help">
+                    {t("settings.keepAwake.help")}
+                  </p>
                   <label
                     className="settings-toggle"
                     htmlFor="settings-dock-icon"
@@ -1085,6 +1138,18 @@ export const SettingsPanel = ({
                   </label>
                   <p className="settings-help">
                     {t("settings.apps.paletteModes.help")}
+                  </p>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={searchAppsByDefault}
+                      disabled={!paletteModes}
+                      onChange={(event) => setSearchAppsByDefault(event.currentTarget.checked)}
+                    />
+                    {t("settings.apps.defaultSearch")}
+                  </label>
+                  <p className="settings-help">
+                    {t("settings.apps.defaultSearch.help")}
                   </p>
                   <label className="settings-field" htmlFor="settings-denylist">
                     <span>{t("settings.apps.denylist")}</span>

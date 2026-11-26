@@ -8,6 +8,7 @@ pub mod locale;
 pub mod log;
 pub mod maintenance;
 pub mod monitor;
+pub mod power;
 pub mod snap;
 pub mod startup;
 pub mod state;
@@ -143,6 +144,11 @@ pub fn run() {
             };
             // Read once, for everything below that depends on it.
             let settings = commands::launch_settings(&app_state.store);
+            let mut power = power::KeepAwake::default();
+            if let Err(error) = power.set_enabled(settings.keep_awake) {
+                log::log_line(&format!("keep-awake unavailable ({error})"));
+            }
+            app.manage(tokio::sync::Mutex::new(power));
             // The language setting before anything below draws a string.
             locale::set_preference(settings.language);
             // The menu bar is where this application exists on screen, so it
