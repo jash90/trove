@@ -84,6 +84,8 @@ const settings: AppSettings = {
   hotkey: "CommandOrControl+Space",
   autostart: false,
   paletteModes: true,
+  searchAppsByDefault: false,
+  keepAwake: false,
   dockIcon: false,
   retentionDays: 30,
   denylistedApps: [],

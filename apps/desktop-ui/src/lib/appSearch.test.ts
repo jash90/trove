@@ -14,6 +14,22 @@ const apps: AppEntry[] = [
 ];
 
 describe('filterApps', () => {
+  it('ranks a literal hyphenated prefix before contains matches', () => {
+    const catalog = ['Other sk-or', 'SK-OR Tool', 'Desk-orbit'].map((name) => ({
+      name, bundleId: null, path: `/Applications/${name}.app`,
+    }));
+    expect(filterApps(catalog, 'sk-or').map((app) => app.name)).toEqual([
+      'SK-OR Tool', 'Other sk-or', 'Desk-orbit',
+    ]);
+  });
+
+  it('ranks literal contains matches before initials', () => {
+    const catalog = ['Night Owl', 'Kenote'].map((name) => ({
+      name, bundleId: null, path: `/Applications/${name}.app`,
+    }));
+    expect(filterApps(catalog, 'no').map((app) => app.name)).toEqual(['Kenote', 'Night Owl']);
+  });
+
   it('keeps the backend order when the query is empty', () => {
     expect(filterApps(apps, '')).toEqual(apps);
     expect(filterApps(apps, '   ')).toEqual(apps);
@@ -117,8 +133,8 @@ describe('filterApps', () => {
     expect(results).toEqual([
       'Notebook Pro',
       'Zebra Notes',
-      'Night Owl',
       'Kenote',
+      'Night Owl',
       'Presentations',
       'Renato',
     ]);

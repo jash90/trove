@@ -100,6 +100,9 @@ export interface AppSettings {
    * answers both in one combined list (off).
    */
   paletteModes: boolean;
+  searchAppsByDefault: boolean;
+  keepAwake: boolean;
+  language?: string | null;
   /**
    * Whether the application shows a Dock tile (macOS).
    *

@@ -403,6 +403,8 @@ async fn settings_use_valid_defaults_and_persist_one_versioned_json_object() {
     assert!(!defaults.autostart);
     assert_eq!(defaults.retention_days, None);
     assert!(defaults.denylisted_apps.is_empty());
+    assert!(!defaults.keep_awake);
+    assert!(!defaults.search_apps_by_default);
 
     let requested = AppSettingsDto {
         schema_version: 1,
@@ -412,6 +414,9 @@ async fn settings_use_valid_defaults_and_persist_one_versioned_json_object() {
         denylisted_apps: vec!["com.example.synthetic".to_owned()],
         link_previews: false,
         palette_modes: false,
+        search_apps_by_default: true,
+        keep_awake: true,
+        language: None,
         dock_icon: true,
         keyvault: Default::default(),
         snap_shortcuts: trove_app::snap::defaults(),
@@ -445,6 +450,28 @@ async fn settings_use_valid_defaults_and_persist_one_versioned_json_object() {
 }
 
 #[tokio::test]
+async fn saved_language_is_accepted_and_preserved() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let mut saved = serde_json::to_value(AppSettingsDto::default()).unwrap();
+    saved["language"] = serde_json::json!("pl");
+    state
+        .store
+        .save_setting("app", &saved.to_string())
+        .await
+        .unwrap();
+    let settings = commands::get_settings_service(&state).await.unwrap();
+    commands::save_settings_service(&state, settings)
+        .await
+        .unwrap();
+    let stored = state.store.get_setting("app").unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stored).unwrap()["language"],
+        "pl"
+    );
+}
+
+#[tokio::test]
 async fn a_settings_row_written_before_palette_modes_still_reads_with_the_default() {
     // A row from the version before the setting existed carries no
     // `paletteModes` at all; reading it must answer with the default, not
@@ -464,6 +491,14 @@ async fn a_settings_row_written_before_palette_modes_still_reads_with_the_defaul
 
     let settings = commands::get_settings_service(&state).await.unwrap();
 
+    assert!(
+        !settings.keep_awake,
+        "upgrades must not prevent display sleep"
+    );
+    assert!(
+        !settings.search_apps_by_default,
+        "upgrades keep the existing search"
+    );
     assert!(settings.palette_modes, "modes are on until turned off");
     assert!(!settings.link_previews, "the fields the row did carry hold");
 }
@@ -527,6 +562,8 @@ async fn a_launch_reads_the_saved_settings_once_and_applies_all_of_them() {
         dock_icon: true,
         hotkey: "Control+Alt+7".to_owned(),
         snap_shortcuts: snaps.clone(),
+        keep_awake: true,
+        search_apps_by_default: true,
         ..AppSettingsDto::default()
     };
     commands::save_settings_service(&state, requested)
@@ -538,6 +575,8 @@ async fn a_launch_reads_the_saved_settings_once_and_applies_all_of_them() {
     assert!(launch.dock_icon);
     assert_eq!(launch.hotkey, "Control+Alt+7");
     assert_eq!(launch.snap_shortcuts, snaps);
+    assert!(launch.keep_awake);
+    assert!(launch.search_apps_by_default);
 }
 
 #[test]

@@ -31,6 +31,7 @@ pub const DEFAULT_SEARCH_RESULTS: u32 = 50;
 /// indexed terms, `?2` to `?4` the kind, app and pin filters, `?5` the
 /// candidate limit, `?6` the do-not-index mask, and `?7` the terms too short
 /// for the index as a JSON array, each of which must appear in the text.
+/// `?8` is the normalized literal query: prefix, contains, then token-only matches.
 macro_rules! ranked_search_sql {
     ($matched_candidates:literal) => {
         concat!(
@@ -40,7 +41,7 @@ macro_rules! ranked_search_sql {
      bounded_candidates AS MATERIALIZED (
        SELECT *
        FROM matched_candidates
-       ORDER BY lexical_score, captured_at_ms DESC, event_id DESC
+       ORDER BY match_tier, lexical_score, captured_at_ms DESC, event_id DESC
        LIMIT ?5
      ),
      candidate_content AS MATERIALIZED (
@@ -71,11 +72,11 @@ macro_rules! ranked_search_sql {
               WHERE a.content_id = candidate.content_id AND a.artifact_kind = 'thumbnail'
             ),
             candidate.lexical_score, usage.occurrence_count, usage.paste_count,
-            truncation.ranked_truncated, candidate.content_id
+            truncation.ranked_truncated, candidate.content_id, candidate.match_tier
      FROM bounded_candidates candidate
      JOIN candidate_usage usage ON usage.content_id = candidate.content_id
      CROSS JOIN truncation
-     ORDER BY candidate.lexical_score, candidate.captured_at_ms DESC, candidate.event_id DESC"
+     ORDER BY candidate.match_tier, candidate.lexical_score, candidate.captured_at_ms DESC, candidate.event_id DESC"
         )
     };
 }
@@ -84,7 +85,8 @@ macro_rules! ranked_search_sql {
 const INDEXED_SEARCH_SQL: &str = ranked_search_sql!(
     "SELECT he.event_id, he.global_id, c.kind, he.captured_at_ms, he.source_app_name,
             he.pinned, c.preview_text, c.byte_size, c.flags, c.content_id,
-            bm25(search_fts) AS lexical_score
+            bm25(search_fts) AS lexical_score,
+            CASE instr(search_fts.normalized_text, ?8) WHEN 1 THEN 0 WHEN 0 THEN 2 ELSE 1 END AS match_tier
      FROM search_fts
      JOIN content c ON c.content_id = search_fts.rowid
      JOIN history_event he ON he.content_id = c.content_id
@@ -107,20 +109,19 @@ const INDEXED_SEARCH_SQL: &str = ranked_search_sql!(
                  SELECT 1 FROM history_event pinned_member
                  WHERE pinned_member.content_id = c.content_id
                    AND pinned_member.pinned = ?4))
-     ORDER BY lexical_score, he.captured_at_ms DESC, he.event_id DESC
+     ORDER BY match_tier, lexical_score, he.captured_at_ms DESC, he.event_id DESC
      LIMIT (?5 + 1)"
 );
 
 /// Candidates for a query of only one- and two-character terms, which the
-/// trigram index cannot look up. The history is walked newest first and each
-/// text checked directly; a fragment that short is in most texts, so the
-/// walk fills the candidate limit and stops long before the end of a large
-/// history. Every candidate scores the same lexically — recency, use and pins
-/// rank them.
+/// trigram index cannot look up. Text is checked directly, with literal
+/// prefixes selected before newer contains matches. Within each match tier,
+/// recency, use and pins rank the bounded candidates.
 const SHORT_TERM_SEARCH_SQL: &str = ranked_search_sql!(
     "SELECT he.event_id, he.global_id, c.kind, he.captured_at_ms, he.source_app_name,
             he.pinned, c.preview_text, c.byte_size, c.flags, c.content_id,
-            0.0 AS lexical_score
+            0.0 AS lexical_score,
+            CASE instr(doc.normalized_text, ?8) WHEN 1 THEN 0 WHEN 0 THEN 2 ELSE 1 END AS match_tier
      FROM history_event he
      JOIN content c ON c.content_id = he.content_id
      JOIN search_doc doc ON doc.content_id = c.content_id
@@ -142,7 +143,7 @@ const SHORT_TERM_SEARCH_SQL: &str = ranked_search_sql!(
                  SELECT 1 FROM history_event pinned_member
                  WHERE pinned_member.content_id = c.content_id
                    AND pinned_member.pinned = ?4))
-     ORDER BY he.captured_at_ms DESC, he.event_id DESC
+     ORDER BY match_tier, he.captured_at_ms DESC, he.event_id DESC
      LIMIT (?5 + 1)"
 );
 
@@ -272,7 +273,7 @@ impl SearchStoreExt for StoreHandle {
             self,
             request.limit,
             &terms,
-            &parsed.filters,
+            &parsed,
             current_time_ms(),
             RankingWeights::default(),
         )
@@ -381,10 +382,11 @@ fn ranked_search(
     store: &StoreHandle,
     limit: u32,
     terms: &SearchTerms,
-    filters: &SearchFilters,
+    parsed: &ParsedQuery,
     now_ms: i64,
     weights: RankingWeights,
 ) -> Result<HistoryPage, SearchError> {
+    let filters = &parsed.filters;
     let kind = filters.kind.map(ContentKind::as_str);
     let app = filters.app.as_deref();
     let pinned = filters.pinned.map(i64::from);
@@ -409,7 +411,8 @@ fn ranked_search(
                     pinned,
                     candidate_limit,
                     do_not_index_mask,
-                    short_terms
+                    short_terms,
+                    parsed.text
                 ],
                 |row| {
                     Ok((
@@ -438,9 +441,9 @@ fn ranked_search(
         .map(|candidate| RankedItem::from_raw(candidate, weights, now_ms))
         .collect::<Result<Vec<_>, _>>()?;
     candidates.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
+        left.match_tier
+            .cmp(&right.match_tier)
+            .then_with(|| right.score.total_cmp(&left.score))
             .then_with(|| right.item.captured_at_ms.cmp(&left.item.captured_at_ms))
             .then_with(|| right.item.event_id.cmp(&left.item.event_id))
     });
@@ -472,6 +475,7 @@ struct RawHistoryItem {
 
 struct RawRankedItem {
     item: RawHistoryItem,
+    match_tier: u8,
     bm25: f64,
     occurrence_count: i64,
     paste_count: i64,
@@ -479,6 +483,7 @@ struct RawRankedItem {
 
 struct RankedItem {
     item: HistoryItem,
+    match_tier: u8,
     content_id: i64,
     score: f64,
 }
@@ -508,6 +513,7 @@ impl RankedItem {
             now_ms,
         );
         Ok(Self {
+            match_tier: raw.match_tier,
             item: convert_item(raw.item)?,
             content_id,
             score,
@@ -536,6 +542,7 @@ fn raw_history_item(row: &Row<'_>, content_id_index: usize) -> rusqlite::Result<
 fn raw_ranked_item(row: &Row<'_>) -> rusqlite::Result<RawRankedItem> {
     Ok(RawRankedItem {
         item: raw_history_item(row, 14)?,
+        match_tier: row.get(15)?,
         bm25: row.get(10)?,
         occurrence_count: row.get(11)?,
         paste_count: row.get(12)?,
@@ -720,7 +727,8 @@ mod sql_plan_tests {
                             Option::<i64>::None,
                             i64::try_from(MAX_RANKED_CANDIDATES).unwrap(),
                             i64::from(trove_core::ContentFlags::DO_NOT_INDEX.bits()),
-                            "[\"ab\"]"
+                            "[\"ab\"]",
+                            "synthetic"
                         ],
                         |row| row.get::<_, String>(3),
                     )?
@@ -759,14 +767,20 @@ mod sql_plan_tests {
     }
 
     #[test]
-    fn a_short_term_search_walks_the_timeline_instead_of_sorting_the_history() {
+    fn a_short_term_search_looks_up_documents_by_key_before_ranking() {
         let details = query_plan(SHORT_TERM_SEARCH_SQL);
+        // Prefix priority requires examining older rows before applying the cap;
+        // stopping at the newest matches would discard older literal prefixes.
         assert!(
             details
                 .iter()
-                .any(|detail| detail == "SCAN he USING INDEX idx_history_event_timeline"),
-            "the walk must follow the timeline index, so it can stop at the \
-             candidate limit rather than read the whole history: {details:?}"
+                .any(|detail| detail.starts_with("SEARCH doc USING INTEGER PRIMARY KEY")),
+            "each candidate must look up its document, not rescan search_doc: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("USE TEMP B-TREE FOR ORDER BY"))
         );
     }
 }

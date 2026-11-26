@@ -255,6 +255,11 @@ export const SettingsPanel = ({
   const [stats, setStats] = useState<StorageStatsContract | null>(null);
   const [linkPreviews, setLinkPreviews] = useState(true);
   const [paletteModes, setPaletteModes] = useState(true);
+  const [searchAppsByDefault, setSearchAppsByDefault] = useState(false);
+  const [keepAwake, setKeepAwake] = useState(false);
+  const keepAwakeDirty = useRef(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [loadError, setLoadError] = useState(false);
   const [dockIcon, setDockIcon] = useState(false);
   const [snapShortcuts, setSnapShortcuts] =
     useState<Record<string, string>>(defaultSnapShortcuts);
@@ -359,17 +364,21 @@ export const SettingsPanel = ({
       setDenylist(settings.denylistedApps.join("\n"));
       setLinkPreviews(settings.linkPreviews);
       setPaletteModes(settings.paletteModes);
+      setSearchAppsByDefault(settings.searchAppsByDefault ?? false);
+      setKeepAwake(settings.keepAwake ?? false);
       setDockIcon(settings.dockIcon);
       setSnapShortcuts({
         ...defaultSnapShortcuts(),
         ...settings.snapShortcuts,
       });
       setVaultUrl(settings.keyvault.url ?? "");
-    })();
+    })().catch(() => {
+      if (!cancelled) setLoadError(true);
+    });
     return () => {
       cancelled = true;
     };
-  }, [gateway]);
+  }, [gateway, loadAttempt]);
 
   // The storage figures and the shortcut's standing are facts about the
   // machine, not about this form: the history grows while the window is
@@ -427,7 +436,17 @@ export const SettingsPanel = ({
     try {
       void getCurrentWindow()
         .onFocusChanged(({ payload: focused }) => {
-          if (focused) refreshLive();
+          if (focused) {
+            refreshLive();
+            // The palette can change this preference while Settings stays mounted.
+            void gateway.getSettings().then((settings) => {
+              if (cancelled || keepAwakeDirty.current) return;
+              setKeepAwake(settings.keepAwake);
+              setPersisted((previous) => previous === null ? null : {
+                ...previous, keepAwake: settings.keepAwake,
+              });
+            }).catch(() => undefined);
+          }
         })
         .then((unlisten) => {
           if (cancelled) unlisten();
@@ -441,7 +460,7 @@ export const SettingsPanel = ({
       cancelled = true;
       stop?.();
     };
-  }, [refreshLive]);
+  }, [refreshLive, gateway]);
 
   // The form is noValidate on purpose: native constraint validation would
   // silently swallow the submit for an out-of-range number and the user would
@@ -511,6 +530,9 @@ export const SettingsPanel = ({
       denylistedApps: nextDenylist,
       linkPreviews,
       paletteModes,
+      searchAppsByDefault,
+      keepAwake,
+      language: persisted.language,
       dockIcon,
       snapShortcuts: nextSnapShortcuts,
       // Overrides over the device identity file, each independent of the
@@ -543,6 +565,8 @@ export const SettingsPanel = ({
       try {
         const stored = await gateway.saveSettings(next);
         setPersisted(stored);
+        setKeepAwake(stored.keepAwake);
+        keepAwakeDirty.current = false;
         setSaved(true);
       } catch {
         if (autostartChanged) {
@@ -744,7 +768,23 @@ export const SettingsPanel = ({
         </p>
 
         {persisted === null ? (
-          <p className="workflow-pending">Loading settings…</p>
+          <div>
+            {loadError ? (
+              <>
+                <p className="workflow-alert" role="alert">
+                  Settings could not be loaded. Your saved settings have not been changed.
+                </p>
+                <button type="button" onClick={() => {
+                  setLoadError(false);
+                  setLoadAttempt((attempt) => attempt + 1);
+                }}>
+                  Retry loading settings
+                </button>
+              </>
+            ) : (
+              <p className="workflow-pending">Loading settings…</p>
+            )}
+          </div>
         ) : (
           <form className="settings-form" noValidate onSubmit={handleSubmit}>
             {error ? (
@@ -908,6 +948,22 @@ export const SettingsPanel = ({
                       <Power size={14} aria-hidden="true" /> Launch at login
                     </span>
                   </label>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={keepAwake}
+                      onChange={(event) => {
+                        keepAwakeDirty.current = true;
+                        setKeepAwake(event.currentTarget.checked);
+                      }}
+                    />
+                    Keep the screen awake
+                  </label>
+                  <p className="settings-help">
+                    Prevent idle display sleep while Trove is running, even with
+                    the palette hidden. Saving applies this immediately on macOS.
+                    Turn it off or quit Trove to restore normal sleep. Uses more battery.
+                  </p>
                   <label
                     className="settings-toggle"
                     htmlFor="settings-dock-icon"
@@ -1060,9 +1116,24 @@ export const SettingsPanel = ({
                   <p className="settings-help">
                     On, the palette opens on three categories — Applications,
                     Clipboard history and the Key vault — picked with 1/2/3 or
-                    Tab, and typing means the history. Off, one combined list
-                    answers everything at once. Takes effect the next time the
+                    Tab. Typing searches clipboard history unless application
+                    search is selected below. Off, one combined list answers
+                    everything at once. Takes effect the next time the
                     palette is summoned.
+                  </p>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={searchAppsByDefault}
+                      disabled={!paletteModes}
+                      onChange={(event) => setSearchAppsByDefault(event.currentTarget.checked)}
+                    />
+                    Search applications by default
+                  </label>
+                  <p className="settings-help">
+                    Open Applications when the palette is summoned and search apps
+                    when typing from the categories. Clipboard history is still
+                    available with ⌘2. Requires categories to be enabled.
                   </p>
                   <label className="settings-field" htmlFor="settings-denylist">
                     <span>Bundle identifiers or executable names</span>

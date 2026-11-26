@@ -39,6 +39,8 @@ const persistedSettings: AppSettings = {
   hotkey: "CommandOrControl+Space",
   autostart: false,
   paletteModes: true,
+  searchAppsByDefault: false,
+  keepAwake: false,
   dockIcon: false,
   retentionDays: 30,
   denylistedApps: [],
@@ -89,6 +91,16 @@ describe("SettingsPanel in a hidden window", () => {
 
     expect(getStorageStats).toHaveBeenCalledTimes(1);
     expect(getShortcutStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes Keep Awake after a palette toggle", async () => {
+    const { gateway } = makeGateway();
+    render(<SettingsPanel gateway={gateway} />);
+    await screen.findByRole("textbox", { name: "Global shortcut" });
+    expect(screen.getByRole("checkbox", { name: "Keep the screen awake" })).not.toBeChecked();
+    vi.mocked(gateway.getSettings).mockResolvedValue({ ...persistedSettings, keepAwake: true });
+    await gainFocus();
+    expect(screen.getByRole("checkbox", { name: "Keep the screen awake" })).toBeChecked();
   });
 
   it("reads them again every time the window comes forward", async () => {

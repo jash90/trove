@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AppEntry, HistoryItem, KeyvaultSecret } from './contracts';
-import { buildPaletteItems, keyOfItem } from './paletteItems';
+import { buildPaletteItems, keyOfItem, matchesKeepAwake } from './paletteItems';
+
+it.each(['keep awake', 'KEEP   AWAKE', 'caff', 'amphetamine', 'nie usypiaj', 'blokuj wygaszanie', 'wyłącz usypianie', 'zapobiegaj uśpieniu'])(
+  'matches the Keep Awake alias %s', (query) => expect(matchesKeepAwake(query)).toBe(true),
+);
+it.each(['', ' ', 'k', 'notes', 'keep awake unrelated'])(
+  'does not offer Keep Awake for %s', (query) => expect(matchesKeepAwake(query)).toBe(false),
+);
 
 const app = (path: string): AppEntry => ({ name: path, bundleId: null, path });
 
@@ -23,6 +30,23 @@ const kindsOf = (items: readonly { kind: string }[]): string[] =>
   items.map((item) => item.kind);
 
 describe('buildPaletteItems', () => {
+  it('keeps clipboard prefixes ahead of contains-only applications in combined results', () => {
+    const items = buildPaletteItems(
+      [app('contains sk-or')],
+      [{ ...history(1), preview: 'SK-OR prefix' }, { ...history(2), preview: 'contains sk-or' }],
+      'sk-or',
+    );
+    expect(items.map(keyOfItem)).toEqual(['h1', 'contains sk-or', 'h2']);
+  });
+
+  it('keeps application prefixes ahead of contains-only clipboard entries', () => {
+    const items = buildPaletteItems(
+      [app('SK-OR first'), app('sk-or second')],
+      [{ ...history(1), preview: 'contains sk-or' }],
+      'sk-or',
+    );
+    expect(items.map(keyOfItem)).toEqual(['SK-OR first', 'sk-or second', 'h1']);
+  });
   it('with no query, applications come first and the history follows', () => {
     const items = buildPaletteItems([app('/a'), app('/b')], [history(1), history(2)], '');
 

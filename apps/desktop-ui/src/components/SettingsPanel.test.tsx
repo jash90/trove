@@ -46,6 +46,8 @@ const persistedSettings: AppSettings = {
   hotkey: "CommandOrControl+Space",
   autostart: false,
   paletteModes: true,
+  searchAppsByDefault: false,
+  keepAwake: false,
   dockIcon: false,
   retentionDays: 30,
   denylistedApps: ["com.acme.private"],
@@ -139,6 +141,30 @@ const heldBySystem: ShortcutStatus = {
   heldBySystem: true,
   releasedIds: [],
 };
+
+it("shows a load error and retries instead of loading forever", async () => {
+  const getSettings = vi.fn()
+    .mockRejectedValueOnce(new Error("invalid_settings"))
+    .mockResolvedValue(persistedSettings);
+  render(<SettingsPanel gateway={makeGateway({ getSettings })} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Settings could not be loaded");
+  expect(screen.queryByText("Loading settings…")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Retry loading settings" }));
+  await loadSettings();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("preserves a saved language preference when saving unrelated settings", async () => {
+  const saveSettings = vi.fn(async (settings: AppSettings) => settings);
+  render(<SettingsPanel gateway={makeGateway({
+    getSettings: async () => ({ ...persistedSettings, language: "pl" }),
+    saveSettings,
+  })} />);
+  await loadSettings();
+  await userEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  await waitFor(() => expect(saveSettings).toHaveBeenCalled());
+  expect(saveSettings.mock.calls[0]?.[0]).toMatchObject({ language: "pl" });
+});
 
 describe("the system shortcut standing on ours", () => {
   it("offers to free the chord, and reports what the system actually did", async () => {
@@ -495,6 +521,22 @@ describe("SettingsPanel validation and transactions", () => {
     );
     expect(screen.getByText(/saved: on/i)).toBeVisible();
     expect(screen.getByText(/system: off/i)).toBeVisible();
+  });
+
+  it("saves keep-awake and default application search preferences", async () => {
+    const saveSettings = vi.fn(async (settings: AppSettings) => settings);
+    const user = userEvent.setup();
+    render(<SettingsPanel gateway={makeGateway({ saveSettings })} />);
+    await loadSettings();
+    await user.click(screen.getByRole("checkbox", { name: "Keep the screen awake" }));
+    await user.click(screen.getByRole("tab", { name: "Apps" }));
+    await user.click(screen.getByRole("checkbox", { name: "Search applications by default" }));
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(saveSettings).toHaveBeenCalled());
+    expect(saveSettings.mock.calls[0]?.[0]).toMatchObject({
+      keepAwake: true,
+      searchAppsByDefault: true,
+    });
   });
 
   it("saves the Dock tile the user ticked", async () => {

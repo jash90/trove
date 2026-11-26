@@ -33,6 +33,7 @@ import { SNAP_SHORTCUTS, defaultSnapShortcuts } from "./lib/snapShortcuts";
 import { filterApps } from "./lib/appSearch";
 import {
   buildPaletteItems,
+  matchesKeepAwake,
   keyOfItem,
   type PaletteItem,
 } from "./lib/paletteItems";
@@ -145,6 +146,11 @@ const ClipboardPalette = (): React.JSX.Element => {
   // Whether the palette has modes at all — a setting, read below and
   // refreshed each time the palette comes back to the front.
   const [paletteModes, setPaletteModes] = useState(true);
+  const [searchAppsByDefault, setSearchAppsByDefault] = useState(false);
+  const [keepAwake, setKeepAwake] = useState<boolean | null>(null);
+  const [keepAwakePending, setKeepAwakePending] = useState(false);
+  const keepAwakeBusy = useRef(false);
+  const initialSettingsLoaded = useRef(false);
   // The snap chords as configured, so the Windows category shows what the
   // keyboard actually answers — including anything rebound in settings.
   const [snapChords, setSnapChords] =
@@ -195,7 +201,7 @@ const ClipboardPalette = (): React.JSX.Element => {
   const [summoningShortcut, setSummoningShortcut] = useState<string | null>(
     null,
   );
-  const refreshSettings = useCallback((): void => {
+  const refreshSettings = useCallback((resetMode = false): void => {
     // Defensive on the call as well as the promise: the palette has to open
     // whether or not the settings can be read, and a shortcut it does not know
     // costs a way of closing, not the window.
@@ -204,7 +210,16 @@ const ClipboardPalette = (): React.JSX.Element => {
         .getSettings()
         .then((settings) => {
           setSummoningShortcut(settings.hotkey);
+          if (!keepAwakeBusy.current) setKeepAwake(settings.keepAwake);
           setPaletteModes(settings.paletteModes);
+          setSearchAppsByDefault(settings.searchAppsByDefault ?? false);
+          if (resetMode) {
+            setMode(settings.searchAppsByDefault ? "apps" : "home");
+          }
+          if (!initialSettingsLoaded.current) {
+            initialSettingsLoaded.current = true;
+            if (settings.searchAppsByDefault) setMode("apps");
+          }
           setSnapChords({
             ...defaultSnapShortcuts(),
             ...settings.snapShortcuts,
@@ -285,11 +300,36 @@ const ClipboardPalette = (): React.JSX.Element => {
   };
 
   const paletteItems = useMemo<PaletteItem[]>(
-    () => buildPaletteItems(visibleApps, historyItems, query, visibleSecrets),
-    [visibleApps, historyItems, query, visibleSecrets],
+    () => {
+      const items = buildPaletteItems(visibleApps, historyItems, query, visibleSecrets);
+      if (matchesKeepAwake(query)) {
+        items.unshift({ kind: "command", enabled: keepAwake, pending: keepAwakePending });
+      }
+      return items;
+    },
+    [visibleApps, historyItems, query, visibleSecrets, keepAwake, keepAwakePending],
   );
 
   const handleActivate = (entry: PaletteItem): void => {
+    if (entry.kind === "command") {
+      if (keepAwakeBusy.current || entry.enabled === null) return;
+      keepAwakeBusy.current = true;
+      setKeepAwakePending(true);
+      setLaunchError(null);
+      void (async () => {
+        try {
+          const latest = await gateway.getSettings();
+          const saved = await gateway.saveSettings({ ...latest, keepAwake: !latest.keepAwake });
+          setKeepAwake(saved.keepAwake);
+        } catch {
+          setLaunchError("Keep Awake could not be changed. Try again.");
+        } finally {
+          keepAwakeBusy.current = false;
+          setKeepAwakePending(false);
+        }
+      })();
+      return;
+    }
     if (entry.kind === "app") {
       handleLaunch(entry.app.path);
     } else if (entry.kind === "vault") {
@@ -312,7 +352,9 @@ const ClipboardPalette = (): React.JSX.Element => {
     // refusal and its fix), and that answer belongs to the row and the
     // selection still on screen. With categories off there is nothing to
     // reset.
-    if (paletteModes && entry.kind !== "history") setMode("home");
+    if (paletteModes && entry.kind !== "history") {
+      setMode(searchAppsByDefault ? "apps" : "home");
+    }
   };
 
   const navigation = useListNavigation({
@@ -370,6 +412,8 @@ const ClipboardPalette = (): React.JSX.Element => {
         })()
       : selected === null
         ? undefined
+        : selected.kind === "command"
+          ? `command-option-${selectedIndex}`
         : selected.kind === "app"
           ? `app-option-${selectedIndex}`
           : selected.kind === "vault"
@@ -405,7 +449,8 @@ const ClipboardPalette = (): React.JSX.Element => {
   // a summon and keeps everything where it was.
   const handlePaletteSummoned = (): void => {
     if (modalOpen) return;
-    setMode("home");
+    setMode(searchAppsByDefault ? "apps" : "home");
+    refreshSettings(true);
     setHomeTileIndex(null);
     navigation.resetSelection();
     snapNavigation.resetSelection();
@@ -440,12 +485,12 @@ const ClipboardPalette = (): React.JSX.Element => {
     focusSearch();
   };
   const handleQueryChange = (nextQuery: string): void => {
-    // Typing from home means the history: the palette is a clipboard
-    // manager before it is anything else, and a query is the one answer
-    // that needs no category picked. Picking a tile first keeps any other
-    // meaning.
+    if (matchesKeepAwake(nextQuery) && !matchesKeepAwake(query)) {
+      navigation.setSelectedKey("command:keep-awake");
+    }
+    // An explicit category choice takes precedence over the default search.
     if (paletteModes && mode === "home" && nextQuery.trim() !== "") {
-      setMode("history");
+      setMode(searchAppsByDefault ? "apps" : "history");
     }
     setQuery(nextQuery);
     focusSearch();
@@ -714,9 +759,10 @@ const ClipboardPalette = (): React.JSX.Element => {
         <PaletteHeader
           query={query}
           mode={view}
+          searchAppsByDefault={searchAppsByDefault}
           activeDescendant={activeDescendant}
           resultCount={
-            visibleSecrets.length + visibleApps.length + historyItems.length
+            paletteItems.length
           }
           resultsTruncated={
             (view === "history" || view === "all") &&

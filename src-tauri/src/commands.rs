@@ -160,6 +160,13 @@ pub struct AppSettingsDto {
     /// serde so a settings row written before it existed still reads.
     #[serde(default = "default_palette_modes")]
     pub palette_modes: bool,
+    #[serde(default)]
+    pub search_apps_by_default: bool,
+    #[serde(default)]
+    pub keep_awake: bool,
+    /// Preserve the language preference written by localized builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     /// Whether the application shows a Dock tile.
     ///
     /// Off by default, which is what `LSUIElement` in `Info.plist` already
@@ -320,6 +327,9 @@ impl Default for AppSettingsDto {
             denylisted_apps: Vec::new(),
             link_previews: default_link_previews(),
             palette_modes: default_palette_modes(),
+            search_apps_by_default: false,
+            keep_awake: false,
+            language: None,
             dock_icon: default_dock_icon(),
             keyvault: KeyvaultSettingsDto::default(),
             snap_shortcuts: crate::snap::defaults(),
@@ -1727,7 +1737,30 @@ pub async fn save_settings_with_app<R: tauri::Runtime>(
     state: &AppState,
     settings: AppSettingsDto,
 ) -> Result<AppSettingsDto, String> {
-    let stored = save_settings_service(state, settings).await?;
+    // Serialize the system assertion with persistence and undo it on a failed save.
+    let power = app.try_state::<tokio::sync::Mutex<crate::power::KeepAwake>>();
+    let mut power = match power.as_ref() {
+        Some(power) => Some(power.lock().await),
+        None => None,
+    };
+    validate_settings_for_save(&settings)?;
+    let previous = power.as_ref().is_some_and(|power| power.enabled());
+    if let Some(power) = power.as_mut() {
+        power.set_enabled(settings.keep_awake)?;
+    } else if settings.keep_awake {
+        return Err("keep_awake_unavailable".to_owned());
+    }
+    let stored = match save_settings_service(state, settings).await {
+        Ok(stored) => stored,
+        Err(error) => {
+            if let Some(power) = power.as_mut()
+                && let Err(error) = power.set_enabled(previous)
+            {
+                crate::log::log_line(&format!("keep-awake rollback failed ({error})"));
+            }
+            return Err(error);
+        }
+    };
     if let (Some(active), Some(next)) = (
         app.try_state::<crate::hotkey::ActiveShortcut>(),
         crate::hotkey::parse_shortcut(&stored.hotkey),

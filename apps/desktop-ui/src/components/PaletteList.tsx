@@ -1,5 +1,6 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useEffect, useRef } from 'react';
+import { Coffee } from 'lucide-react';
 
 import { keyOfItem, type PaletteItem } from '../lib/paletteItems';
 import { AppRow } from './AppRow';
@@ -66,6 +67,32 @@ export const PaletteList = ({
             height: `${virtualItem.size}px`,
             transform: `translateY(${virtualItem.start}px)`,
           };
+          if (entry.kind === 'command') {
+            const label = entry.enabled ? 'Turn off Keep Awake' : 'Turn on Keep Awake';
+            return (
+              <div
+                key={keyOfItem(entry)}
+                id={`command-option-${virtualItem.index}`}
+                role="option"
+                aria-selected={keyOfItem(entry) === selectedKey}
+                aria-disabled={entry.pending || entry.enabled === null}
+                aria-label={label}
+                className={`history-row${keyOfItem(entry) === selectedKey ? ' is-selected' : ''}`}
+                style={style}
+                onClick={() => onSelect(entry)}
+                onDoubleClick={() => onActivate(entry)}
+              >
+                <span className="history-row__kind" aria-hidden="true"><Coffee size={17} /></span>
+                <span className="history-row__content">
+                  <span className="history-row__preview">{label}</span>
+                  <span className="history-row__metadata">
+                    {entry.pending ? 'Saving…' : entry.enabled === null ? 'State unavailable' : `Currently ${entry.enabled ? 'on' : 'off'} · Enter to toggle`}
+                    {' · Nie usypiaj / blokuj wygaszanie'}
+                  </span>
+                </span>
+              </div>
+            );
+          }
           if (entry.kind === 'app') {
             return (
               <AppRow

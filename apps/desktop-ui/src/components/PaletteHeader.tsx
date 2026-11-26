@@ -34,6 +34,7 @@ export const PALETTE_CHAT_CATEGORY = { key: "5", label: "Chat" } as const;
 interface PaletteHeaderProps {
   query: string;
   mode: PaletteView;
+  searchAppsByDefault?: boolean;
   /** The option id the field should point at, in either list. */
   activeDescendant?: string;
   resultCount: number;
@@ -61,6 +62,7 @@ interface PaletteHeaderProps {
 export const PaletteHeader = ({
   query,
   mode,
+  searchAppsByDefault = false,
   activeDescendant,
   resultCount,
   resultsTruncated,
@@ -75,7 +77,7 @@ export const PaletteHeader = ({
   const combined = mode === "all";
   const onHome = mode === "home";
   const searchLabel =
-    mode === "apps"
+    mode === "apps" || (onHome && searchAppsByDefault)
       ? "Search applications"
       : mode === "vault"
         ? "Search the vault"
@@ -83,7 +85,7 @@ export const PaletteHeader = ({
           ? "Arrange windows"
           : "Search history";
   const searchPlaceholder = onHome
-    ? "Search history, or pick a category…"
+    ? `Search ${searchAppsByDefault ? "applications" : "history"}, or pick a category…`
     : mode === "apps"
       ? "Search applications…"
       : mode === "vault"

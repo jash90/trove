@@ -1,16 +1,29 @@
 import type { AppEntry, HistoryItem, KeyvaultSecret } from './contracts';
+import { normalizeForSearch } from './appSearch';
 
 /** One selectable row of the palette, whatever kind of thing it opens. */
 export type PaletteItem =
+  | { kind: 'command'; enabled: boolean | null; pending: boolean }
   | { kind: 'app'; app: AppEntry }
   | { kind: 'vault'; secret: KeyvaultSecret }
   | { kind: 'history'; item: HistoryItem };
 
 export const keyOfItem = (entry: PaletteItem): string => {
+  if (entry.kind === 'command') return 'command:keep-awake';
   if (entry.kind === 'app') return entry.app.path;
   // Slugs are unique within a vault, and prefixed so they cannot collide with a history key.
   if (entry.kind === 'vault') return `v${entry.secret.slug}`;
   return `h${entry.item.eventId}`;
+};
+
+export const matchesKeepAwake = (query: string): boolean => {
+  const normalized = query.normalize('NFD').replace(/\p{M}/gu, '')
+    .replace(/ł/giu, 'l').trim().toLowerCase().replace(/\s+/gu, ' ');
+  return normalized.length >= 2 && [
+    'keep awake', 'caffeine', 'amphetamine', 'nie usypiaj',
+    'blokuj wygaszanie', 'nie wygaszaj ekranu', 'zapobiegaj uspieniu',
+    'wylacz usypianie', 'bez usypiania',
+  ].some((alias) => alias.startsWith(normalized));
 };
 
 /**
@@ -68,5 +81,15 @@ export const buildPaletteItems = (
       historyIndex += 1;
     }
   }
-  return merged;
+  if (apps.length === 0 || history.length === 0) return merged;
+  // A contains-only app must not displace a clipboard prefix in the combined view.
+  const needle = normalizeForSearch(query.trim());
+  const prefixRank = (entry: PaletteItem): number => {
+    const text = entry.kind === 'app' ? entry.app.name : entry.kind === 'history' ? entry.item.preview : '';
+    return normalizeForSearch(text).startsWith(needle) ? 0 : 1;
+  };
+  const results = merged.filter((entry) => entry.kind !== 'vault')
+    .sort((left, right) => prefixRank(left) - prefixRank(right));
+  let index = 0;
+  return merged.map((entry) => entry.kind === 'vault' ? entry : results[index++]!);
 };
