@@ -89,7 +89,6 @@ export const PaletteList = ({
                   <span className="history-row__preview">{label}</span>
                   <span className="history-row__metadata">
                     {entry.pending ? t('keepAwake.saving') : entry.enabled === null ? t('keepAwake.unavailable') : t(entry.enabled ? 'keepAwake.on' : 'keepAwake.off')}
-                    {' · Nie usypiaj / blokuj wygaszanie'}
                   </span>
                 </span>
               </div>

@@ -187,6 +187,7 @@ describe("the unified palette", () => {
       await user.type(screen.getByRole("searchbox"), query);
       const option = await screen.findByRole("option", { name: "Turn on Keep Awake" });
       expect(option).toHaveAttribute("aria-selected", "true");
+      expect(option).toHaveTextContent(/^Turn on Keep AwakeCurrently off · Enter to toggle$/);
       await user.keyboard("{Enter}");
       expect(await screen.findByRole("option", { name: "Turn off Keep Awake" })).toBeVisible();
       expect(settings.keepAwake).toBe(true);
@@ -195,6 +196,27 @@ describe("the unified palette", () => {
       expect(await screen.findByRole("option", { name: "Turn on Keep Awake" })).toBeVisible();
       expect(settings.keepAwake).toBe(false);
       expect(saveSettings).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([["ke", "Keynote"], ["ca", "Calendar"]])(
+    "launches the app for %s + Enter without changing Keep Awake", async (query, name) => {
+      const path = `/Applications/${name}.app`;
+      const launchApp = vi.fn(async () => undefined);
+      const saveSettings = vi.fn(mockGateway.saveSettings);
+      const user = userEvent.setup();
+      render(<App gateway={{
+        ...mockGateway,
+        getSettings: async () => ({ ...SYNTHETIC_SETTINGS, searchAppsByDefault: true }),
+        listApps: async () => [{ name, path, bundleId: null }],
+        launchApp, saveSettings,
+      }} />);
+      await user.type(screen.getByRole("searchbox"), query);
+      await screen.findByRole("option", { name: new RegExp(name) });
+      expect(screen.queryByRole("option", { name: /Keep Awake/ })).not.toBeInTheDocument();
+      await user.keyboard("{Enter}");
+      await waitFor(() => expect(launchApp).toHaveBeenCalledWith(path));
+      expect(saveSettings).not.toHaveBeenCalled();
     },
   );
 

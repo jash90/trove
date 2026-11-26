@@ -33,7 +33,7 @@ pub const DEFAULT_SEARCH_RESULTS: u32 = 50;
 /// for the index as a JSON array, each of which must appear in the text.
 /// `?8` is the normalized literal query: prefix, contains, then token-only matches.
 macro_rules! ranked_search_sql {
-    ($matched_candidates:literal) => {
+    ($matched_candidates:expr) => {
         concat!(
             "WITH matched_candidates AS MATERIALIZED (",
             $matched_candidates,
@@ -113,39 +113,57 @@ const INDEXED_SEARCH_SQL: &str = ranked_search_sql!(
      LIMIT (?5 + 1)"
 );
 
-/// Candidates for a query of only one- and two-character terms, which the
-/// trigram index cannot look up. Text is checked directly, with literal
-/// prefixes selected before newer contains matches. Within each match tier,
-/// recency, use and pins rank the bounded candidates.
-const SHORT_TERM_SEARCH_SQL: &str = ranked_search_sql!(
-    "SELECT he.event_id, he.global_id, c.kind, he.captured_at_ms, he.source_app_name,
-            he.pinned, c.preview_text, c.byte_size, c.flags, c.content_id,
-            0.0 AS lexical_score,
-            CASE instr(doc.normalized_text, ?8) WHEN 1 THEN 0 WHEN 0 THEN 2 ELSE 1 END AS match_tier
-     FROM history_event he
-     JOIN content c ON c.content_id = he.content_id
-     JOIN search_doc doc ON doc.content_id = c.content_id
-     WHERE NOT EXISTS (
-            SELECT 1 FROM history_event newer
-            WHERE newer.content_id = he.content_id
-              AND (newer.captured_at_ms, newer.event_id)
-                > (he.captured_at_ms, he.event_id))
-       AND NOT EXISTS (
-            SELECT 1 FROM json_each(?7) term
-            WHERE instr(doc.normalized_text, term.value) = 0)
-       AND (c.flags & ?6) = 0
-       AND (?2 IS NULL OR c.kind = ?2)
-       AND (?3 IS NULL
-            OR he.source_app_id COLLATE NOCASE = ?3 COLLATE NOCASE
-            OR he.source_app_name COLLATE NOCASE = ?3 COLLATE NOCASE)
-       AND (?4 IS NULL
-            OR EXISTS(
+/// Each short-query source is bounded before the shared ranking and usage fill.
+macro_rules! short_candidates_sql {
+    ($from:literal, $condition:literal) => {
+        concat!(
+            "SELECT he.event_id, he.global_id, c.kind, he.captured_at_ms, he.source_app_name,
+             he.pinned, c.preview_text, c.byte_size, c.flags, c.content_id,
+             0.0 AS lexical_score,
+             CASE instr(doc.normalized_text, ?8) WHEN 1 THEN 0 WHEN 0 THEN 2 ELSE 1 END AS match_tier
+             FROM ", $from, "
+             WHERE ", $condition, "
+             AND NOT EXISTS (
+                 SELECT 1 FROM history_event newer
+                 WHERE newer.content_id = he.content_id
+                   AND (newer.captured_at_ms, newer.event_id) > (he.captured_at_ms, he.event_id))
+             AND NOT EXISTS (
+                 SELECT 1 FROM json_each(?7) term
+                 WHERE instr(doc.normalized_text, term.value) = 0)
+             AND (c.flags & ?6) = 0
+             AND (?2 IS NULL OR c.kind = ?2)
+             AND (?3 IS NULL OR he.source_app_id COLLATE NOCASE = ?3 COLLATE NOCASE
+                            OR he.source_app_name COLLATE NOCASE = ?3 COLLATE NOCASE)
+             AND (?4 IS NULL OR EXISTS (
                  SELECT 1 FROM history_event pinned_member
-                 WHERE pinned_member.content_id = c.content_id
-                   AND pinned_member.pinned = ?4))
-     ORDER BY match_tier, he.captured_at_ms DESC, he.event_id DESC
-     LIMIT (?5 + 1)"
-);
+                 WHERE pinned_member.content_id = c.content_id AND pinned_member.pinned = ?4))
+             ORDER BY he.captured_at_ms DESC, he.event_id DESC
+             LIMIT (?5 + 1)"
+        )
+    };
+}
+
+// One/two-character prefixes use a compact expression index. The inclusive
+// upper bound covers even U+10FFFF as the second character of a one-letter prefix.
+const SHORT_TERM_SEARCH_SQL: &str = ranked_search_sql!(concat!(
+    "SELECT * FROM (",
+    short_candidates_sql!(
+        "search_doc doc INDEXED BY idx_search_doc_prefix
+         CROSS JOIN content c ON c.content_id = doc.content_id
+         CROSS JOIN history_event he ON he.content_id = c.content_id",
+        "substr(doc.normalized_text, 1, 2) BETWEEN substr(?8, 1, 2)
+             AND substr(?8, 1, 2) || char(1114111)
+         AND instr(doc.normalized_text, ?8) = 1"
+    ),
+    ") UNION SELECT * FROM (",
+    short_candidates_sql!(
+        "history_event he INDEXED BY idx_history_event_timeline
+         CROSS JOIN content c ON c.content_id = he.content_id
+         CROSS JOIN search_doc doc ON doc.content_id = c.content_id",
+        "1"
+    ),
+    ")"
+));
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -746,10 +764,8 @@ mod sql_plan_tests {
                     .iter()
                     .filter(|detail| detail.contains("CORRELATED SCALAR SUBQUERY"))
                     .count(),
-                4,
-                "exactly four probes may remain correlated: the thumbnail \
-                 existence probe, the representative-event probe, the \
-                 pinned-member probe, and the short-term probe"
+                if sql == SHORT_TERM_SEARCH_SQL { 7 } else { 4 },
+                "only thumbnail and per-source representative, pinned and short-term probes may remain"
             );
             assert!(
                 details
@@ -767,20 +783,32 @@ mod sql_plan_tests {
     }
 
     #[test]
-    fn a_short_term_search_looks_up_documents_by_key_before_ranking() {
+    fn a_short_term_search_uses_prefix_index_and_bounded_timeline() {
         let details = query_plan(SHORT_TERM_SEARCH_SQL);
-        // Prefix priority requires examining older rows before applying the cap;
-        // stopping at the newest matches would discard older literal prefixes.
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("SEARCH doc USING INDEX idx_search_doc_prefix")),
+            "prefix lookup must be indexed: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("SCAN he USING INDEX idx_history_event_timeline")),
+            "recent lookup must retain timeline order: {details:?}"
+        );
         assert!(
             details
                 .iter()
                 .any(|detail| detail.starts_with("SEARCH doc USING INTEGER PRIMARY KEY")),
             "each candidate must look up its document, not rescan search_doc: {details:?}"
         );
-        assert!(
-            details
-                .iter()
-                .any(|detail| detail.contains("USE TEMP B-TREE FOR ORDER BY"))
-        );
+        // No match-tier sort before LIMIT in either source: recent lookup can stop early.
+        let recent = SHORT_TERM_SEARCH_SQL
+            .split("UNION SELECT * FROM (")
+            .nth(1)
+            .unwrap();
+        let recent = recent.split("LIMIT (?5 + 1)").next().unwrap();
+        assert!(!recent.contains("ORDER BY match_tier"));
     }
 }

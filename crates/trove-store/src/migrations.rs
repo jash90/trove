@@ -9,7 +9,8 @@ const BLOB_REFERENCE_INDEX_MIGRATION: &str =
 const LINK_PREVIEW_MIGRATION: &str = include_str!("migrations/004_link_preview.sql");
 const LINK_PREVIEW_IMAGE_MIGRATION: &str = include_str!("migrations/005_link_preview_image.sql");
 const SEARCH_TRIGRAM_MIGRATION: &str = include_str!("migrations/006_search_trigram.sql");
-const LATEST_SCHEMA_VERSION: i64 = 6;
+const SEARCH_PREFIX_MIGRATION: &str = include_str!("migrations/007_search_prefix.sql");
+const LATEST_SCHEMA_VERSION: i64 = 7;
 /// The database format's own name, which is not the application's.
 ///
 /// Deliberately left behind by the rename to Trove. Every database already on
@@ -87,6 +88,10 @@ impl Migrations {
             transaction.execute_batch(SEARCH_TRIGRAM_MIGRATION)?;
             transaction.pragma_update(None, "user_version", 6_i64)?;
         }
+        if version < 7 {
+            transaction.execute_batch(SEARCH_PREFIX_MIGRATION)?;
+            transaction.pragma_update(None, "user_version", 7_i64)?;
+        }
         validate_schema_identity(&transaction)?;
         transaction.commit()?;
         Ok(())
@@ -133,7 +138,38 @@ mod tests {
     use super::{INITIAL_MIGRATION, migrations};
 
     #[test]
-    fn concurrent_independent_connections_upgrade_revision_six_once_without_data_loss() {
+    fn upgrading_version_six_adds_prefix_index_and_preserves_settings() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations().apply(&mut connection).unwrap();
+        connection
+            .execute_batch(
+                "DROP INDEX idx_search_doc_prefix;
+             PRAGMA user_version = 6;
+             INSERT INTO app_setting VALUES ('preferences', '{\"keepAwake\":true}', 1);",
+            )
+            .unwrap();
+        migrations().apply(&mut connection).unwrap();
+        migrations().apply(&mut connection).unwrap();
+        let settings: String = connection
+            .query_row(
+                "SELECT value_json FROM app_setting WHERE key = 'preferences'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(settings, r#"{"keepAwake":true}"#);
+        let count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'idx_search_doc_prefix'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn concurrent_independent_connections_upgrade_once_without_data_loss() {
         let directory = tempfile::tempdir().unwrap();
         let database_path = directory.path().join("history.sqlite");
         let connection = Connection::open(&database_path).unwrap();
@@ -181,7 +217,7 @@ mod tests {
             .query_row("SELECT value FROM migration_sentinel", [], |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         assert_eq!(revision, 6);
         assert_eq!(sentinel, "preserved");
     }

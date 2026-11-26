@@ -587,7 +587,7 @@ async fn ranked_search_rejects_a_recent_mode_cursor() {
 
 #[tokio::test]
 async fn literal_prefixes_beat_contains_and_token_matches_before_the_candidate_limit() {
-    for needle in ["sk-or", "needle", "ab", "lodz"] {
+    for needle in ["sk-or", "needle", "a", "ab", "lodz"] {
         let (_directory, store) = open_store();
         let prefix = if needle == "lodz" {
             "ŁÓDŹ oldest".to_owned()

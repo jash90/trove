@@ -19,7 +19,7 @@ export const keyOfItem = (entry: PaletteItem): string => {
 export const matchesKeepAwake = (query: string): boolean => {
   const normalized = query.normalize('NFD').replace(/\p{M}/gu, '')
     .replace(/ł/giu, 'l').trim().toLowerCase().replace(/\s+/gu, ' ');
-  return normalized.length >= 2 && [
+  return normalized.length >= 4 && [
     'keep awake', 'caffeine', 'amphetamine', 'nie usypiaj',
     'blokuj wygaszanie', 'nie wygaszaj ekranu', 'zapobiegaj uspieniu',
     'wylacz usypianie', 'bez usypiania',

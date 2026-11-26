@@ -6,7 +6,7 @@ import { buildPaletteItems, keyOfItem, matchesKeepAwake } from './paletteItems';
 it.each(['keep awake', 'KEEP   AWAKE', 'caff', 'amphetamine', 'nie usypiaj', 'blokuj wygaszanie', 'wyłącz usypianie', 'zapobiegaj uśpieniu'])(
   'matches the Keep Awake alias %s', (query) => expect(matchesKeepAwake(query)).toBe(true),
 );
-it.each(['', ' ', 'k', 'notes', 'keep awake unrelated'])(
+it.each(['', ' ', 'k', 'ke', 'ca', 'am', 'ni', 'bl', 'be', 'wy', 'za', 'caf', 'nie', 'notes', 'keep awake unrelated'])(
   'does not offer Keep Awake for %s', (query) => expect(matchesKeepAwake(query)).toBe(false),
 );
 
