@@ -416,8 +416,8 @@ async fn settings_use_valid_defaults_and_persist_one_versioned_json_object() {
         palette_modes: false,
         search_apps_by_default: true,
         keep_awake: true,
-        language: None,
         dock_icon: true,
+        language: trove_app::locale::Preference::Pl,
         keyvault: Default::default(),
         snap_shortcuts: trove_app::snap::defaults(),
     };
@@ -530,6 +530,53 @@ async fn a_settings_row_written_before_the_dock_icon_still_reads_with_the_defaul
         "the menu bar is where it lives until someone asks for the tile"
     );
     assert!(!settings.link_previews, "the fields the row did carry hold");
+}
+
+#[tokio::test]
+async fn a_settings_row_written_before_the_language_follows_the_system() {
+    // A row from before the setting existed carries no `language`. It must
+    // read as `system` — what every earlier version did — and not as a parse
+    // error that would bury every other setting beside it.
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let legacy = serde_json::json!({
+        "schemaVersion": 1,
+        "hotkey": "CommandOrControl+Space",
+        "autostart": false,
+        "retentionDays": null,
+        "denylistedApps": [],
+        "linkPreviews": false,
+        "paletteModes": true,
+        "dockIcon": true
+    })
+    .to_string();
+    state.store.save_setting("app", &legacy).await.unwrap();
+
+    let settings = commands::get_settings_service(&state).await.unwrap();
+
+    assert_eq!(settings.language, trove_app::locale::Preference::System);
+    assert!(settings.dock_icon, "the fields the row did carry hold");
+}
+
+#[tokio::test]
+async fn the_language_the_user_picked_survives_a_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::open_data_dir(directory.path()).unwrap();
+    let requested = AppSettingsDto {
+        language: trove_app::locale::Preference::En,
+        ..AppSettingsDto::default()
+    };
+
+    commands::save_settings_service(&state, requested)
+        .await
+        .unwrap();
+    drop(state);
+
+    let reopened = AppState::open_data_dir(directory.path()).unwrap();
+    assert_eq!(
+        commands::launch_settings(&reopened.store).language,
+        trove_app::locale::Preference::En
+    );
 }
 
 #[tokio::test]
@@ -839,6 +886,7 @@ fn generated_command_handler_registers_each_desktop_command_once_and_accepts_cam
             "hide_palette",
             "check_for_update",
             "install_update",
+            "get_locale",
         ]
     );
 

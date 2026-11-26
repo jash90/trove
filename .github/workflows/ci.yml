@@ -1,3 +1,5 @@
+# Manual fallback — builds/releases run locally with scripts/release.sh (see RELEASING.md).
+#
 # Runs the same gates the project is developed against, in the same order.
 #
 # macOS is the only runner: the application captures the clipboard through
@@ -6,10 +8,7 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}

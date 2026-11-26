@@ -11,6 +11,7 @@ import {
   PALETTE_CHAT_CATEGORY,
   type PaletteMode,
 } from "./PaletteHeader";
+import { t, type MessageKey } from "../i18n";
 
 interface CategoryTilesProps {
   onPick: (mode: PaletteMode) => void;
@@ -20,22 +21,22 @@ interface CategoryTilesProps {
   selectedIndex: number | null;
 }
 
-const TILE_META: Record<PaletteMode, { icon: typeof Vault; detail: string }> = {
+const TILE_META: Record<PaletteMode, { icon: typeof Vault; detail: MessageKey }> = {
   apps: {
     icon: AppWindowMac,
-    detail: "The whole installed catalog, searched as you type.",
+    detail: "category.apps.detail",
   },
   history: {
     icon: ClipboardList,
-    detail: "Everything this machine has copied, newest first.",
+    detail: "category.history.detail",
   },
   vault: {
     icon: Vault,
-    detail: "The keys your paired vault holds, by name.",
+    detail: "category.vault.detail",
   },
   windows: {
     icon: Move,
-    detail: "Move and arrange windows, the way Rectangle does.",
+    detail: "category.windows.detail",
   },
 };
 
@@ -55,7 +56,7 @@ export const CategoryTiles = ({
   <div
     className="palette-categories"
     role="group"
-    aria-label="Palette categories"
+    aria-label={t("category.groupLabel")}
   >
     {PALETTE_CATEGORIES.map(({ mode, key, label }, index) => {
       const { icon: Icon, detail } = TILE_META[mode];
@@ -72,7 +73,7 @@ export const CategoryTiles = ({
           </span>
           <span className="palette-category__body">
             <span className="palette-category__title">{label}</span>
-            <span className="palette-category__detail">{detail}</span>
+            <span className="palette-category__detail">{t(detail)}</span>
           </span>
           <kbd className="palette-category__key">{key}</kbd>
         </button>
@@ -94,7 +95,7 @@ export const CategoryTiles = ({
           {PALETTE_CHAT_CATEGORY.label}
         </span>
         <span className="palette-category__detail">
-          Talk to a model, in a window of its own.
+          {t("category.chat.detail")}
         </span>
       </span>
       <kbd className="palette-category__key">{PALETTE_CHAT_CATEGORY.key}</kbd>

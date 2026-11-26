@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { SNAP_SHORTCUTS } from "../lib/snapShortcuts";
 
 interface SnapListProps {
@@ -25,7 +26,7 @@ export const SnapList = ({
   <div
     className="palette-categories"
     role="listbox"
-    aria-label="Window arrangements"
+    aria-label={t("snap.listLabel")}
     id="snap-results"
   >
     {SNAP_SHORTCUTS.map(({ id, label }, index) => (
@@ -45,7 +46,7 @@ export const SnapList = ({
         <span className="palette-category__body">
           <span className="palette-category__title">{label}</span>
           <span className="palette-category__detail">
-            Moves the window you were working in.
+            {t("snap.detail")}
           </span>
         </span>
         <kbd className="palette-category__key">{chords[id] ?? ""}</kbd>

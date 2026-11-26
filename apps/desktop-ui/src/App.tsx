@@ -43,6 +43,7 @@ import {
   useGateway,
   type ClipboardGateway,
 } from "./lib/gateway";
+import { useT } from "./i18n";
 
 interface AppProps {
   gateway?: ClipboardGateway;
@@ -132,6 +133,7 @@ const shortcutIsBlocked = (
 
 const ClipboardPalette = (): React.JSX.Element => {
   const gateway = useGateway();
+  const t = useT();
   const { query, setQuery, status, refreshing, items } =
     useHistorySearch(gateway);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -234,6 +236,15 @@ const ClipboardPalette = (): React.JSX.Element => {
     refreshSettings();
   }, [refreshSettings]);
   const focusSearch = (): void => searchInputRef.current?.focus();
+  // Entering a category hands the caret back to the field. A tile is a
+  // button: picking one by mouse, or by Enter after Shift+Tab, leaves focus
+  // on it, and the tile unmounts with home — focus fell to the body and the
+  // first keystrokes in the new list went nowhere. Moved before the tile
+  // goes, so there is nothing for it to fall from.
+  const enterCategory = (next: PaletteMode): void => {
+    setMode(next);
+    focusSearch();
+  };
   useEffect(() => {
     searchInputRef.current?.focus();
   }, []);
@@ -296,7 +307,7 @@ const ClipboardPalette = (): React.JSX.Element => {
     // asked for did not start, so there is nothing to make way for.
     void gateway
       .launchApp(path)
-      .catch(() => setLaunchError("The application could not be started."));
+      .catch(() => setLaunchError(t("palette.error.launchFailed")));
   };
 
   const paletteItems = useMemo<PaletteItem[]>(
@@ -322,7 +333,7 @@ const ClipboardPalette = (): React.JSX.Element => {
           const saved = await gateway.saveSettings({ ...latest, keepAwake: !latest.keepAwake });
           setKeepAwake(saved.keepAwake);
         } catch {
-          setLaunchError("Keep Awake could not be changed. Try again.");
+          setLaunchError(t("keepAwake.error"));
         } finally {
           keepAwakeBusy.current = false;
           setKeepAwakePending(false);
@@ -340,7 +351,7 @@ const ClipboardPalette = (): React.JSX.Element => {
       void gateway
         .keyvaultCopySecret(entry.secret.slug)
         .catch(() =>
-          setLaunchError("That secret could not be copied from the vault."),
+          setLaunchError(t("palette.error.secretCopyFailed")),
         );
     } else {
       actions.copy(entry.item.eventId, "paste");
@@ -381,9 +392,9 @@ const ClipboardPalette = (): React.JSX.Element => {
       .snapWindow?.(id)
       .then((moved) => {
         if (moved) hideWindow();
-        else setLaunchError("That window could not be arranged.");
+        else setLaunchError(t("palette.error.snapFailed"));
       })
-      .catch(() => setLaunchError("That window could not be arranged."));
+      .catch(() => setLaunchError(t("palette.error.snapFailed")));
   };
 
   // The Windows category walks its rows with the same hook the lists use:
@@ -698,7 +709,9 @@ const ClipboardPalette = (): React.JSX.Element => {
       const category = PALETTE_CATEGORIES.find((entry) => entry.key === key);
       if (category) {
         event.preventDefault();
-        setMode(category.mode);
+        // Answered from anywhere in the palette, a tile or a row included —
+        // and the field is where the chosen list is driven from.
+        enterCategory(category.mode);
         return;
       }
     }
@@ -748,12 +761,12 @@ const ClipboardPalette = (): React.JSX.Element => {
     <main
       className="palette-stage"
       role="application"
-      aria-label="Clipboard palette"
+      aria-label={t("palette.stageLabel")}
       onKeyDown={handlePaletteKeyDown}
     >
       <section
         className="palette-shell"
-        aria-label="Trove palette"
+        aria-label={t("palette.shellLabel")}
         inert={modalOpen}
       >
         <PaletteHeader
@@ -775,7 +788,7 @@ const ClipboardPalette = (): React.JSX.Element => {
         />
         <PaletteWorkspace
           mode={view}
-          onPickCategory={setMode}
+          onPickCategory={enterCategory}
           onOpenChat={() =>
             void gateway.openChatWindow?.().catch(() => undefined)
           }
@@ -818,10 +831,13 @@ const ClipboardPalette = (): React.JSX.Element => {
         ) : null}
         <footer className="palette-footer">
           <span>
-            ↵ open · ⌘C copy · ⌘⇧V plain{paletteModes ? " · ⇥ mode" : ""}
+            {t("palette.footer.hints")}
+            {paletteModes ? t("palette.footer.modeHint") : ""}
             {summoningShortcut === null
               ? ""
-              : ` · ${shortcutHint(summoningShortcut)} summon`}
+              : t("palette.footer.summonHint", {
+                  shortcut: shortcutHint(summoningShortcut),
+                })}
           </span>
           {/* Out of the way but still visible: a shortcut nobody was told about
               is the same as no way in. */}
@@ -829,28 +845,28 @@ const ClipboardPalette = (): React.JSX.Element => {
             <button
               type="button"
               className="footer-action"
-              aria-label="Import an archive"
+              aria-label={t("palette.footer.importLabel")}
               onClick={() => setWorkspace("import")}
             >
-              Import <kbd>⌘I</kbd>
+              {t("palette.footer.import")} <kbd>⌘I</kbd>
             </button>
             <button
               type="button"
               className="footer-action"
-              aria-label="Open the chat window"
+              aria-label={t("palette.footer.chatLabel")}
               onClick={() =>
                 void gateway.openChatWindow?.().catch(() => undefined)
               }
             >
-              Chat <kbd>⌘K</kbd>
+              {t("palette.footer.chat")} <kbd>⌘K</kbd>
             </button>
             <button
               type="button"
               className="footer-action"
-              aria-label="Open settings"
+              aria-label={t("palette.footer.settingsLabel")}
               onClick={openSettings}
             >
-              Settings <kbd>⌘,</kbd>
+              {t("palette.footer.settings")} <kbd>⌘,</kbd>
             </button>
           </span>
         </footer>

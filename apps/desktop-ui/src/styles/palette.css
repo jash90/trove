@@ -1345,6 +1345,7 @@
 }
 
 .settings-field input,
+.settings-field select,
 .settings-field textarea {
   padding: 9px 11px;
   color: var(--ink);

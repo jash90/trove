@@ -4,6 +4,7 @@ pub mod export;
 pub mod hotkey;
 pub mod keyvault;
 pub mod links;
+pub mod locale;
 pub mod log;
 pub mod maintenance;
 pub mod monitor;
@@ -14,7 +15,28 @@ pub mod state;
 pub mod tray;
 pub mod updater;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+/// Puts the shell's language on the windows that have a title of their own.
+fn retitle_windows<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    for (label, title) in [
+        ("settings", locale::Text::SettingsWindowTitle),
+        ("chat", locale::Text::ChatWindowTitle),
+    ] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.set_title(locale::tr(title));
+        }
+    }
+}
+
+/// Carries a language change everywhere a string is drawn: the window
+/// titles, the menu bar item, and every window's interface, which hears it as
+/// `locale-changed` with the new code.
+pub fn apply_locale<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    retitle_windows(app);
+    tray::retext(app);
+    let _ = app.emit(locale::LOCALE_CHANGED_EVENT, locale::current().code());
+}
 
 /// Clears settings rows whose feature has been removed.
 ///
@@ -127,6 +149,8 @@ pub fn run() {
                 log::log_line(&format!("keep-awake unavailable ({error})"));
             }
             app.manage(tokio::sync::Mutex::new(power));
+            // The language setting before anything below draws a string.
+            locale::set_preference(settings.language);
             // The menu bar is where this application exists on screen, so it
             // starts with no Dock tile unless the settings row asks for one.
             // `LSUIElement` in Info.plist is what stops the tile appearing
@@ -172,6 +196,9 @@ pub fn run() {
             // The window spends most of its life hidden, so the menu bar is
             // where the application exists on screen. Failing to place it there
             // is not a reason to refuse to start.
+            // The window titles in tauri.conf.json are the English ones; the
+            // shell's language replaces them before any window is shown.
+            retitle_windows(app.handle());
             if let Err(error) = tray::install(app.handle(), control.clone()) {
                 log::log_line(&format!("menu bar item unavailable ({error})"));
             }

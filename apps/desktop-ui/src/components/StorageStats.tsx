@@ -4,6 +4,7 @@ import {
   validateStorageStats,
   type StorageStats as StorageStatsContract,
 } from '../lib/contracts';
+import { useT } from '../i18n';
 import { formatByteSize, formatCount } from '../lib/format';
 
 interface StorageStatsProps {
@@ -21,6 +22,7 @@ const safeStats = (stats: StorageStatsContract | null): StorageStatsContract | n
 };
 
 export const StorageStats = ({ stats, status }: StorageStatsProps): React.JSX.Element => {
+  const t = useT();
   const validated = safeStats(stats);
   const unavailable = status === 'unavailable' || (status === 'ready' && !validated);
 
@@ -29,29 +31,31 @@ export const StorageStats = ({ stats, status }: StorageStatsProps): React.JSX.El
       <div className="settings-section-heading">
         <span className="settings-section-icon" aria-hidden="true"><Database size={16} /></span>
         <div>
-          <span className="workflow-kicker">Local storage</span>
-          <h2 id="storage-stats-title">Data storage</h2>
+          <span className="workflow-kicker">{t('storage.kicker')}</span>
+          <h2 id="storage-stats-title">{t('storage.title')}</h2>
         </div>
       </div>
-      {status === 'loading' ? <p role="status">Calculating data size…</p> : null}
-      {unavailable ? <p role="status">Storage figures are unavailable.</p> : null}
+      {status === 'loading' ? <p role="status">{t('storage.loading')}</p> : null}
+      {unavailable ? <p role="status">{t('storage.unavailable')}</p> : null}
       {status === 'ready' && validated ? (
         <>
           <dl className="storage-ledger">
             <div>
-              <dt><Database size={14} aria-hidden="true" /> Main database file</dt>
+              <dt><Database size={14} aria-hidden="true" /> {t('storage.database')}</dt>
               <dd>{formatByteSize(validated.databaseBytes)}</dd>
             </div>
             <div>
-              <dt><FileArchive size={14} aria-hidden="true" /> Blobs the database references</dt>
+              <dt><FileArchive size={14} aria-hidden="true" /> {t('storage.blobs')}</dt>
               <dd>{formatByteSize(validated.blobBytes)}</dd>
             </div>
           </dl>
           <p className="settings-help">
-            The size of the main database file and the blobs it references; not the application's total disk use.
+            {t('storage.help')}
           </p>
           <p className="storage-counts">
-            {formatCount(validated.eventCount)} events · {formatCount(validated.contentCount)} contents
+            {t('storage.events', { count: validated.eventCount, n: formatCount(validated.eventCount) })}
+            {' · '}
+            {t('storage.contents', { count: validated.contentCount, n: formatCount(validated.contentCount) })}
           </p>
         </>
       ) : null}

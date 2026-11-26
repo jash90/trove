@@ -1,3 +1,4 @@
+import { useT } from '../i18n';
 import type { Preview } from '../lib/contracts';
 
 interface TextPreviewProps {
@@ -5,12 +6,13 @@ interface TextPreviewProps {
 }
 
 export const TextPreview = ({ preview }: TextPreviewProps): React.JSX.Element => {
-  const content = preview.text ?? 'Nothing to display';
+  const t = useT();
+  const content = preview.text ?? t('text.empty');
 
   if (preview.kind === 'file') {
     return (
       <div className="text-preview text-preview--file">
-        <span className="preview-label">File path</span>
+        <span className="preview-label">{t('text.filePath')}</span>
         <p>{content}</p>
       </div>
     );

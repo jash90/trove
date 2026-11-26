@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Runs the CI gates before anything leaves this machine. Opt in with:
+#
+#   git config core.hooksPath .githooks
+#
+# Skip once with `git push --no-verify`. Pushing only a tag (release.sh does
+# this after it already ran the gates) skips the check.
+set -euo pipefail
+
+only_tags=1
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  [[ $remote_ref == refs/tags/* ]] || only_tags=0
+done
+[[ $only_tags -eq 1 ]] && exit 0
+
+exec "$(git rev-parse --show-toplevel)/scripts/ci.sh"

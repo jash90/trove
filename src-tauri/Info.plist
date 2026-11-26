@@ -20,5 +20,16 @@
 	     turn those away. -->
 	<key>LSMultipleInstancesProhibited</key>
 	<true/>
+	<!-- The languages the interface is written in. Without this list macOS
+	     treats the bundle as English-only: the web view then reports English
+	     to the interface whatever the system language is, and the system's
+	     own panels (open/save dialogs, alerts) stay English too. -->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>pl</string>
+	</array>
 </dict>
 </plist>

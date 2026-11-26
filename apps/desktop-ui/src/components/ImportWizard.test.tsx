@@ -87,6 +87,7 @@ const settings: AppSettings = {
   searchAppsByDefault: false,
   keepAwake: false,
   dockIcon: false,
+  language: "system",
   retentionDays: 30,
   denylistedApps: [],
   linkPreviews: true,
@@ -123,7 +124,7 @@ describe("ImportWizard encrypted exports", () => {
     const field = await screen.findByLabelText("Export password");
     await user.type(field, SENTINEL_PASSWORD);
     await user.click(
-      screen.getByRole("button", { name: "Odszyfruj i przeanalizuj" }),
+      screen.getByRole("button", { name: "Decrypt and analyse" }),
     );
 
     expect(
@@ -157,7 +158,7 @@ describe("ImportWizard encrypted exports", () => {
       SENTINEL_PASSWORD,
     );
     await user.click(
-      screen.getByRole("button", { name: "Odszyfruj i przeanalizuj" }),
+      screen.getByRole("button", { name: "Decrypt and analyse" }),
     );
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -170,7 +171,7 @@ describe("ImportWizard encrypted exports", () => {
 
     await user.type(retry, "right");
     await user.click(
-      screen.getByRole("button", { name: "Odszyfruj i przeanalizuj" }),
+      screen.getByRole("button", { name: "Decrypt and analyse" }),
     );
 
     expect(
@@ -279,7 +280,7 @@ const chooseFile = async (
   await user.click(
     screen.getByRole("button", { name: "Choose an export file" }),
   );
-  await screen.findByRole("button", { name: "Rozpocznij import" });
+  await screen.findByRole("button", { name: "Start import" });
 };
 
 afterEach(() => {
@@ -331,7 +332,7 @@ describe("ImportWizard privacy and confirmation", () => {
     expect(container).not.toHaveTextContent(privatePath);
     expect(container).not.toHaveTextContent("fixture secret payload");
 
-    await user.click(screen.getByRole("button", { name: "Rozpocznij import" }));
+    await user.click(screen.getByRole("button", { name: "Start import" }));
     expect(
       await screen.findByRole("heading", { name: "Import complete" }),
     ).toBeVisible();
@@ -411,7 +412,7 @@ describe("ImportWizard privacy and confirmation", () => {
       "The prepared import could not be cancelled",
     );
     expect(
-      screen.getByRole("button", { name: "Rozpocznij import" }),
+      screen.getByRole("button", { name: "Start import" }),
     ).toBeVisible();
     expect(container).not.toHaveTextContent("/private/export.json");
     expect(onClose).not.toHaveBeenCalled();
@@ -461,7 +462,7 @@ describe("ImportWizard start recovery and polling", () => {
     render(<ImportWizard gateway={gateway} />);
     await chooseFile(user);
 
-    await user.click(screen.getByRole("button", { name: "Rozpocznij import" }));
+    await user.click(screen.getByRole("button", { name: "Start import" }));
 
     expect(
       await screen.findByRole("heading", { name: "The import did not finish" }),
@@ -487,7 +488,7 @@ describe("ImportWizard start recovery and polling", () => {
     );
     await chooseFile(user);
 
-    await user.click(screen.getByRole("button", { name: "Rozpocznij import" }));
+    await user.click(screen.getByRole("button", { name: "Start import" }));
 
     expect(
       await screen.findByRole("heading", { name: "Import complete" }),
@@ -514,7 +515,7 @@ describe("ImportWizard start recovery and polling", () => {
       screen.getByRole("button", { name: "Choose an export file" }),
     );
     await act(async () => Promise.resolve());
-    fireEvent.click(screen.getByRole("button", { name: "Rozpocznij import" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start import" }));
     await act(async () => Promise.resolve());
     expect(getImportStatus).toHaveBeenCalledOnce();
 
@@ -547,8 +548,8 @@ describe("ImportWizard start recovery and polling", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Choose an export file" }),
     );
-    await screen.findByRole("button", { name: "Rozpocznij import" });
-    fireEvent.click(screen.getByRole("button", { name: "Rozpocznij import" }));
+    await screen.findByRole("button", { name: "Start import" });
+    fireEvent.click(screen.getByRole("button", { name: "Start import" }));
     await waitFor(() => expect(getImportStatus).toHaveBeenCalledOnce());
     unmount();
 
@@ -570,7 +571,7 @@ describe("ImportWizard start recovery and polling", () => {
     );
     await chooseFile(user);
 
-    await user.click(screen.getByRole("button", { name: "Rozpocznij import" }));
+    await user.click(screen.getByRole("button", { name: "Start import" }));
 
     expect(
       await screen.findByRole("heading", { name: "The import did not finish" }),

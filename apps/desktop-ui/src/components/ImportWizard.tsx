@@ -7,6 +7,7 @@ import type {
   ImportSummary,
 } from "../lib/contracts";
 import type { ClipboardGateway } from "../lib/gateway";
+import { useT } from "../i18n";
 import { ImportAnalysis } from "./ImportAnalysis";
 import { ImportProgress as ImportProgressView } from "./ImportProgress";
 import { ImportSummary as ImportSummaryView } from "./ImportSummary";
@@ -31,10 +32,9 @@ type WizardPhase =
 
 // Every message here is a fixed literal. Gateway errors may embed a path or a
 // payload fragment, so their text never reaches the DOM.
-const ANALYSIS_ERROR =
-  "The archive could not be analysed. Check that the file or directory is a Raycast or SuperCmd export.";
-const DISCARD_ERROR = "The prepared import could not be cancelled. Try again.";
-const PASSWORD_ERROR = "The password does not match this file. Try again.";
+const ANALYSIS_ERROR = "import.error.analysis";
+const DISCARD_ERROR = "import.error.discard";
+const PASSWORD_ERROR = "import.error.password";
 
 /// The backend answers with a stable code, never a message.
 const PASSWORD_REQUIRED = "rayconfig_password_required";
@@ -56,6 +56,7 @@ export const ImportWizard = ({
   onClose,
   pollIntervalMs = 400,
 }: ImportWizardProps): React.JSX.Element => {
+  const t = useT();
   const [phase, setPhase] = useState<WizardPhase>({ tag: "idle" });
   const [progress, setProgress] = useState<ImportProgressContract | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -155,10 +156,10 @@ export const ImportWizard = ({
         const code = errorCode(cause);
         if (code !== PASSWORD_REQUIRED && code !== PASSWORD_INVALID) {
           setPhase({ tag: "idle" });
-          setError(ANALYSIS_ERROR);
+          setError(t(ANALYSIS_ERROR));
           return;
         }
-        setError(code === PASSWORD_INVALID ? PASSWORD_ERROR : null);
+        setError(code === PASSWORD_INVALID ? t(PASSWORD_ERROR) : null);
         const answer = await askForPassword();
         if (answer === null) {
           setPhase({ tag: "idle" });
@@ -201,7 +202,7 @@ export const ImportWizard = ({
       await gateway.discardImportAnalysis(analysis.analysisId);
     } catch {
       setPhase({ tag: "confirm", analysis });
-      setError(DISCARD_ERROR);
+      setError(t(DISCARD_ERROR));
       return;
     }
     // The prepared analysis is gone, so the dialog must not keep offering it.
@@ -265,15 +266,14 @@ export const ImportWizard = ({
       >
         <header className="workflow-dialog__header">
           <div>
-            <span className="workflow-kicker">Import lokalny</span>
-            <h1 id="import-dialog-title">Import history</h1>
+            <span className="workflow-kicker">{t("import.kicker")}</span>
+            <h1 id="import-dialog-title">{t("import.title")}</h1>
           </div>
         </header>
 
         <p id="import-dialog-description" className="workflow-warning">
           <ShieldAlert size={15} aria-hidden="true" />
-          The archive may hold sensitive data. Importing happens only on this
-          device, and nothing is sent anywhere.
+          {t("import.warning")}
         </p>
 
         {error ? (
@@ -291,7 +291,7 @@ export const ImportWizard = ({
               onClick={() => void analyze(() => gateway.chooseImportFile())}
             >
               <FileJson size={16} aria-hidden="true" />
-              Choose an export file
+              {t("import.chooseFile")}
             </button>
             <button
               type="button"
@@ -300,14 +300,14 @@ export const ImportWizard = ({
               }
             >
               <FolderOpen size={16} aria-hidden="true" />
-              Choose an export folder
+              {t("import.chooseFolder")}
             </button>
           </div>
         ) : null}
 
         {phase.tag === "analyzing" ? (
           <p className="workflow-pending" role="status">
-            Analysing the archive…
+            {t("import.analysing")}
           </p>
         ) : null}
 
@@ -320,29 +320,28 @@ export const ImportWizard = ({
             }}
           >
             <p className="workflow-note">
-              This export is encrypted. The password is used only to odczytania
-              — nie jest nigdzie zapisywane.
+              {t("import.password.note")}
             </p>
             <label className="workflow-field" htmlFor="rayconfig-password">
               <KeyRound size={15} aria-hidden="true" />
-              <span className="sr-only">Export password</span>
+              <span className="sr-only">{t("import.password.label")}</span>
               <input
                 ref={passwordInputRef}
                 id="rayconfig-password"
                 type="password"
                 autoComplete="off"
                 spellCheck={false}
-                placeholder="Export password"
-                aria-label="Export password"
+                placeholder={t("import.password.label")}
+                aria-label={t("import.password.label")}
                 autoFocus
               />
             </label>
             <div className="workflow-actions">
               <button type="submit" className="workflow-primary">
-                Odszyfruj i przeanalizuj
+                {t("import.password.submit")}
               </button>
               <button type="button" onClick={() => submitPassword(null)}>
-                Close
+                {t("import.close")}
               </button>
             </div>
           </form>
@@ -357,7 +356,7 @@ export const ImportWizard = ({
                 disabled={phase.tag === "cancelling"}
                 onClick={() => void cancel(phase.analysis)}
               >
-                {phase.tag === "cancelling" ? "Cancelling…" : "Cancel import"}
+                {phase.tag === "cancelling" ? t("import.cancelling") : t("import.cancel")}
               </button>
               <button
                 type="button"
@@ -365,7 +364,7 @@ export const ImportWizard = ({
                 disabled={phase.tag === "cancelling"}
                 onClick={() => void start(phase.analysis)}
               >
-                Rozpocznij import
+                {t("import.start")}
               </button>
             </div>
           </>
@@ -402,10 +401,9 @@ export const ImportWizard = ({
             className="import-failure"
             aria-labelledby="import-failure-title"
           >
-            <h2 id="import-failure-title">The import did not finish</h2>
+            <h2 id="import-failure-title">{t("import.failed.title")}</h2>
             <p>
-              The state of the run is unknown. Open the import again — repeating
-              the same archive creates no duplicates.
+              {t("import.failed.detail")}
             </p>
           </section>
         ) : null}
@@ -413,11 +411,11 @@ export const ImportWizard = ({
         <button
           type="button"
           className="workflow-dismiss"
-          aria-label="Close import"
+          aria-label={t("import.closeLabel")}
           onClick={requestClose}
         >
           <X size={16} aria-hidden="true" />
-          Close
+          {t("import.close")}
         </button>
       </div>
     </div>

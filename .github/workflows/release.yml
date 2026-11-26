@@ -1,11 +1,13 @@
+# Manual fallback — builds/releases run locally with scripts/release.sh (see RELEASING.md).
+#
 # Cuts a release from a tag: build, sign, notarise, staple, publish.
 #
 # This existed as a page of notes and a person following them, which is how
 # 0.4.11 lost two hours to a disk image left attached by a cancelled upload.
 # Every step below is one of those notes, in the order that works.
 #
-# The commit a tag points at is expected to be green: CI runs the gates on
-# every push to main, and tags are cut from main. This workflow therefore
+# The commit a tag points at is expected to be green: scripts/ci.sh runs the gates
+# before every release, and tags are cut from main. This workflow therefore
 # builds rather than re-tests, and fails loudly if signing or notarisation
 # does not hold.
 #
@@ -26,9 +28,7 @@
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
-  # So a failed publish can be retried without moving the tag.
+  # Manual only: pushing a tag must not trigger it, or it would race scripts/release.sh.
   workflow_dispatch:
     inputs:
       tag:

@@ -41,6 +41,7 @@ const settings: AppSettings = {
   searchAppsByDefault: false,
   keepAwake: false,
   dockIcon: false,
+  language: "system",
   retentionDays: null,
   denylistedApps: [],
   linkPreviews: true,

@@ -37,6 +37,8 @@ mod platform {
         message: &str,
         detail: &str,
         offer_data_folder: bool,
+        show_data_folder_label: &str,
+        quit_label: &str,
     ) -> StartupAlertChoice {
         let Some(mtm) = MainThreadMarker::new() else {
             return StartupAlertChoice::Quit;
@@ -51,9 +53,9 @@ mod platform {
         alert.setMessageText(&NSString::from_str(message));
         alert.setInformativeText(&NSString::from_str(detail));
         if offer_data_folder {
-            alert.addButtonWithTitle(&NSString::from_str("Show data folder"));
+            alert.addButtonWithTitle(&NSString::from_str(show_data_folder_label));
         }
-        alert.addButtonWithTitle(&NSString::from_str("Quit"));
+        alert.addButtonWithTitle(&NSString::from_str(quit_label));
         let response = alert.runModal();
         if offer_data_folder && response == NSAlertFirstButtonReturn {
             StartupAlertChoice::ShowDataFolder

@@ -1,3 +1,5 @@
+import { useT, type MessageKey } from '../i18n';
+
 type FilterId = 'all' | 'text' | 'link' | 'image' | 'file' | 'pinned';
 
 interface TypeFilterProps {
@@ -7,17 +9,17 @@ interface TypeFilterProps {
 
 interface FilterDefinition {
   id: FilterId;
-  label: string;
+  labelKey: MessageKey;
   token: string | null;
 }
 
 const FILTERS: FilterDefinition[] = [
-  { id: 'all', label: 'All', token: null },
-  { id: 'text', label: 'Text', token: 'type:text' },
-  { id: 'link', label: 'Links', token: 'type:link' },
-  { id: 'image', label: 'Images', token: 'type:image' },
-  { id: 'file', label: 'Files', token: 'type:file' },
-  { id: 'pinned', label: 'Pinned', token: 'is:pinned' },
+  { id: 'all', labelKey: 'filter.all', token: null },
+  { id: 'text', labelKey: 'filter.text', token: 'type:text' },
+  { id: 'link', labelKey: 'filter.link', token: 'type:link' },
+  { id: 'image', labelKey: 'filter.image', token: 'type:image' },
+  { id: 'file', labelKey: 'filter.file', token: 'type:file' },
+  { id: 'pinned', labelKey: 'filter.pinned', token: 'is:pinned' },
 ];
 
 const FILTER_TOKEN_PATTERN = /(^|\s)(?:type:(?:text|link|image|file|color|code|html)|is:pinned)(?=\s|$)/giu;
@@ -48,12 +50,13 @@ export const TypeFilter = ({
   query,
   onQueryChange,
 }: TypeFilterProps): React.JSX.Element => {
+  const t = useT();
   const activeFilter = activeFilterForQuery(query);
 
   return (
     <div className="type-filter">
       <label className="sr-only" htmlFor="history-type-filter">
-        Type filter
+        {t('filter.label')}
       </label>
       <select
         id="history-type-filter"
@@ -68,10 +71,10 @@ export const TypeFilter = ({
       >
         {/* Only reachable when the query carries an operator with no control of
             its own; picking anything else replaces it. */}
-        {activeFilter === null ? <option value="">Custom filter</option> : null}
+        {activeFilter === null ? <option value="">{t('filter.custom')}</option> : null}
         {FILTERS.map((filter) => (
           <option key={filter.id} value={filter.id}>
-            {filter.label}
+            {t(filter.labelKey)}
           </option>
         ))}
       </select>

@@ -2,6 +2,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { useEffect, useRef } from 'react';
 import { Coffee } from 'lucide-react';
 
+import { useT } from '../i18n';
 import { keyOfItem, type PaletteItem } from '../lib/paletteItems';
 import { AppRow } from './AppRow';
 import { VaultRow } from './VaultRow';
@@ -27,6 +28,7 @@ export const PaletteList = ({
   onSelect,
   onActivate,
 }: PaletteListProps): React.JSX.Element => {
+  const t = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
     count: items.length,
@@ -52,7 +54,7 @@ export const PaletteList = ({
       ref={scrollRef}
       id="history-results"
       role="listbox"
-      aria-label="Applications, secrets and history results"
+      aria-label={t('list.label')}
       className="history-list"
     >
       <div
@@ -68,7 +70,7 @@ export const PaletteList = ({
             transform: `translateY(${virtualItem.start}px)`,
           };
           if (entry.kind === 'command') {
-            const label = entry.enabled ? 'Turn off Keep Awake' : 'Turn on Keep Awake';
+            const label = t(entry.enabled ? 'keepAwake.disable' : 'keepAwake.enable');
             return (
               <div
                 key={keyOfItem(entry)}
@@ -86,7 +88,7 @@ export const PaletteList = ({
                 <span className="history-row__content">
                   <span className="history-row__preview">{label}</span>
                   <span className="history-row__metadata">
-                    {entry.pending ? 'Saving…' : entry.enabled === null ? 'State unavailable' : `Currently ${entry.enabled ? 'on' : 'off'} · Enter to toggle`}
+                    {entry.pending ? t('keepAwake.saving') : entry.enabled === null ? t('keepAwake.unavailable') : t(entry.enabled ? 'keepAwake.on' : 'keepAwake.off')}
                     {' · Nie usypiaj / blokuj wygaszanie'}
                   </span>
                 </span>

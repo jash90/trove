@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 
+import { t } from '../i18n';
 import type { CopyMode, HistoryItem } from '../lib/contracts';
 import type { ClipboardGateway } from '../lib/gateway';
 
@@ -8,28 +9,28 @@ export type HistoryActionIntent = 'copy' | 'paste' | 'pastePlain';
 const copyFeedback = (mode: CopyMode, intent: HistoryActionIntent): string => {
   if (mode === 'pasted') {
     return intent === 'pastePlain'
-      ? 'Pasted as plain text.'
-      : 'Pasted the selected entry.';
+      ? t('feedback.pastedPlain')
+      : t('feedback.pasted');
   }
   if (mode === 'copied') {
     if (intent === 'paste') {
-      return 'Copied as a fallback — automatic pasting is unavailable.';
+      return t('feedback.copiedFallback');
     }
     if (intent === 'pastePlain') {
-      return 'Copied as plain text — automatic pasting is unavailable.';
+      return t('feedback.copiedPlainFallback');
     }
-    return 'Copied to the clipboard.';
+    return t('feedback.copied');
   }
   // The three refusals used to share one sentence, which made the one that has
   // a fix look the same as the two that do not. Only the first is something the
   // user can act on, and it is by far the most common.
   if (mode === 'copied_only_permission_required') {
-    return 'Copied. Pasting needs Accessibility permission.';
+    return t('feedback.needsPermission');
   }
   if (mode === 'copied_only_target_lost') {
-    return 'Copied. The window you were in is no longer there.';
+    return t('feedback.targetLost');
   }
-  return 'Copied. This system cannot paste automatically.';
+  return t('feedback.cannotPaste');
 };
 
 interface UseHistoryActionsOptions {
@@ -103,7 +104,7 @@ export const useHistoryActions = ({
         setFeedback(copyFeedback(result.mode, intent));
         setFeedbackMode(result.mode);
       })
-      .catch(() => report('The entry could not be copied.'));
+      .catch(() => report(t('feedback.copyFailed')));
   };
 
   const togglePin = (item: HistoryItem): void => {
@@ -118,7 +119,7 @@ export const useHistoryActions = ({
       .setPinned(eventId, nextPinned)
       .catch(() => {
         setPinOverrides((current) => ({ ...current, [eventId]: previousPinned }));
-        report('The pin could not be changed.');
+        report(t('feedback.pinFailed'));
       })
       .finally(() => setPinPendingId(null));
   };
@@ -144,11 +145,11 @@ export const useHistoryActions = ({
       .then(() => {
         setDeletedIds((current) => new Set([...current, eventId]));
         setDeleteTargetId(null);
-        report('Entry deleted from the history.');
+        report(t('feedback.deleted'));
       })
       .catch(() => {
         setDeleteTargetId(null);
-        report('The entry could not be deleted.');
+        report(t('feedback.deleteFailed'));
       })
       .finally(() => {
         setDeletePending(false);

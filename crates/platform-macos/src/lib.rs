@@ -7,6 +7,7 @@
 
 pub mod alert;
 pub mod icons;
+pub mod locale;
 pub mod markers;
 pub mod paste;
 pub mod pasteboard;

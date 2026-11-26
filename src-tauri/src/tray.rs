@@ -7,12 +7,13 @@
 //! the way.
 
 use tauri::{
-    AppHandle, Runtime,
+    AppHandle, Manager, Runtime,
     image::Image,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
+use crate::locale::{Text, tr};
 use crate::monitor::MonitorControl;
 
 const SHOW_ID: &str = "show";
@@ -26,16 +27,43 @@ const QUIT_ID: &str = "quit";
 /// One entry rather than a separate status line: the wording already answers
 /// "is it recording", and a second read-only row would only repeat it.
 pub fn pause_label(paused: bool) -> &'static str {
+    tr(pause_text(paused))
+}
+
+fn pause_text(paused: bool) -> Text {
     if paused {
-        "Resume capture"
+        Text::TrayResume
     } else {
-        "Pause capture"
+        Text::TrayPause
     }
 }
 
+/// The menu's entries, kept so a language change can retext them in place.
+struct TrayItems<R: Runtime> {
+    show: MenuItem<R>,
+    settings: MenuItem<R>,
+    pause: MenuItem<R>,
+    update: MenuItem<R>,
+    quit: MenuItem<R>,
+    control: MonitorControl,
+}
+
+/// Rewrites every entry in the current language. Nothing to do when the
+/// menu bar item never got installed.
+pub fn retext<R: Runtime>(app: &AppHandle<R>) {
+    let Some(items) = app.try_state::<TrayItems<R>>() else {
+        return;
+    };
+    let _ = items.show.set_text(tr(Text::TrayShow));
+    let _ = items.settings.set_text(tr(Text::TraySettings));
+    let _ = items.pause.set_text(pause_label(items.control.is_paused()));
+    let _ = items.update.set_text(tr(Text::TrayCheckForUpdates));
+    let _ = items.quit.set_text(tr(Text::TrayQuit));
+}
+
 pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, SHOW_ID, "Show history", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, SETTINGS_ID, "Settings…", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, SHOW_ID, tr(Text::TrayShow), true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, SETTINGS_ID, tr(Text::TraySettings), true, None::<&str>)?;
     let pause = MenuItem::with_id(
         app,
         PAUSE_ID,
@@ -43,8 +71,14 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri
         true,
         None::<&str>,
     )?;
-    let update = MenuItem::with_id(app, UPDATE_ID, "Check for updates…", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, QUIT_ID, "Quit", true, None::<&str>)?;
+    let update = MenuItem::with_id(
+        app,
+        UPDATE_ID,
+        tr(Text::TrayCheckForUpdates),
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(app, QUIT_ID, tr(Text::TrayQuit), true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&show, &settings, &pause, &update, &separator, &quit])?;
 
@@ -78,6 +112,14 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, control: MonitorControl) -> tauri
             }
         })
         .build(app)?;
+    app.manage(TrayItems {
+        show,
+        settings,
+        pause,
+        update,
+        quit,
+        control,
+    });
     Ok(())
 }
 
@@ -136,9 +178,14 @@ mod tests {
 
     #[test]
     fn the_pause_entry_says_what_pressing_it_will_do() {
-        // Reading "Wstrzymaj" tells the user it is recording now, so a separate
+        // Reading "Pause" tells the user it is recording now, so a separate
         // status row would only say the same thing twice.
-        assert_eq!(pause_label(false), "Pause capture");
-        assert_eq!(pause_label(true), "Resume capture");
+        use crate::locale::{Locale, text};
+        assert_eq!(text(Locale::En, pause_text(false)), "Pause capture");
+        assert_eq!(text(Locale::En, pause_text(true)), "Resume capture");
+        assert_eq!(
+            text(Locale::Pl, pause_text(false)),
+            "Wstrzymaj przechwytywanie"
+        );
     }
 }

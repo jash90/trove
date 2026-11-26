@@ -77,6 +77,7 @@ export const SYNTHETIC_SETTINGS: AppSettings = {
   searchAppsByDefault: false,
   keepAwake: false,
   dockIcon: false,
+  language: "system",
   snapShortcuts: defaultSnapShortcuts(),
   keyvault: { url: null, token: null, privateJwk: null },
 };

@@ -74,6 +74,7 @@ macro_rules! trove_command_registry {
             hide_palette => $crate::commands::hide_palette,
             check_for_update => $crate::updater::check_for_update,
             install_update => $crate::updater::install_update,
+            get_locale => $crate::commands::get_locale,
         }
     };
 }
@@ -164,9 +165,6 @@ pub struct AppSettingsDto {
     pub search_apps_by_default: bool,
     #[serde(default)]
     pub keep_awake: bool,
-    /// Preserve the language preference written by localized builds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub language: Option<String>,
     /// Whether the application shows a Dock tile.
     ///
     /// Off by default, which is what `LSUIElement` in `Info.plist` already
@@ -177,6 +175,12 @@ pub struct AppSettingsDto {
     /// before it existed still reads.
     #[serde(default = "default_dock_icon")]
     pub dock_icon: bool,
+    /// The interface language: `system` follows the preferred languages,
+    /// `en` and `pl` hold one regardless of them. Defaulted through serde so
+    /// a settings row written before it existed still reads, and reads as
+    /// the behaviour every earlier version had.
+    #[serde(default)]
+    pub language: crate::locale::Preference,
     /// Where the keyvault pane looks, when it is configured at all.
     ///
     /// Defaulted through serde so a settings row written before it existed
@@ -329,8 +333,8 @@ impl Default for AppSettingsDto {
             palette_modes: default_palette_modes(),
             search_apps_by_default: false,
             keep_awake: false,
-            language: None,
             dock_icon: default_dock_icon(),
+            language: crate::locale::Preference::default(),
             keyvault: KeyvaultSettingsDto::default(),
             snap_shortcuts: crate::snap::defaults(),
         }
@@ -626,6 +630,13 @@ pub async fn launch_app<R: tauri::Runtime>(
 #[tauri::command(rename_all = "camelCase")]
 pub fn hide_palette<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     crate::hotkey::hide_palette(&app);
+}
+
+/// The interface language, `"en"` or `"pl"`: the same answer the menu bar
+/// and the window titles use, so the windows never disagree with them.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_locale() -> &'static str {
+    crate::locale::current().code()
 }
 
 /// The side an application icon is rendered to. Double the ~31 CSS pixels
@@ -1802,6 +1813,13 @@ pub async fn save_settings_with_app<R: tauri::Runtime>(
         {
             let _ = settings.set_focus();
         }
+    }
+    // The language is held by the shell as much as by the windows: the menu
+    // bar and the window titles are drawn from it. All of them are retexted
+    // here, and every window is told, so nothing goes on speaking the old one
+    // until a relaunch.
+    if crate::locale::set_preference(stored.language) {
+        crate::apply_locale(app);
     }
     // The snap shortcuts are registered with the system exactly like the
     // summoning one, so saving swaps them live rather than at next launch.

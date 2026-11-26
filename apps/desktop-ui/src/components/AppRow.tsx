@@ -2,6 +2,7 @@ import { AppWindowMac } from 'lucide-react';
 import type { CSSProperties, MouseEventHandler } from 'react';
 
 import { useAppIcon } from '../hooks/useAppIcon';
+import { t } from '../i18n';
 import type { AppEntry } from '../lib/contracts';
 import { useGateway } from '../lib/gateway';
 
@@ -60,7 +61,7 @@ export const AppRow = ({
       id={`app-option-${index}`}
       role="option"
       aria-selected={selected}
-      aria-label={`Application: ${app.name}`}
+      aria-label={t('app.row.label', { name: app.name })}
       data-path={app.path}
       className={`history-row app-row${selected ? ' is-selected' : ''}`}
       style={style}
@@ -73,7 +74,7 @@ export const AppRow = ({
       <span className="history-row__content">
         <span className="history-row__preview">{app.name}</span>
         <span className="history-row__metadata">
-          <span>{app.bundleId ?? 'Application'}</span>
+          <span>{app.bundleId ?? t('app.row.fallback')}</span>
           {container ? <span>{container}</span> : null}
         </span>
       </span>

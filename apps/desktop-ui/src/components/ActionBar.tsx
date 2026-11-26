@@ -3,6 +3,7 @@ import { useRef, type KeyboardEventHandler } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useModalFocus } from '../hooks/useModalFocus';
+import { useT } from '../i18n';
 import type { CopyMode } from '../lib/contracts';
 
 interface ActionBarProps {
@@ -37,6 +38,7 @@ export const ActionBar = ({
   onConfirmDelete,
   onGrantPastePermission,
 }: ActionBarProps): React.JSX.Element => {
+  const t = useT();
   const cancelRef = useRef<HTMLButtonElement>(null);
   const deleteInvokerRef = useRef<HTMLButtonElement>(null);
   // A confirmed delete removes the row the invoker acted on, so the caller
@@ -77,14 +79,14 @@ export const ActionBar = ({
         aria-describedby="delete-confirmation-description"
         onKeyDown={handleDialogKeyDown}
       >
-        <span className="preview-label">Irreversible action</span>
-        <h2 id="delete-confirmation-title">Delete this entry from the history?</h2>
+        <span className="preview-label">{t('actions.delete.eyebrow')}</span>
+        <h2 id="delete-confirmation-title">{t('actions.delete.title')}</h2>
         <p id="delete-confirmation-description">
-          This entry cannot be restored.
+          {t('actions.delete.description')}
         </p>
         <div className="confirmation-sheet__actions">
           <button ref={cancelRef} type="button" disabled={deletePending} onClick={handleCancelDelete}>
-            Cancel deletion
+            {t('actions.delete.cancel')}
           </button>
           <button
             type="button"
@@ -92,7 +94,7 @@ export const ActionBar = ({
             disabled={deletePending}
             onClick={handleConfirmDelete}
           >
-            {deletePending ? 'Deleting…' : 'Delete permanently'}
+            {deletePending ? t('actions.delete.pending') : t('actions.delete.confirm')}
           </button>
         </div>
       </div>
@@ -101,38 +103,38 @@ export const ActionBar = ({
 
   return (
     <>
-      <div className="action-bar" aria-label="Actions for the selected entry">
-        <button type="button" aria-label="Paste or copy the entry" onClick={onPaste}>
+      <div className="action-bar" aria-label={t('actions.label')}>
+        <button type="button" aria-label={t('actions.paste.label')} onClick={onPaste}>
           <ClipboardCopy size={15} aria-hidden="true" />
-          <span>Paste</span>
+          <span>{t('actions.paste')}</span>
         </button>
         <button
           type="button"
-          aria-label="Copy as plain text"
+          aria-label={t('actions.plain.label')}
           onClick={onPastePlainText}
         >
           <Type size={15} aria-hidden="true" />
-          <span>Text</span>
+          <span>{t('actions.plain')}</span>
         </button>
         <button
           type="button"
-          aria-label={pinned ? 'Unpin entry' : 'Pin entry'}
+          aria-label={pinned ? t('actions.unpin.label') : t('actions.pin.label')}
           aria-pressed={pinned}
           disabled={pinPending}
           onClick={onTogglePin}
         >
           {pinned ? <PinOff size={15} aria-hidden="true" /> : <Pin size={15} aria-hidden="true" />}
-          <span>{pinned ? 'Unpin' : 'Pin'}</span>
+          <span>{pinned ? t('actions.unpin') : t('actions.pin')}</span>
         </button>
         <button
           ref={deleteInvokerRef}
           type="button"
           className="action-bar__delete"
-          aria-label="Delete entry"
+          aria-label={t('actions.delete.label')}
           onClick={onRequestDelete}
         >
           <Trash2 size={15} aria-hidden="true" />
-          <span>Delete</span>
+          <span>{t('actions.delete')}</span>
         </button>
       </div>
       {feedback ? (
@@ -147,7 +149,7 @@ export const ActionBar = ({
               onClick={onGrantPastePermission}
             >
               <ShieldCheck size={14} aria-hidden="true" />
-              <span>Open System Settings</span>
+              <span>{t('actions.openSystemSettings')}</span>
             </button>
           ) : null}
         </p>

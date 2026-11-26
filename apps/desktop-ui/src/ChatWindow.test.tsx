@@ -1,11 +1,12 @@
 import '@testing-library/jest-dom/vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ChatWindow, previewableLanguage, renderableMarkdown } from './ChatWindow';
 import type { ChatStreamEvent } from './lib/contracts';
 import { mockGateway, type ClipboardGateway } from './lib/gateway';
+import { setLocale } from './i18n';
 
 /// Streams like the core does: the listener the gateway registered, fed
 /// event by event, the way chat-delta/chat-done would arrive.
@@ -78,6 +79,22 @@ describe('renderableMarkdown', () => {
 });
 
 describe('ChatWindow', () => {
+  it('follows a language saved in settings without losing the conversation', async () => {
+    // The shell announces a saved language to every window; an open chat has
+    // to switch with it, and keep what was typed rather than remount.
+    const user = userEvent.setup();
+    render(<ChatWindow gateway={streamGateway()} />);
+    await user.type(screen.getByRole('textbox', { name: 'Message' }), 'draft');
+    expect(screen.getByPlaceholderText('Write to the model…')).toBeVisible();
+
+    try {
+      act(() => setLocale('pl'));
+      expect(screen.getByPlaceholderText('Napisz do modelu…')).toHaveValue('draft');
+    } finally {
+      act(() => setLocale('en'));
+    }
+  });
+
   it('sends a message and streams the answer into the log', async () => {
     const user = userEvent.setup();
     render(<ChatWindow gateway={streamGateway()} />);
